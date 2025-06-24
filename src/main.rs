@@ -2,6 +2,7 @@ mod utils;
 
 fn main() {
     is_well_formed_instr_test();
+    leptos::mount::mount_to_body(|| view! { <p>"Hello, world!"</p> })
 }
 
 ///testing is_well_formed_instr function
