@@ -17,6 +17,9 @@ jobs:
   build:
     name: Build
     runs-on: ${{ matrix.os }}
+    env:
+      # lock version of `trunk` to be installed by `cargo install` and cached
+      trunk_version: "0.21.14"
     strategy:
       matrix:
         include:
@@ -35,8 +38,8 @@ jobs:
           ~/.cache/
           target/
           dist/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - run: cargo install --version 0.21.14 trunk
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-trunk-${{ env.trunk_version }}
+    - run: cargo install --version ${{ env.trunk_version }} trunk
     - run: trunk build --release
 
   test:
