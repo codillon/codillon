@@ -16,8 +16,5 @@ pub fn is_well_formed_instr(s: &str) -> bool {
         Ok(b) => b,
         Err(_) => return false,
     };
-    match parser::parse::<Wat>(&buf) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    parser::parse::<Wat>(&buf).is_ok()
 }
