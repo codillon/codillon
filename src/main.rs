@@ -1,5 +1,5 @@
-use leptos::prelude::*;
+use codillon::frontend::index;
 
 fn main() {
-    leptos::mount::mount_to_body(|| view! { <p>"Hello, world!"</p> })
+    leptos::mount::mount_to_body(index::textbox::Textbox);
 }
