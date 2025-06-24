@@ -1,3 +1,13 @@
 //! This module contains the frontend components for index page.
 
-pub mod textbox;
+use leptos::prelude::*;
+
+mod boxlist;
+mod textbox;
+
+#[component]
+pub fn App() -> impl IntoView {
+    view! {
+        <boxlist::DynamicList initial_length=5/>
+    }
+}
