@@ -8,13 +8,20 @@ use leptos::prelude::*;
 #[component]
 pub fn textbox() -> impl IntoView {
     let (text, set_text) = signal("".to_string());
+
+    // Create a derived signal that memoizes the validation result
+    let is_valid = move || is_well_formed_instr(&text.get());
+
     let validation_class = move || {
-        if is_well_formed_instr(&text.get()) {
+        if is_valid() {
             "correct_form"
         } else {
             "incorrect_form"
         }
     };
+
+    const CORRECT_EMOJI: &str = "✅";
+    const INCORRECT_EMOJI: &str = "❌";
 
     view! {
         <input
@@ -26,7 +33,14 @@ pub fn textbox() -> impl IntoView {
             placeholder="Enter Some Instruction"
         />
         <div class={validation_class}>
-            "The instruction is: " {text}
+            {text}
+            {move || if is_valid() {
+                CORRECT_EMOJI
+            } else {
+                INCORRECT_EMOJI
+            }}
         </div>
+
+
     }
 }
