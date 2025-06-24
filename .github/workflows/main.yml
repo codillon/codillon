@@ -31,11 +31,16 @@ jobs:
     - uses: actions/cache@v4
       with:
         path: |
-          ~/.cargo/
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
           target/
           dist/
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - run: cargo install trunk
+    - uses: taiki-e/install-action@9ba3ac3fd006a70c6e186a683577abc1ccf0ff3a
+      with:
+        tool: trunk
     - run: trunk build --release
 
   test:
