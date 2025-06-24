@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 leptos = { version = "0.8.2", features = ["csr"] }
+wast = "235.0.0"
