@@ -22,15 +22,15 @@ pub fn is_well_formed_instr(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_is_well_formed_instr() {
         //well-formed instructions
-        assert_eq!(is_well_formed_instr("i32.add"), true);
-        assert_eq!(is_well_formed_instr("i32.const 5"), true);
+        assert!(is_well_formed_instr("i32.add"));
+        assert!(is_well_formed_instr("i32.const 5"));
         //not well-formed instructions
-        assert_eq!(is_well_formed_instr("i32.bogus"), false);
-        assert_eq!(is_well_formed_instr("i32.const"), false);
-        assert_eq!(is_well_formed_instr("i32.const x"), false);
-    }  
+        assert!(!is_well_formed_instr("i32.bogus"));
+        assert!(!is_well_formed_instr("i32.const"));
+        assert!(!is_well_formed_instr("i32.const x"));
+    }
 }
