@@ -1,3 +1,4 @@
+use leptos::prelude::*;
 mod utils;
 
 fn main() {
