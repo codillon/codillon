@@ -18,3 +18,19 @@ pub fn is_well_formed_instr(s: &str) -> bool {
     };
     parser::parse::<Wat>(&buf).is_ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_is_well_formed_instr() {
+        //well-formed instructions
+        assert_eq!(is_well_formed_instr("i32.add"), true);
+        assert_eq!(is_well_formed_instr("i32.const 5"), true);
+        //not well-formed instructions
+        assert_eq!(is_well_formed_instr("i32.bogus"), false);
+        assert_eq!(is_well_formed_instr("i32.const"), false);
+        assert_eq!(is_well_formed_instr("i32.const x"), false);
+    }  
+}
