@@ -14,7 +14,7 @@ pub fn textbox() -> impl IntoView {
             placeholder="Enter Some Text"
         />
         <p>
-            "The text is :" {text}
+            "The text is: " {text}
         </p>
     }
 }
