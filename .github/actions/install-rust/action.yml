@@ -3,7 +3,7 @@ description: 'Install a rust toolchain'
 
 inputs:
   toolchain:
-    description: 'Default toolchan to install'
+    description: 'Default toolchain to install'
     required: false
     default: 'stable'
 
