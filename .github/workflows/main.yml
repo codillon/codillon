@@ -40,7 +40,7 @@ jobs:
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
     - uses: taiki-e/install-action@9ba3ac3fd006a70c6e186a683577abc1ccf0ff3a
       with:
-        tool: trunk
+        tool: "trunk, wasm-bindgen"
     - run: trunk build --release
 
   test:
