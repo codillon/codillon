@@ -32,10 +32,11 @@ jobs:
       with:
         path: |
           ~/.cargo/
+          ~/.cache/
           target/
           dist/
         key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-    - run: cargo install trunk
+    - run: cargo install --version 0.21.14 trunk
     - run: trunk build --release
 
   test:
