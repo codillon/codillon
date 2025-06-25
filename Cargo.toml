@@ -5,4 +5,6 @@ edition = "2024"
 
 [dependencies]
 leptos = { version = "0.8.2", features = ["csr"] }
+wasm-tools = "1.235.0"
+wasmparser = "0.235.0"
 wast = "235.0.0"

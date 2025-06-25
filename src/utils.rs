@@ -1,9 +1,11 @@
-use wast::core::Instruction;
+use wast::Wat;
+use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
+use wasm_tools::parse_binary_wasm;
 
 /// Decides if a given string is a well-formed text-format Wasm instruction
 ///
-/// Uses ParseBuffer to convert string into single instruction buffer and parser to parse buffer
+/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Instruction
 ///
 /// # Parameters
 /// s: A string slice representing a Wasm instruction
@@ -24,6 +26,53 @@ pub fn is_well_formed_instr(s: &str) -> bool {
         Err(_) => return false,
     };
     parser::parse::<Instruction>(&buf).is_ok()
+}
+
+/// Decides if a given string is a well-formed text-format Wasm function
+///
+/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Module
+/// Encodes Module to binary Wasm and wasmparser parses binary Wasm
+///
+/// # Parameters
+/// s: A string slice representing a Wasm function
+///
+/// # Returns
+/// true: if the function is syntactically well-formed; false otherwise
+pub fn is_well_formed_func(lines: &str) -> bool {
+    let func = "(module \n(func\nblock\nend\n".to_string() + lines + "))";
+    println!("{}", func);
+    let buf = match ParseBuffer::new(&func) {
+        Ok(b) => b,
+        Err(_) => {
+            println!("cannot make buffer");
+            return false;
+        },
+    };
+
+    let wat = match parser::parse::<Wat>(&buf) {
+        Ok(w) => w,
+        Err(_) => return false,
+    };
+    let mut module = match wat {
+        Wat::Module(m) => m,
+        Wat::Component(_) => panic!("No components :("),
+    };
+    /*let mut module = match parser::parse::<Module>(&buf) {
+        Ok(m) => m,
+        Err(_) => {
+            println!("cannot parse as module");
+            return false;
+        },
+    };*/
+    let bin = match module.encode() {
+        Ok(b) => b,
+        Err(_) => {
+            println!("cannot encode to binary");
+            return false;
+        },
+    };
+    let parser = wasmparser::Parser::new(0);
+    parse_binary_wasm(parser, &bin).is_ok()
 }
 
 #[cfg(test)]
@@ -51,5 +100,11 @@ mod tests {
         //comments and empty lines are well-formed
         assert!(is_well_formed_instr(";;Hello"));
         assert!(is_well_formed_instr(""));
+    }
+
+    #[test]
+    fn test_is_well_formed_func() {
+        //well-formed function
+        assert!(is_well_formed_func(""));
     }
 }
