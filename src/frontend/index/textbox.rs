@@ -6,7 +6,7 @@ use leptos::prelude::*;
 /// ### Textbox Component
 /// This component provides a textbox for one instruction and use emoji to indicate correctness.
 #[component]
-pub fn textbox() -> impl IntoView {
+pub fn Textbox() -> impl IntoView {
     let (text, set_text) = signal("".to_string());
 
     // Create a derived signal that memoizes the validation result
