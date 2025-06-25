@@ -5,10 +5,11 @@ use leptos::prelude::*;
 
 /// ### Textbox Component
 /// This component provides a textbox for one instruction and use emoji to indicate correctness.
+///
+/// ### Parameters
+/// `text` the signal for the text of this textbox
 #[component]
-pub fn Textbox() -> impl IntoView {
-    let (text, set_text) = signal("".to_string());
-
+pub fn Textbox(text: RwSignal<String>) -> impl IntoView {
     // Create a derived signal that memoizes the validation result
     let is_valid = move || is_well_formed_instr(&text.get());
     const CORRECT_EMOJI: &str = "✅";
@@ -17,10 +18,7 @@ pub fn Textbox() -> impl IntoView {
     view! {
         <input
             type="text"
-            prop:value=text
-            on:input=move |ev| {
-                set_text.set(event_target_value(&ev));
-            }
+            bind:value=text
             placeholder="Enter Some Instruction"
         />
         {move || if is_valid() {
