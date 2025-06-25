@@ -1,7 +1,8 @@
 use wast::Wat;
-use wast::core::{Instruction, Module};
-use wast::parser::{self, ParseBuffer};
+use wast::core::Instruction;
+//use wast::core::Module;
 use wasm_tools::parse_binary_wasm;
+use wast::parser::{self, ParseBuffer};
 
 /// Decides if a given string is a well-formed text-format Wasm instruction
 ///
@@ -14,19 +15,14 @@ use wasm_tools::parse_binary_wasm;
 /// true: if the instruction is syntactically well-formed; false otherwise
 pub fn is_well_formed_instr(s: &str) -> bool {
     //get rid of comments
-    match s.find(";;") {
-        some(i) => &s[..i],
-        None => {},
-    };
-    //manually check for empty line and space only
-    if s.trim.is_empty() {
+    let s = s.split(";;").next().unwrap();
+    //get rid of spaces
+    let trimmed = s.trim();
+    //manually check for empty line
+    if trimmed.is_empty() {
         return true;
     }
-    //manually check for spaces at the beginning and end
-    if s.starts_with(" ") || s.ends_with(" ") {
-        return false;
-    }
-    let buf = match ParseBuffer::new(s) {
+    let buf = match ParseBuffer::new(trimmed) {
         Ok(b) => b,
         Err(_) => return false,
     };
@@ -51,7 +47,7 @@ pub fn is_well_formed_func(lines: &str) -> bool {
         Err(_) => {
             println!("cannot make buffer");
             return false;
-        },
+        }
     };
 
     let wat = match parser::parse::<Wat>(&buf) {
@@ -74,7 +70,7 @@ pub fn is_well_formed_func(lines: &str) -> bool {
         Err(_) => {
             println!("cannot encode to binary");
             return false;
-        },
+        }
     };
     let parser = wasmparser::Parser::new(0);
     parse_binary_wasm(parser, &bin).is_ok()
@@ -93,22 +89,19 @@ mod tests {
         assert!(!is_well_formed_instr("i32.bogus"));
         assert!(!is_well_formed_instr("i32.const"));
         assert!(!is_well_formed_instr("i32.const x"));
-        //not well-formed "instructions": multiple instructions per line, folded instructions,
-        //spaces before and after
+        //not well-formed "instructions": multiple instructions per line, folded instructions
         assert!(!is_well_formed_instr("i32.const 4 i32.const 5"));
         assert!(!is_well_formed_instr("(i32.const 4)"));
         assert!(!is_well_formed_instr(
             "(i32.add (i32.const 4) (i32.const 5))"
         ));
-        assert!(!is_well_formed_instr("    i32.const 5"));
-        assert!(!is_well_formed_instr("i32.const 5     "));
-        //comments and empty lines are well-formed
+        //spaces before and after, comments, and empty lines are well-formed
+        assert!(is_well_formed_instr("    i32.const 5"));
+        assert!(is_well_formed_instr("i32.const 5     "));
         assert!(is_well_formed_instr(";;Hello"));
-        assert!(is_well_formed_instr(""));
-        assert!(is_well_formed_instr("i32.const 5    ;;Hello"));
+        assert!(is_well_formed_instr("i32.const 5   ;;this is a const"));
         assert!(is_well_formed_instr(""));
     }
-
     #[test]
     fn test_is_well_formed_func() {
         //well-formed function
