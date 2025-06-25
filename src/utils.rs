@@ -11,8 +11,8 @@ use wast::parser::{self, ParseBuffer};
 /// # Returns
 /// true: if the instruction is syntactically well-formed; false otherwise
 pub fn is_well_formed_instr(s: &str) -> bool {
-    //get rid of comments
-    let s = s.split(";;").next().unwrap();
+    //get rid of comments (clippy says not to use nth...)
+    let s = s.split(";;").next().expect("Internal Error");
     //get rid of spaces
     let trimmed = s.trim();
     //manually check for empty line
