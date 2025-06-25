@@ -11,15 +11,17 @@ use wast::parser::{self, ParseBuffer};
 /// # Returns
 /// true: if the instruction is syntactically well-formed; false otherwise
 pub fn is_well_formed_instr(s: &str) -> bool {
-    //get rid of comments (clippy says not to use nth...)
-    let s = s.split(";;").next().expect("Internal Error");
-    //get rid of spaces
-    let trimmed = s.trim();
+    //get rid of comments and spaces (clippy says not to use nth...)
+    let s = s
+        .split(";;")
+        .next()
+        .expect("Split unexpectedly produced empty iterator")
+        .trim();
     //manually check for empty line
-    if trimmed.is_empty() {
+    if s.is_empty() {
         return true;
     }
-    let buf = match ParseBuffer::new(trimmed) {
+    let buf = match ParseBuffer::new(s) {
         Ok(b) => b,
         Err(_) => return false,
     };
