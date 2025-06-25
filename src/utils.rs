@@ -11,11 +11,8 @@ use wast::parser::{self, ParseBuffer};
 /// # Returns
 /// true: if the instruction is syntactically well-formed; false otherwise
 pub fn is_well_formed_instr(s: &str) -> bool {
-    let mut s = s;
     //get rid of comments
-    if let Some(i) = s.find(";;") {
-        s = &s[..i];
-    }
+    let s = s.split(";;").next().unwrap();
     //get rid of spaces
     let trimmed = s.trim();
     //manually check for empty line
