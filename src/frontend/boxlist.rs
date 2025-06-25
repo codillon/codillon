@@ -4,7 +4,7 @@ use std::collections::LinkedList;
 
 #[derive(Debug, Clone)]
 struct CodeData {
-    pub(self) rows: LinkedList<CodeEntry>, // pub(self) for convenient testing
+    rows: LinkedList<CodeEntry>, // pub(self) for convenient testing
 }
 
 impl CodeData {
