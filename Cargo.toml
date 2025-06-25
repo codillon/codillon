@@ -5,5 +5,4 @@ edition = "2024"
 
 [dependencies]
 leptos = { version = "0.8.2", features = ["csr"] }
-reactive_stores = "0.2.2"
 wast = "235.0.0"

@@ -1,37 +1,36 @@
 use super::textbox::Textbox;
 use leptos::prelude::*;
-use reactive_stores::Store;
+use std::collections::LinkedList;
 
-#[derive(Store, Debug, Clone)]
+#[derive(Debug, Clone)]
 struct CodeData {
-    #[store(key: usize = |row| row.line_num)]
-    pub(self) rows: Vec<CodeEntry>, // pub(self) for convenient testing
+    pub(self) rows: LinkedList<CodeEntry>, // pub(self) for convenient testing
 }
 
 impl CodeData {
     pub fn new(initial_length: usize) -> CodeData {
         CodeData {
             rows: (0..initial_length)
-                .map(|i| CodeEntry {
-                    line_num: i,
+                .map(|_| CodeEntry {
                     line: RwSignal::new(String::new()),
                 })
                 .collect(),
         }
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.rows.len()
     }
 
     pub fn push_back(&mut self) {
-        self.rows.push(CodeEntry::new(self.len()));
+        self.rows.push_back(CodeEntry::new());
     }
 
     /// ### Returns
     /// Some(entry) if it is not an empty list; None if empty
     pub fn pop_back(&mut self) -> Option<CodeEntry> {
-        self.rows.pop()
+        self.rows.pop_back()
     }
 
     /// ### Returns
@@ -46,16 +45,14 @@ impl CodeData {
     }
 }
 
-#[derive(Store, Debug, Clone)]
+#[derive(Debug, Clone)]
 struct CodeEntry {
-    line_num: usize,
     line: RwSignal<String>,
 }
 
 impl CodeEntry {
-    pub fn new(line_num: usize) -> CodeEntry {
+    pub fn new() -> CodeEntry {
         CodeEntry {
-            line_num,
             line: RwSignal::new(String::new()),
         }
     }
@@ -86,13 +83,13 @@ pub fn Boxlist(initial_length: usize) -> impl IntoView {
             <button on:click=push_line>"Add Line"</button>
             <button on:click=pop_line>"Remove Line"</button>
             <For
-                each=move || codedata.get().rows
-                // Even if we do not use the key, we still need to set them because leptos system rely on unique keys
-                key=|entry| entry.line_num
-                children=move |entry| {
+                each=move || codedata.get().rows.into_iter().enumerate()
+                // Use index as key
+                key=|(index, _)| *index
+                children=move |(index, entry)| {
                     view! {
                         <br/>
-                        {entry.line_num} ": "
+                        {index} ": "
                         <Textbox text=entry.line />
                     }
                 }
@@ -112,8 +109,20 @@ mod tests {
         codedata.pop_back();
         codedata.pop_back();
         assert_eq!(codedata.len(), 2);
-        codedata.rows[0].line.update(|s| *s = "Hello".to_string());
-        codedata.rows[1].line.update(|s| *s = "Leptos".to_string());
+        codedata
+            .rows
+            .iter_mut()
+            .nth(0)
+            .unwrap()
+            .line
+            .update(|s| *s = "Hello".to_string());
+        codedata
+            .rows
+            .iter_mut()
+            .nth(1)
+            .unwrap()
+            .line
+            .update(|s| *s = "Leptos".to_string());
         assert_eq!(codedata.dump(), "Hello\nLeptos".to_string());
     }
 }

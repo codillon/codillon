@@ -138,7 +138,6 @@ name = "codillon"
 version = "0.1.0"
 dependencies = [
  "leptos",
- "reactive_stores",
  "wast",
 ]
 
