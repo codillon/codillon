@@ -2,7 +2,6 @@ use super::textbox::Textbox;
 use leptos::prelude::*;
 use std::collections::LinkedList;
 
-/// ### Editor
 /// Hold all the code lines in a linked list as a buffer.
 /// Each line is represented by a `CodeLineEntry`, it possesses the code text
 /// in a `RwSignal` to allow reactive updates.
@@ -21,13 +20,11 @@ impl EditorBuffer {
     }
 }
 
-/// ### CodeEntry
 /// For now, it only holds a single line of code with a `RwSignal`
 /// `RwSignal` will cause reactive updates when it is modified.
 #[derive(Debug, Clone)]
 struct CodeLineEntry(RwSignal<String>);
 
-/// ### BoxList component
 /// This function creates a list of textboxs with a push button and a pop button.
 /// Initially, it will have 0 textboxes.
 #[component]
@@ -73,7 +70,7 @@ pub fn Boxlist() -> impl IntoView {
 mod tests {
     use super::*;
     #[test]
-    fn test_codedata() {
+    fn test_editor_buffer() {
         let mut editor_buffer = EditorBuffer(LinkedList::new());
         editor_buffer
             .0
