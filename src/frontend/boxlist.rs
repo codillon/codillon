@@ -37,9 +37,9 @@ pub fn Boxlist() -> impl IntoView {
 
     let push_line = move |_| {
         set_editor_buffer.update(|editor_buffer| {
-            editor_buffer.0.push_back(CodeLineEntry(
-                RwSignal::new("".to_string()),
-            ))
+            editor_buffer
+                .0
+                .push_back(CodeLineEntry(RwSignal::new("".to_string())))
         });
     };
 
