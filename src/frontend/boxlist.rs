@@ -2,46 +2,20 @@ use super::textbox::Textbox;
 use leptos::prelude::*;
 use std::collections::LinkedList;
 
-/// ### CodeData
-/// This struct holds a list of `CodeEntry` which represents each line of code.
+/// ### Editor
+/// Hold all the code lines in a linked list as a buffer.
+/// Each line is represented by a `CodeLineEntry`, it possesses the code text
+/// in a `RwSignal` to allow reactive updates.
 #[derive(Debug, Clone)]
-struct CodeData {
-    rows: LinkedList<CodeEntry>,
-}
+struct EditorBuffer(LinkedList<CodeLineEntry>);
 
-impl CodeData {
-    pub fn new(initial_length: usize) -> CodeData {
-        CodeData {
-            rows: (0..initial_length)
-                .map(|_| CodeEntry {
-                    line: RwSignal::new(String::new()),
-                })
-                .collect(),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.rows.len()
-    }
-
-    pub fn push_back(&mut self) {
-        self.rows.push_back(CodeEntry::new());
-    }
-
-    /// ### Returns
-    /// Some(entry) if it is not an empty list; None if empty
-    pub fn pop_back(&mut self) -> Option<CodeEntry> {
-        self.rows.pop_back()
-    }
-
-    /// ### Returns
-    /// A String of all rows joined by '\n'
+impl EditorBuffer {
     #[allow(dead_code)]
     pub fn dump(&self) -> String {
-        self.rows
+        // Use `get_untracked` because we do not need a re-render
+        self.0
             .iter()
-            .map(|entry| entry.line.get_untracked())
+            .map(|entry| entry.0.get_untracked())
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -51,35 +25,27 @@ impl CodeData {
 /// For now, it only holds a single line of code with a `RwSignal`
 /// `RwSignal` will cause reactive updates when it is modified.
 #[derive(Debug, Clone)]
-struct CodeEntry {
-    line: RwSignal<String>,
-}
-
-impl CodeEntry {
-    pub fn new() -> CodeEntry {
-        CodeEntry {
-            line: RwSignal::new(String::new()),
-        }
-    }
-}
+struct CodeLineEntry(RwSignal<String>);
 
 /// ### BoxList component
 /// This function creates a list of textboxs with a push button and a pop button.
-///
-/// ### Parameters
-/// `initial_length`: the number of textboxes at the beginning
+/// Initially, it will have 0 textboxes.
 #[component]
-pub fn Boxlist(initial_length: usize) -> impl IntoView {
-    let codedata = CodeData::new(initial_length);
-    let (codedata, set_codedata) = signal(codedata);
+pub fn Boxlist() -> impl IntoView {
+    let editor_buffer = EditorBuffer(LinkedList::new());
+    let (editor_buffer, set_editor_buffer) = signal(editor_buffer);
 
     let push_line = move |_| {
-        set_codedata.update(|counters| counters.push_back());
+        set_editor_buffer.update(|editor_buffer| {
+            editor_buffer.0.push_back(CodeLineEntry(
+                RwSignal::new("".to_string()),
+            ))
+        });
     };
 
     let pop_line = move |_| {
-        set_codedata.update(|codedata| {
-            codedata.pop_back(); // Will Return None if empty, we ignore the return value anyway
+        set_editor_buffer.update(|editor_buffer| {
+            editor_buffer.0.pop_back(); // Will Return None if empty. But we ignore the return value anyway
         });
     };
 
@@ -88,14 +54,14 @@ pub fn Boxlist(initial_length: usize) -> impl IntoView {
             <button on:click=push_line>"Add Line"</button>
             <button on:click=pop_line>"Remove Line"</button>
             <For
-                each=move || codedata.get().rows.into_iter().enumerate()
+                each=move || editor_buffer.get().0.into_iter().enumerate()
                 // Use index as key
                 key=|(index, _)| *index
                 children=move |(index, entry)| {
                     view! {
                         <br/>
                         {index} ": "
-                        <Textbox text=entry.line />
+                        <Textbox text=entry.0 />
                     }
                 }
             />
@@ -108,26 +74,37 @@ mod tests {
     use super::*;
     #[test]
     fn test_codedata() {
-        let mut codedata = CodeData::new(3);
-        codedata.push_back();
-        assert_eq!(codedata.len(), 4);
-        codedata.pop_back();
-        codedata.pop_back();
-        assert_eq!(codedata.len(), 2);
-        codedata
-            .rows
+        let mut editor_buffer = EditorBuffer(LinkedList::new());
+        editor_buffer
+            .0
+            .push_back(CodeLineEntry(RwSignal::new("".to_string())));
+        editor_buffer
+            .0
+            .push_back(CodeLineEntry(RwSignal::new("".to_string())));
+        editor_buffer
+            .0
+            .push_back(CodeLineEntry(RwSignal::new("".to_string())));
+        editor_buffer
+            .0
+            .push_back(CodeLineEntry(RwSignal::new("".to_string())));
+        assert_eq!(editor_buffer.0.len(), 4);
+        editor_buffer.0.pop_back();
+        editor_buffer.0.pop_back();
+        assert_eq!(editor_buffer.0.len(), 2);
+        editor_buffer
+            .0
             .iter_mut()
             .next()
             .unwrap()
-            .line
+            .0
             .update(|s| *s = "Hello".to_string());
-        codedata
-            .rows
+        editor_buffer
+            .0
             .iter_mut()
             .nth(1)
             .unwrap()
-            .line
+            .0
             .update(|s| *s = "Leptos".to_string());
-        assert_eq!(codedata.dump(), "Hello\nLeptos".to_string());
+        assert_eq!(editor_buffer.dump(), "Hello\nLeptos".to_string());
     }
 }

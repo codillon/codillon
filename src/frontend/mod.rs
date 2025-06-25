@@ -8,6 +8,6 @@ mod textbox;
 #[component]
 pub fn App() -> impl IntoView {
     view! {
-        <boxlist::Boxlist initial_length=5/>
+        <boxlist::Boxlist/>
     }
 }
