@@ -2,9 +2,11 @@ use super::textbox::Textbox;
 use leptos::prelude::*;
 use std::collections::LinkedList;
 
+/// ### CodeData
+/// This struct holds a list of `CodeEntry` which represents each line of code.
 #[derive(Debug, Clone)]
 struct CodeData {
-    rows: LinkedList<CodeEntry>, // pub(self) for convenient testing
+    rows: LinkedList<CodeEntry>,
 }
 
 impl CodeData {
@@ -45,6 +47,9 @@ impl CodeData {
     }
 }
 
+/// ### CodeEntry
+/// For now, it only holds a single line of code with a `RwSignal`
+/// `RwSignal` will cause reactive updates when it is modified.
 #[derive(Debug, Clone)]
 struct CodeEntry {
     line: RwSignal<String>,
