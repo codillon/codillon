@@ -13,8 +13,13 @@ use wasm_tools::parse_binary_wasm;
 /// # Returns
 /// true: if the instruction is syntactically well-formed; false otherwise
 pub fn is_well_formed_instr(s: &str) -> bool {
-    //manually check for empty line and line comments (block comments not supported)
-    if s.is_empty() || s.starts_with(";;") {
+    //get rid of comments
+    match s.find(";;") {
+        some(i) => &s[..i],
+        None => {},
+    };
+    //manually check for empty line and space only
+    if s.trim.is_empty() {
         return true;
     }
     //manually check for spaces at the beginning and end
@@ -99,6 +104,8 @@ mod tests {
         assert!(!is_well_formed_instr("i32.const 5     "));
         //comments and empty lines are well-formed
         assert!(is_well_formed_instr(";;Hello"));
+        assert!(is_well_formed_instr(""));
+        assert!(is_well_formed_instr("i32.const 5    ;;Hello"));
         assert!(is_well_formed_instr(""));
     }
 
