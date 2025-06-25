@@ -112,7 +112,7 @@ mod tests {
         codedata
             .rows
             .iter_mut()
-            .nth(0)
+            .next()
             .unwrap()
             .line
             .update(|s| *s = "Hello".to_string());
