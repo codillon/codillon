@@ -1,7 +1,9 @@
-use wast::core::Instruction;
+use wasm_tools::parse_binary_wasm;
+use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
 
 /// Decides if a given string is a well-formed text-format Wasm instruction
+/// (only accepts plain instructions)
 ///
 /// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Instruction
 ///
@@ -21,11 +23,39 @@ pub fn is_well_formed_instr(s: &str) -> bool {
     if s.is_empty() {
         return true;
     }
-    let buf = match ParseBuffer::new(s) {
-        Ok(b) => b,
-        Err(_) => return false,
+    let Ok(buf) = ParseBuffer::new(s) else {
+        return false;
     };
     parser::parse::<Instruction>(&buf).is_ok()
+}
+
+/// Decides if a given string is a well-formed text-format Wasm function
+///
+/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Module
+/// Encodes Module to binary Wasm and wasmparser parses binary Wasm
+///
+/// # Parameters
+/// s: A string slice representing a Wasm function
+///
+/// # Returns
+/// true: if the function is syntactically well-formed; false otherwise
+///
+/// # Assumptions
+/// Each instruction is plain
+pub fn is_well_formed_func(lines: &str) -> bool {
+    //wrap as module
+    let func = format!("module (func {lines})");
+    let Ok(buf) = ParseBuffer::new(&func) else {
+        return false;
+    };
+    let Ok(mut module) = parser::parse::<Module>(&buf) else {
+        return false;
+    };
+    let Ok(bin) = module.encode() else {
+        return false;
+    };
+    let parser = wasmparser::Parser::new(0);
+    parse_binary_wasm(parser, &bin).is_ok()
 }
 
 #[cfg(test)]
@@ -53,5 +83,31 @@ mod tests {
         assert!(is_well_formed_instr(";;Hello"));
         assert!(is_well_formed_instr("i32.const 5   ;;this is a const"));
         assert!(is_well_formed_instr(""));
+    }
+    #[test]
+    fn test_is_well_formed_func() {
+        //well-formed function
+        assert!(is_well_formed_func("block\nend\n"));
+        assert!(is_well_formed_func("i32.const 1\ni32.const 2\ni32.add"));
+        assert!(is_well_formed_func("i64.const 42\ndrop"));
+        //indentation
+        assert!(is_well_formed_func("block\n  i32.const 0\nend"));
+        assert!(is_well_formed_func(
+            "i32.const 1\nif\n  i32.const 42\nelse\n  i32.const 99\nend"
+        ));
+        //nested blocks
+        assert!(is_well_formed_func(
+            "block\n  i32.const 1\n  block\n    i32.const 2\n    i32.add\n  end\nend"
+        ));
+        assert!(is_well_formed_func("loop\n  br 0\nend"));
+        assert!(is_well_formed_func("i32.const 10\ni32.const 10\ni32.eq"));
+        //not well-formed function (assuming that each instruction is plain)
+        //mismatched frame
+        assert!(!is_well_formed_func("block\n"));
+        assert!(!is_well_formed_func("else\ni32.const 1\nend"));
+        assert!(!is_well_formed_func("i32.const 1\nend"));
+        assert!(!is_well_formed_func("block\ni32.const 1\nend\nend"));
+        //unrecognized instructions
+        assert!(!is_well_formed_func("i32.const 1\ni32.adx"));
     }
 }
