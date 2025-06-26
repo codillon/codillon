@@ -1,3 +1,25 @@
 * {
-    margin: 0
+    /* Remove any default spacings for finer-grain control. */
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    font-family: "Monaco";
+    line-height: 1.5;
+}
+
+.main {
+    background-color: #EAEAEA;
+    height: 100vh;
+}
+
+.textLine {
+    position: absolute;   
+}
+
+
+.buttonContainer {
+    display: flex;
+    gap: 8px;
 }
