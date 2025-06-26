@@ -41,7 +41,9 @@ pub fn is_well_formed_instr(s: &str) -> bool {
 /// # Returns
 /// true: if the function is syntactically well-formed; false otherwise
 pub fn is_well_formed_func(lines: &str) -> bool {
-    let func = "(module \n(func\nblock\nend\n".to_string() + lines + "))";
+    //wrap as module
+    let func = "(module\n(func\n".to_string() + lines + "))";
+    //debug: print module
     println!("{}", func);
     let buf = match ParseBuffer::new(&func) {
         Ok(b) => b,
@@ -51,6 +53,7 @@ pub fn is_well_formed_func(lines: &str) -> bool {
         }
     };
 
+    //using wat to get module
     let wat = match parser::parse::<Wat>(&buf) {
         Ok(w) => w,
         Err(_) => return false,
@@ -59,13 +62,17 @@ pub fn is_well_formed_func(lines: &str) -> bool {
         Wat::Module(m) => m,
         Wat::Component(_) => panic!("No components :("),
     };
-    /*let mut module = match parser::parse::<Module>(&buf) {
+
+    /*
+    //parse as Module
+    let mut module = match parser::parse::<Module>(&buf) {
         Ok(m) => m,
         Err(_) => {
             println!("cannot parse as module");
             return false;
         },
     };*/
+
     let bin = match module.encode() {
         Ok(b) => b,
         Err(_) => {
@@ -106,6 +113,8 @@ mod tests {
     #[test]
     fn test_is_well_formed_func() {
         //well-formed function
-        assert!(is_well_formed_func(""));
+        assert!(is_well_formed_func("block\nend\n"));
+        //not well-formed function
+        assert!(!is_well_formed_func("block\n"));
     }
 }
