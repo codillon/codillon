@@ -251,8 +251,7 @@ end             ;; 15
         for expected in &expected_entries {
             assert!(
                 entries.iter().any(|entry| entry == expected),
-                "Missing expected entry: {:?}",
-                expected
+                "Missing expected entry: {expected:?}",
             );
         }
     }
