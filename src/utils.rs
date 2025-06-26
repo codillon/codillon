@@ -44,7 +44,7 @@ pub fn is_well_formed_instr(s: &str) -> bool {
 /// Each instruction is plain
 pub fn is_well_formed_func(lines: &str) -> bool {
     //wrap as module
-    let func = "module\n(func\n".to_string() + lines + ")";
+    let func = format!("module (func {lines})");
     let Ok(buf) = ParseBuffer::new(&func) else {
         return false;
     };
