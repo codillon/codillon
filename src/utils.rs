@@ -1,7 +1,6 @@
 use std::ops::RangeInclusive;
-use wast::core::{FuncKind, Instruction};
 use wasm_tools::parse_binary_wasm;
-use wast::core::{Instruction, Module};
+use wast::core::{Expression, Instruction, Module};
 use wast::parser::{self, ParseBuffer};
 
 /// Decides if a given string is a well-formed text-format Wasm instruction
@@ -159,6 +158,8 @@ pub fn frame_match(expr: &Expression) -> Vec<Frame> {
 
 #[cfg(test)]
 mod tests {
+    use wast::core::Expression;
+
     use super::*;
 
     #[test]
