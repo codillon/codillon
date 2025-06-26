@@ -27,7 +27,7 @@ pub fn App() -> impl IntoView {
                 if let Some(text_line_el) = el.closest(".textLine").ok().flatten() {
                     if let Some(index_attr) = text_line_el.get_attribute("data-index") {
                         leptos::logging::log!("Line clicked: {}", index_attr);
-                        if let Ok(idx) = index_attr.parse::<i32>() {
+                        if let Ok(idx) = index_attr.parse::<usize>() {
                             set_current_line_number.set(idx);
                         }
                     }
@@ -45,7 +45,7 @@ pub fn App() -> impl IntoView {
 
     view! {
         <div class="main" tabindex="0" node_ref=container_ref  on:keydown=on_key_down on:click=handle_click>
-        <boxlist::Boxlist />
+        <boxlist::Boxlist focused_line=current_line_number/>
     </div> }
 }
 

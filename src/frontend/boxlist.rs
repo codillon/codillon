@@ -59,7 +59,7 @@ impl CodeLineEntry {
 /// This function creates a list of textboxs with a push button and a pop button.
 /// Initially, it will have 1 textbox.
 #[component]
-pub fn Boxlist() -> impl IntoView {
+pub fn Boxlist(focused_line: ReadSignal<usize>) -> impl IntoView {
     let (editor_buffer, set_editor_buffer) = signal(EditorBuffer::default());
 
     // Will be triggered by the button, see below
@@ -86,8 +86,9 @@ pub fn Boxlist() -> impl IntoView {
                 each=move || editor_buffer.get().lines
                 key=|entry| entry.id
                 children=move |index, entry| {
+                    let is_focused = move || focused_line.get() == index.get() + 1;
                     view! {
-                    <div class="textLine" data-index=entry.id>
+                    <div class="textLine" data-index=entry.id data-focused=move || is_focused().to_string()>
                         {index}
                         ": "
                         <Textbox text=entry.value />
