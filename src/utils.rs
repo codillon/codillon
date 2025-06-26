@@ -114,6 +114,19 @@ mod tests {
     fn test_is_well_formed_func() {
         //well-formed function
         assert!(is_well_formed_func("block\nend\n"));
+        assert!(is_well_formed_func("i32.const 1\ni32.const 2\ni32.add"));
+        assert!(is_well_formed_func("i64.const 42\ndrop"));
+        //indentation
+        assert!(is_well_formed_func("block\n  i32.const 0\nend"));
+        assert!(is_well_formed_func(
+            "i32.const 1\nif\n  i32.const 42\nelse\n  i32.const 99\nend"
+        ));
+        //nested blocks
+        assert!(is_well_formed_func(
+            "block\n  i32.const 1\n  block\n    i32.const 2\n    i32.add\n  end\nend"
+        ));
+        assert!(is_well_formed_func("loop\n  br 0\nend"));
+        assert!(is_well_formed_func("i32.const 10\ni32.const 10\ni32.eq"));
         //not well-formed function
         assert!(!is_well_formed_func("block\n"));
     }
