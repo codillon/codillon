@@ -1,6 +1,5 @@
 use wasm_tools::parse_binary_wasm;
-use wast::Wat;
-use wast::core::Instruction;
+use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
 
 /// Decides if a given string is a well-formed text-format Wasm instruction
@@ -23,9 +22,8 @@ pub fn is_well_formed_instr(s: &str) -> bool {
     if s.is_empty() {
         return true;
     }
-    let buf = match ParseBuffer::new(s) {
-        Ok(b) => b,
-        Err(_) => return false,
+    let Ok(buf) = ParseBuffer::new(s) else {
+        return false;
     };
     parser::parse::<Instruction>(&buf).is_ok()
 }
@@ -42,43 +40,15 @@ pub fn is_well_formed_instr(s: &str) -> bool {
 /// true: if the function is syntactically well-formed; false otherwise
 pub fn is_well_formed_func(lines: &str) -> bool {
     //wrap as module
-    let func = "(module\n(func\n".to_string() + lines + "))";
-    //debug: print module
-    println!("{}", func);
-    let buf = match ParseBuffer::new(&func) {
-        Ok(b) => b,
-        Err(_) => {
-            println!("cannot make buffer");
-            return false;
-        }
+    let func = "module\n(func\n".to_string() + lines + ")";
+    let Ok(buf) = ParseBuffer::new(&func) else {
+        return false;
     };
-
-    //using wat to get module (temporary)
-    let wat = match parser::parse::<Wat>(&buf) {
-        Ok(w) => w,
-        Err(_) => return false,
+    let Ok(mut module) = parser::parse::<Module>(&buf) else {
+        return false;
     };
-    let mut module = match wat {
-        Wat::Module(m) => m,
-        Wat::Component(_) => panic!("No components :("),
-    };
-
-    /*
-    //parse as Module
-    let mut module = match parser::parse::<Module>(&buf) {
-        Ok(m) => m,
-        Err(_) => {
-            println!("cannot parse as module");
-            return false;
-        },
-    };*/
-
-    let bin = match module.encode() {
-        Ok(b) => b,
-        Err(_) => {
-            println!("cannot encode to binary");
-            return false;
-        }
+    let Ok(bin) = module.encode() else {
+        return false;
     };
     let parser = wasmparser::Parser::new(0);
     parse_binary_wasm(parser, &bin).is_ok()
