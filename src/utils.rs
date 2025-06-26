@@ -3,6 +3,7 @@ use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
 
 /// Decides if a given string is a well-formed text-format Wasm instruction
+/// (only accepts plain instructions)
 ///
 /// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Instruction
 ///
@@ -97,7 +98,13 @@ mod tests {
         ));
         assert!(is_well_formed_func("loop\n  br 0\nend"));
         assert!(is_well_formed_func("i32.const 10\ni32.const 10\ni32.eq"));
-        //not well-formed function
+        //not well-formed function (assuming that each instruction is plain)
+        //mismatched frame
         assert!(!is_well_formed_func("block\n"));
+        assert!(!is_well_formed_func("else\ni32.const 1\nend"));
+        assert!(!is_well_formed_func("i32.const 1\nend"));
+        assert!(!is_well_formed_func("block\ni32.const 1\nend\nend"));
+        //unrecognized instructions
+        assert!(!is_well_formed_func("i32.const 1\ni32.adx"));
     }
 }
