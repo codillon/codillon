@@ -70,8 +70,8 @@ pub enum FrameKind {
 }
 
 /// Represents a frame entry (like "block end" pair, etc.) which binds the kind and range of a frame.
-/// The range is inclusive, containing both start line number and end line number.
-/// The line begins at 0.
+/// The range is inclusive, containing both start instr number and end instr number.
+/// The start number begins at 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
     pub kind: FrameKind,
@@ -81,10 +81,10 @@ pub struct Frame {
 /// Tries to match frames in a WebAssembly function written in WAT format as much as possible
 ///
 /// ### Parameters
-/// `wat` A wat function in string.
+/// `expr` An expr parsed by wast  tool
 ///
 /// ### Returns
-/// A vector of `FrameEntry` representing the frames in the function.
+/// A vector of `Frame` representing the frames in the expr.
 /// The order of returned frames is not guaranteed.
 ///
 /// ### Warning
@@ -92,108 +92,69 @@ pub struct Frame {
 /// There is no support for `try` or `catch` frames. etc.
 /// For now, we only support "loop", "if", "else", "block"
 ///
-/// It does not check the wast func is well-formed.
-/// It just does its best to match the frames in the function.
+/// It does not check the wast expr is well-formed.
+/// It just does its best to match the frames in the expr.
 ///
 /// ### Example
 ///
 /// ```
 /// # use codillon::utils::{frame_match, FrameKind};
-/// let wat = "func\nblock\ni32.const 42\ndrop\nend";
-/// let entries = frame_match(wat);
+/// # use wast::core::Expression;
+/// # use wast::parser::{self, ParseBuffer};
+/// let wat = "block\ni32.const 42\ndrop\nend";
+/// let buf = ParseBuffer::new(wat).unwrap();
+/// let expr = parser::parse::<Expression>(&buf).unwrap();
+/// let entries = frame_match(&expr);
 /// assert_eq!(entries.len(), 1);
 /// assert_eq!(entries[0].kind, FrameKind::Block);
-/// assert_eq!(entries[0].range, 1..=4);
+/// assert_eq!(entries[0].range, 0..=3);
 /// ```
-pub fn frame_match(wat: &str) -> Vec<Frame> {
+pub fn frame_match(expr: &Expression) -> Vec<Frame> {
     // This is the entries that will be returned.
-    let mut entries = Vec::new();
+    let mut frames = Vec::new();
 
     // Use stacks as memory of frame begining borders.
-    let mut kind_stack = Vec::new();
-    let mut line_stack = Vec::new();
+    let mut frame_border_stack = Vec::new();
 
-    let mut buf = if let Ok(buf) = ParseBuffer::new(wat) {
-        buf
-    } else {
-        return entries;
-    };
-    // ParseBuffer does not track spans by default, so we need to enable span tracing manually.
-    buf.track_instr_spans(true);
-
-    let func = if let Ok(func) = parser::parse::<wast::core::Func>(&buf) {
-        func
-    } else {
-        return entries;
-    };
-
-    let expression = if let FuncKind::Inline {
-        locals: _,
-        expression,
-    } = func.kind
-    {
-        expression
-    } else {
-        return entries;
-    };
-
-    for (instr, span) in expression.instrs.iter().zip(
-        expression
-            .instr_spans
-            .expect("Expected Spans for instructions"),
-    ) {
+    for (idx, instr) in expr.instrs.iter().enumerate() {
         match instr {
             Instruction::Block(_) => {
-                kind_stack.push(FrameKind::Block);
-                // There is a performance concern here, we should convert offsets to line numbers in batch if
-                // this becomes a bottleneck. But for now, we will just use the library function.
-                line_stack.push(span.linecol_in(wat).0);
+                frame_border_stack.push((FrameKind::Block, idx));
             }
             Instruction::Loop(_) => {
-                kind_stack.push(FrameKind::Loop);
-                line_stack.push(span.linecol_in(wat).0);
+                frame_border_stack.push((FrameKind::Loop, idx));
             }
             Instruction::If(_) => {
-                kind_stack.push(FrameKind::If);
-                line_stack.push(span.linecol_in(wat).0);
+                frame_border_stack.push((FrameKind::If, idx));
             }
             Instruction::Else(_) => {
-                let last_frame_kind = kind_stack.pop();
-                let last_span_start = line_stack.pop();
-                if let Some(FrameKind::If) = last_frame_kind {
-                    let span_start = last_span_start.unwrap(); // Will never panic
-                    let span_end = span.linecol_in(wat).0 - 1;
-                    entries.push(Frame {
+                if let Some((FrameKind::If, last_span_start)) = frame_border_stack.pop() {
+                    let last_span_end = idx - 1;
+                    frames.push(Frame {
                         kind: FrameKind::If,
-                        range: span_start..=span_end,
+                        range: last_span_start..=last_span_end,
                     });
                 } else {
                     // Unmatched else
-                    return entries;
+                    return frames;
                 }
-                let span_start = span.linecol_in(wat).0;
-                kind_stack.push(FrameKind::Else);
-                line_stack.push(span_start);
+                frame_border_stack.push((FrameKind::Else, idx));
             }
             Instruction::End(_) => {
-                let last_frame_kind = kind_stack.pop();
-                let last_span_start = line_stack.pop();
-                if let Some(frame_kind) = last_frame_kind {
-                    let span_start = last_span_start.unwrap();
-                    let span_end = span.linecol_in(wat).0;
-                    entries.push(Frame {
-                        kind: frame_kind,
-                        range: span_start..=span_end,
+                if let Some((last_frame_kind, last_span_start)) = frame_border_stack.pop() {
+                    frames.push(Frame {
+                        kind: last_frame_kind,
+                        range: last_span_start..=idx,
                     });
                 } else {
-                    // Unmatched End
-                    return entries;
+                    // Unmatched end
+                    return frames;
                 }
             }
             _ => (), // Ignore other instructions
         }
     }
-    entries
+    frames
 }
 
 #[cfg(test)]
@@ -202,55 +163,56 @@ mod tests {
 
     #[test]
     fn test_frame_match() {
-        let well_formed = r#"func         ;; 0
-block           ;; 1
-i32.const 42    ;; 2
-drop            ;; 3
-end             ;; 4
-block           ;; 5
-loop            ;; 6
-if              ;; 7
-i32.const 43    ;; 8
-drop            ;; 9
-else            ;; 10
-i32.const 44    ;; 11
-drop            ;; 12
+        let well_formed = r#"block           ;; 0
+i32.const 42    ;; 1
+drop            ;; 2
+end             ;; 3
+block           ;; 4
+loop            ;; 5
+if              ;; 6
+i32.const 43    ;; 7
+drop            ;; 8
+else            ;; 9
+i32.const 44    ;; 10
+drop            ;; 11
+end             ;; 12
 end             ;; 13
 end             ;; 14
-end             ;; 15
 "#;
 
-        let entries = frame_match(well_formed);
+        let buf = ParseBuffer::new(well_formed).unwrap();
+        let expr = parser::parse::<Expression>(&buf).unwrap();
+        let frames = frame_match(&expr);
 
-        let expected_entries = vec![
+        let expected_frames = vec![
             Frame {
                 kind: FrameKind::Block,
-                range: 1..=4,
+                range: 0..=3,
             },
             Frame {
                 kind: FrameKind::Block,
-                range: 5..=15,
+                range: 4..=14,
             },
             Frame {
                 kind: FrameKind::If,
-                range: 7..=9,
+                range: 6..=8,
             },
             Frame {
                 kind: FrameKind::Loop,
-                range: 6..=14,
+                range: 5..=13,
             },
             Frame {
                 kind: FrameKind::Else,
-                range: 10..=13,
+                range: 9..=12,
             },
         ];
 
-        assert_eq!(entries.len(), expected_entries.len());
+        assert_eq!(frames.len(), expected_frames.len());
 
         // Check that all expected entries are present
-        for expected in &expected_entries {
+        for expected in &expected_frames {
             assert!(
-                entries.iter().any(|entry| entry == expected),
+                frames.iter().any(|entry| entry == expected),
                 "Missing expected entry: {expected:?}",
             );
         }
