@@ -82,23 +82,17 @@ pub fn frame_match(wat: &str) -> Vec<FrameEntry> {
     let mut kind_stack = Vec::new();
     let mut line_stack = Vec::new();
 
-    let mut buf =if let Ok(buf) = ParseBuffer::new(wat)
-    {
+    let mut buf = if let Ok(buf) = ParseBuffer::new(wat) {
         buf
-    }
-    else
-    {
+    } else {
         return entries;
     };
     // ParseBuffer does not track spans by default, so we need to enable span tracing manually.
     buf.track_instr_spans(true);
 
-    let func = if let Ok(func) = parser::parse::<wast::core::Func>(&buf)
-    {
+    let func = if let Ok(func) = parser::parse::<wast::core::Func>(&buf) {
         func
-    }
-    else
-    {
+    } else {
         return entries;
     };
 
@@ -165,7 +159,7 @@ pub fn frame_match(wat: &str) -> Vec<FrameEntry> {
                     return entries;
                 }
             }
-            _ => () // Ignore other instructions
+            _ => (), // Ignore other instructions
         }
     }
     entries
@@ -177,8 +171,7 @@ mod tests {
 
     #[test]
     fn test_frame_match() {
-        let well_formed = 
-r#"func         ;; 0
+        let well_formed = r#"func         ;; 0
 block           ;; 1
 i32.const 42    ;; 2
 drop            ;; 3
@@ -196,25 +189,41 @@ end             ;; 14
 end             ;; 15
 "#;
 
-
         let entries = frame_match(well_formed);
 
         let expected_entries = vec![
-            FrameEntry { kind: FrameKind::Block, range: 1..=4 },
-            FrameEntry { kind: FrameKind::Block, range: 5..=15 },
-            FrameEntry { kind: FrameKind::If, range: 7..=9 },
-            FrameEntry { kind: FrameKind::Loop, range: 6..=14 },
-            FrameEntry { kind: FrameKind::Else, range: 10..=13 },
+            FrameEntry {
+                kind: FrameKind::Block,
+                range: 1..=4,
+            },
+            FrameEntry {
+                kind: FrameKind::Block,
+                range: 5..=15,
+            },
+            FrameEntry {
+                kind: FrameKind::If,
+                range: 7..=9,
+            },
+            FrameEntry {
+                kind: FrameKind::Loop,
+                range: 6..=14,
+            },
+            FrameEntry {
+                kind: FrameKind::Else,
+                range: 10..=13,
+            },
         ];
 
         assert_eq!(entries.len(), expected_entries.len());
-        
+
         // Check that all expected entries are present
         for expected in &expected_entries {
-            assert!(entries.iter().any(|entry| entry == expected),
-            "Missing expected entry: {:?}", expected);
+            assert!(
+                entries.iter().any(|entry| entry == expected),
+                "Missing expected entry: {:?}",
+                expected
+            );
         }
-        
     }
 
     #[test]
