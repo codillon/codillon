@@ -1,7 +1,7 @@
+use wasm_tools::parse_binary_wasm;
 use wast::Wat;
 use wast::core::Instruction;
 use wast::parser::{self, ParseBuffer};
-use wasm_tools::parse_binary_wasm;
 
 /// Decides if a given string is a well-formed text-format Wasm instruction
 ///
