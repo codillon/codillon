@@ -1,6 +1,6 @@
 //! This is the textbox component for the index page.
 
-use crate::utils::is_well_formed_instr;
+use crate::wast_utils::is_well_formed_instr;
 use leptos::prelude::*;
 
 /// ### Textbox Component
