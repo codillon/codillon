@@ -73,7 +73,7 @@ pub enum FrameKind {
 /// The range is inclusive, containing both start line number and end line number.
 /// The line begins at 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameEntry {
+pub struct Frame {
     pub kind: FrameKind,
     pub range: RangeInclusive<usize>,
 }
@@ -105,7 +105,7 @@ pub struct FrameEntry {
 /// assert_eq!(entries[0].kind, FrameKind::Block);
 /// assert_eq!(entries[0].range, 1..=4);
 /// ```
-pub fn frame_match(wat: &str) -> Vec<FrameEntry> {
+pub fn frame_match(wat: &str) -> Vec<Frame> {
     // This is the entries that will be returned.
     let mut entries = Vec::new();
 
@@ -163,7 +163,7 @@ pub fn frame_match(wat: &str) -> Vec<FrameEntry> {
                 if let Some(FrameKind::If) = last_frame_kind {
                     let span_start = last_span_start.unwrap(); // Will never panic
                     let span_end = span.linecol_in(wat).0 - 1;
-                    entries.push(FrameEntry {
+                    entries.push(Frame {
                         kind: FrameKind::If,
                         range: span_start..=span_end,
                     });
@@ -181,7 +181,7 @@ pub fn frame_match(wat: &str) -> Vec<FrameEntry> {
                 if let Some(frame_kind) = last_frame_kind {
                     let span_start = last_span_start.unwrap();
                     let span_end = span.linecol_in(wat).0;
-                    entries.push(FrameEntry {
+                    entries.push(Frame {
                         kind: frame_kind,
                         range: span_start..=span_end,
                     });
@@ -223,23 +223,23 @@ end             ;; 15
         let entries = frame_match(well_formed);
 
         let expected_entries = vec![
-            FrameEntry {
+            Frame {
                 kind: FrameKind::Block,
                 range: 1..=4,
             },
-            FrameEntry {
+            Frame {
                 kind: FrameKind::Block,
                 range: 5..=15,
             },
-            FrameEntry {
+            Frame {
                 kind: FrameKind::If,
                 range: 7..=9,
             },
-            FrameEntry {
+            Frame {
                 kind: FrameKind::Loop,
                 range: 6..=14,
             },
-            FrameEntry {
+            Frame {
                 kind: FrameKind::Else,
                 range: 10..=13,
             },
