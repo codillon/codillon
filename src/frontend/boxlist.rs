@@ -48,7 +48,7 @@ pub fn Boxlist() -> impl IntoView {
     let editor_buffer = EditorBuffer(LinkedList::new());
     let (editor_buffer, set_editor_buffer) = signal(editor_buffer);
 
-    // Will be trigger by the push_line button, see below
+    // Will be triggered by the push_line button, see below
     let push_line = move |_| {
         set_editor_buffer.write().0.push_back(CodeLineEntry::new());
     };
