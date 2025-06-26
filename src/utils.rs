@@ -53,7 +53,7 @@ pub fn is_well_formed_func(lines: &str) -> bool {
         }
     };
 
-    //using wat to get module
+    //using wat to get module (temporary)
     let wat = match parser::parse::<Wat>(&buf) {
         Ok(w) => w,
         Err(_) => return false,
