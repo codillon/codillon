@@ -39,7 +39,7 @@ pub fn is_well_formed_instr(s: &str) -> bool {
 ///
 /// # Returns
 /// true: if the function is syntactically well-formed; false otherwise
-/// 
+///
 /// # Assumptions
 /// Each instruction is plain
 pub fn is_well_formed_func(lines: &str) -> bool {
