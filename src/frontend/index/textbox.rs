@@ -32,15 +32,8 @@ pub fn textbox() -> impl IntoView {
             }
             placeholder="Enter Some Instruction"
         />
-        <div class={validation_class}>
-            {text}
-            {move || if is_valid() {
-                CORRECT_EMOJI
-            } else {
-                INCORRECT_EMOJI
-            }}
+        <div class=validation_class>
+            {text} {move || if is_valid() { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
         </div>
-
-
     }
 }
