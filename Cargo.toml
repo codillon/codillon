@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-getrandom = "0.3.3"
-imp = "0.1.0"
 leptos = { version = "0.8.2", features = ["csr"] }
 wasm-tools = "1.235.0"
 wasmparser = "0.235.0"
 wast = "235.0.0"
+getrandom = { version = "0.2", features = ["js"] }
