@@ -1,2 +1,2 @@
 pub mod frontend;
-pub mod wast_utils;
+pub mod utils;
