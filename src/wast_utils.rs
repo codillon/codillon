@@ -35,57 +35,72 @@ pub enum FrameKind {
     Block,
     Loop,
     Else,
+    If,
 }
 
-/// Represents a frame entry (like "block end" pair, etc.)
-/// To bind the kind and the range.
+/// Represents a frame entry (like "block end" pair, etc.) which binds the kind and range of a frame.
 /// The range is inclusive, containing both start line number and end line number.
 /// The line begins at 0.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameEntry {
     pub kind: FrameKind,
     pub range: RangeInclusive<usize>,
 }
 
-/// This function tries to match frames in a WebAssembly function written in WAT format.
+/// Tries to match frames in a WebAssembly function written in WAT format as much as possible
 ///
 /// ### Parameters
 /// `wat` A wat function in string.
 ///
 /// ### Returns
-/// If successful, returns a vector of `FrameEntry` representing the frames in the function.
-/// The order is not guaranteed.
-/// Or an error with a message will be returned.
+/// A vector of `FrameEntry` representing the frames in the function.
+/// The order of returned frames is not guaranteed.
 ///
 /// ### Warning
 /// This is a simplified version and does not cover all frames in a WebAssembly function.
 /// There is no support for `try` or `catch` frames. etc.
+/// For now, we only support "loop", "if", "else", "block"
 ///
-/// And even this function returns an Ok, it does not mean that the function is well-formed.
-/// This function just does its best to match the frames in the function.
+/// It does not check the wast func is well-formed.
+/// It just does its best to match the frames in the function.
 ///
 /// ### Example
 ///
 /// ```
 /// # use codillon::wast_utils::{frame_match, FrameKind};
 /// let wat = "func\nblock\ni32.const 42\ndrop\nend";
-/// let entries = frame_match(wat).unwrap();
+/// let entries = frame_match(wat);
 /// assert_eq!(entries.len(), 1);
 /// assert_eq!(entries[0].kind, FrameKind::Block);
 /// assert_eq!(entries[0].range, 1..=4);
 /// ```
-pub fn frame_match(wat: &str) -> Result<Vec<FrameEntry>, Box<dyn core::error::Error>> {
+pub fn frame_match(wat: &str) -> Vec<FrameEntry> {
     // This is the entries that will be returned.
     let mut entries = Vec::new();
 
-    // Use stacks as memory of the beginning of any frame.
+    // Use stacks as memory of frame begining borders.
     let mut kind_stack = Vec::new();
     let mut line_stack = Vec::new();
 
-    let mut buf = ParseBuffer::new(wat)?;
-    // ParseBuffer does not track spans by default, so we need to enable it.
+    let mut buf =if let Ok(buf) = ParseBuffer::new(wat)
+    {
+        buf
+    }
+    else
+    {
+        return entries;
+    };
+    // ParseBuffer does not track spans by default, so we need to enable span tracing manually.
     buf.track_instr_spans(true);
-    let func = parser::parse::<wast::core::Func>(&buf)?;
+
+    let func = if let Ok(func) = parser::parse::<wast::core::Func>(&buf)
+    {
+        func
+    }
+    else
+    {
+        return entries;
+    };
 
     let expression = if let FuncKind::Inline {
         locals: _,
@@ -94,15 +109,13 @@ pub fn frame_match(wat: &str) -> Result<Vec<FrameEntry>, Box<dyn core::error::Er
     {
         expression
     } else {
-        return Err("Function is not inline".into());
+        return entries;
     };
 
     for (instr, span) in expression.instrs.iter().zip(
         expression
             .instr_spans
-            .iter()
-            .next()
-            .expect("Expected at least one span slice"),
+            .expect("Expected Spans for instructions"),
     ) {
         match instr {
             Instruction::Block(_) => {
@@ -115,18 +128,23 @@ pub fn frame_match(wat: &str) -> Result<Vec<FrameEntry>, Box<dyn core::error::Er
                 kind_stack.push(FrameKind::Loop);
                 line_stack.push(span.linecol_in(wat).0);
             }
+            Instruction::If(_) => {
+                kind_stack.push(FrameKind::If);
+                line_stack.push(span.linecol_in(wat).0);
+            }
             Instruction::Else(_) => {
                 let last_frame_kind = kind_stack.pop();
-                let span_start = line_stack.pop();
-                if let Some(frame_kind) = last_frame_kind {
-                    let span_start = span_start.unwrap(); // Will never panic
+                let last_span_start = line_stack.pop();
+                if let Some(FrameKind::If) = last_frame_kind {
+                    let span_start = last_span_start.unwrap(); // Will never panic
                     let span_end = span.linecol_in(wat).0 - 1;
                     entries.push(FrameEntry {
-                        kind: frame_kind,
+                        kind: FrameKind::If,
                         range: span_start..=span_end,
                     });
                 } else {
-                    return Err("Else without matching block".into());
+                    // Unmatched else
+                    return entries;
                 }
                 let span_start = span.linecol_in(wat).0;
                 kind_stack.push(FrameKind::Else);
@@ -134,24 +152,23 @@ pub fn frame_match(wat: &str) -> Result<Vec<FrameEntry>, Box<dyn core::error::Er
             }
             Instruction::End(_) => {
                 let last_frame_kind = kind_stack.pop();
-                let span_start = line_stack.pop();
+                let last_span_start = line_stack.pop();
                 if let Some(frame_kind) = last_frame_kind {
-                    let span_start = span_start.unwrap();
+                    let span_start = last_span_start.unwrap();
                     let span_end = span.linecol_in(wat).0;
                     entries.push(FrameEntry {
                         kind: frame_kind,
                         range: span_start..=span_end,
                     });
                 } else {
-                    return Err("End without matching block".into());
+                    // Unmatched End
+                    return entries;
                 }
             }
-            _ => {
-                // Ignore other instructions
-            }
+            _ => () // Ignore other instructions
         }
     }
-    Ok(entries)
+    entries
 }
 
 #[cfg(test)]
@@ -160,58 +177,44 @@ mod tests {
 
     #[test]
     fn test_frame_match() {
-        let s = r#"func
-block
-i32.const 42
-drop
-end
-block
-loop
-i32.const 43
-drop
-else
-i32.const 44
-drop
-end
-end
+        let well_formed = 
+r#"func         ;; 0
+block           ;; 1
+i32.const 42    ;; 2
+drop            ;; 3
+end             ;; 4
+block           ;; 5
+loop            ;; 6
+if              ;; 7
+i32.const 43    ;; 8
+drop            ;; 9
+else            ;; 10
+i32.const 44    ;; 11
+drop            ;; 12
+end             ;; 13
+end             ;; 14
+end             ;; 15
 "#;
-        let entries = frame_match(s).unwrap();
-        assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0].kind, FrameKind::Block);
-        assert_eq!(entries[0].range, 1..=4);
-        assert_eq!(entries[1].kind, FrameKind::Loop);
-        assert_eq!(entries[1].range, 6..=8);
-        assert_eq!(entries[2].kind, FrameKind::Else);
-        assert_eq!(entries[2].range, 9..=12);
-        assert_eq!(entries[3].kind, FrameKind::Block);
-        assert_eq!(entries[3].range, 5..=13);
-    }
 
-    #[test]
-    fn test_frame_match1() {
-        let s = r#"func
-block
-i32.const 42
-drop
-end
-block
-loop
-i32.const 43
-drop
-else
-i32.const 44
-drop
-end
-end
-end
-"#;
-        assert!(
-            frame_match(s).is_err()
-                && frame_match(s)
-                    .unwrap_err()
-                    .to_string()
-                    .contains("End without matching block")
-        );
+
+        let entries = frame_match(well_formed);
+
+        let expected_entries = vec![
+            FrameEntry { kind: FrameKind::Block, range: 1..=4 },
+            FrameEntry { kind: FrameKind::Block, range: 5..=15 },
+            FrameEntry { kind: FrameKind::If, range: 7..=9 },
+            FrameEntry { kind: FrameKind::Loop, range: 6..=14 },
+            FrameEntry { kind: FrameKind::Else, range: 10..=13 },
+        ];
+
+        assert_eq!(entries.len(), expected_entries.len());
+        
+        // Check that all expected entries are present
+        for expected in &expected_entries {
+            assert!(entries.iter().any(|entry| entry == expected),
+            "Missing expected entry: {:?}", expected);
+        }
+        
     }
 
     #[test]
