@@ -77,7 +77,7 @@ pub struct Frame {
     pub range: RangeInclusive<usize>,
 }
 
-/// Tries to match frames in a WebAssembly function written in WAT format as much as possible
+/// Tries to match frames in a WebAssembly Expr written in Text format as much as possible
 ///
 /// ### Parameters
 /// `expr` An expr parsed by wast  tool
