@@ -1,13 +1,42 @@
 //! This module contains the frontend components for index page.
-use leptos::prelude::*;
-use std::collections::LinkedList;
+use leptos::tachys::html::event::KeyboardEvent;
+use leptos::{html, prelude::*};
 
 mod boxlist;
 mod textbox;
 
 #[component]
 pub fn App() -> impl IntoView {
-    view! { <boxlist::Boxlist /> }
+    let container_ref: NodeRef<html::Div> = NodeRef::new();
+
+    let on_key_down = move |ev: KeyboardEvent| {
+        leptos::logging::log!("Key pressed: {}", ev.key());
+        match ev.key().as_str() {
+            "ArrowUp" => {
+                leptos::logging::log!("ArrowUp pressed");
+            }
+            "ArrowDown" => {
+                leptos::logging::log!("ArrowDown pressed");
+            }
+            "Enter" => {
+                leptos::logging::log!("Enter pressed");
+            }
+            _ => {}
+        }
+    };
+
+    // Ensure we're focused on component mount.
+
+    Effect::new(move |_| {
+        if let Some(div) = container_ref.get() {
+            let _ = div.focus();
+        }
+    });
+
+    view! {
+        <div class="main" tabindex="0" node_ref=container_ref  on:keydown=on_key_down>
+        <boxlist::Boxlist />
+    </div> }
 }
 
 /// Hold all the code lines in a linked list as a buffer.
