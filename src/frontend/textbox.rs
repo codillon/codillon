@@ -16,7 +16,7 @@ pub fn Textbox(text: RwSignal<String>) -> impl IntoView {
     const INCORRECT_EMOJI: &str = "❌";
 
     view! {
-        <input type="text" bind:value=text placeholder="Enter Some Instruction" />
+        <div class="textLineContents" >{text}</div>
         {move || if is_valid() { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
     }
 }

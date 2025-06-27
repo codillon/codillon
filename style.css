@@ -12,14 +12,32 @@ body {
 .main {
     background-color: #EAEAEA;
     height: 100vh;
+    padding: 8px;
+}
+
+.editor{
+    display:flex;
+    flex-direction: column;
+}
+
+.editorLines {
+    display: flex;
+    flex-direction: column;
+
 }
 
 .textLine {
-    position: absolute;   
+    display: flex;
+    flex-direction: row;
+}
+
+.textLineContents {
+    flex: 1;
 }
 
 
 .buttonContainer {
     display: flex;
+    flex-direction: row;
     gap: 8px;
 }
