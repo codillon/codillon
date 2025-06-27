@@ -43,9 +43,16 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
-        <div class="main" tabindex="0" node_ref=container_ref  on:keydown=on_key_down on:click=handle_click>
-        <boxlist::Boxlist focused_line=current_line_number/>
-    </div> }
+        <div
+            class="main"
+            tabindex="0"
+            node_ref=container_ref
+            on:keydown=on_key_down
+            on:click=handle_click
+        >
+            <boxlist::Boxlist focused_line=current_line_number />
+        </div>
+    }
 }
 
 /// Hold all the code lines in a linked list as a buffer.

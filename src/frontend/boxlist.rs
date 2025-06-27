@@ -28,21 +28,24 @@ pub fn Boxlist(focused_line: ReadSignal<usize>) -> impl IntoView {
                 <button on:click=pop_line>"Remove Line"</button>
             </div>
             <div class="editorLines">
-            <ForEnumerate
-                each=move || editor_buffer.get().lines
-                key=|entry| entry.id
-                children=move |index, entry| {
-                    let is_focused = move || focused_line.get() == index.get() + 1;
-                    view! {
-                    <div class="textLine" data-index=entry.id data-focused=move || is_focused().to_string()>
-                         <span class="lineLabel">{index}| </span>
+                <ForEnumerate
+                    each=move || editor_buffer.get().lines
+                    key=|entry| entry.id
+                    children=move |index, entry| {
+                        let is_focused = move || focused_line.get() == index.get() + 1;
+                        view! {
+                            <div
+                                class="textLine"
+                                data-index=entry.id
+                                data-focused=move || is_focused().to_string()
+                            >
+                                <span class="lineLabel">{index}|</span>
 
-                        <Textbox text=entry.value />
-                    </div>
-
+                                <Textbox text=entry.value />
+                            </div>
+                        }
                     }
-                }
-            />
+                />
             </div>
         </div>
     }
