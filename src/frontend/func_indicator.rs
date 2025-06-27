@@ -15,7 +15,15 @@ use leptos::prelude::*;
 pub fn FuncIndicator(editor_buffer: ReadSignal<EditorBuffer>) -> impl IntoView {
     view! {
         <div style="position:fixed; top: 1rem; right: 1rem; font-size: 3rem;">
-            {move || if editor_buffer.get().all_lines_well_formed() && is_well_formed_func(&editor_buffer.get().concat()) { "😆" } else { "😕" }}
+            {move || {
+                if editor_buffer.get().all_lines_well_formed()
+                    && is_well_formed_func(&editor_buffer.get().concat())
+                {
+                    "😆"
+                } else {
+                    "😕"
+                }
+            }}
         </div>
     }
 }
