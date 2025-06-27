@@ -3,9 +3,9 @@ use super::textbox::Textbox;
 use leptos::prelude::*;
 
 /// This function creates a list of textboxs with a push button and a pop button.
-/// Initially, it will have 0 textboxes.
+/// Initially, it will have 1 textbox.
 #[component]
-pub fn Boxlist() -> impl IntoView {
+pub fn Boxlist(focused_line: ReadSignal<usize>) -> impl IntoView {
     let (editor_buffer, set_editor_buffer) = signal(EditorBuffer::default());
 
     // Will be triggered by the button, see below
@@ -17,22 +17,36 @@ pub fn Boxlist() -> impl IntoView {
         set_editor_buffer.write().pop_line();
     };
 
+    Effect::new(move |_| {
+        set_editor_buffer.write().push_line();
+    });
+
     view! {
-        <div>
-            <button on:click=push_line>"Add Line"</button>
-            <button on:click=pop_line>"Remove Line"</button>
-            <ForEnumerate
-                each=move || editor_buffer.get().lines
-                key=|entry| entry.id
-                children=move |index, entry| {
-                    view! {
-                        <br />
-                        {index}
-                        ": "
-                        <Textbox text=entry.value />
+        <div class="editor">
+            <div class="buttonContainer">
+                <button on:click=push_line>"Add Line"</button>
+                <button on:click=pop_line>"Remove Line"</button>
+            </div>
+            <div class="editorLines">
+                <ForEnumerate
+                    each=move || editor_buffer.get().lines
+                    key=|entry| entry.id
+                    children=move |index, entry| {
+                        let is_focused = move || focused_line.get() == index.get() + 1;
+                        view! {
+                            <div
+                                class="textLine"
+                                data-index=entry.id
+                                data-focused=move || is_focused().to_string()
+                            >
+                                <span class="lineLabel">{index}|</span>
+
+                                <Textbox text=entry.value />
+                            </div>
+                        }
                     }
-                }
-            />
+                />
+            </div>
         </div>
     }
 }
