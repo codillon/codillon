@@ -89,8 +89,8 @@ pub fn Boxlist(focused_line: ReadSignal<usize>) -> impl IntoView {
                     let is_focused = move || focused_line.get() == index.get() + 1;
                     view! {
                     <div class="textLine" data-index=entry.id data-focused=move || is_focused().to_string()>
-                        {index}
-                        ": "
+                         <span class="lineLabel">{index}| </span>
+
                         <Textbox text=entry.value />
                     </div>
 

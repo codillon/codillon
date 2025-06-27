@@ -29,10 +29,38 @@ body {
 .textLine {
     display: flex;
     flex-direction: row;
+    align-items: center;
 }
 
+.lineLabel {
+    display: inline-block;
+    height: 100%;
+    display: flex;
+    align-items: center;
+}
+
+/* Focus state */
 .textLine[data-focused="true"] {
     background-color: #f0f0f0 !important;
+    position: relative;
+}
+
+/* Create cursor */
+.textLine[data-focused="true"]::after {
+  content: "";
+  position: absolute;
+  height: 1em;
+  width: 1px;
+  background-color: black;
+  animation: blink 1s steps(1) infinite;
+  left: 2em; 
+  top: 0.2em;
+}
+
+@keyframes blink {
+  0%   { opacity: 1; }
+  50%  { opacity: 0; }
+  100% { opacity: 1; }
 }
 
 
