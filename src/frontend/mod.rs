@@ -1,9 +1,8 @@
 //! This module contains the frontend components for index page.
-use std::ptr::dangling;
-
 use leptos::tachys::html::event::KeyboardEvent;
 use leptos::tachys::html::event::MouseEvent;
 use leptos::{html, prelude::*};
+use std::collections::LinkedList;
 
 mod boxlist;
 mod textbox;
