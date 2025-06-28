@@ -15,7 +15,6 @@ pub fn Textbox(well_formed: Signal<bool>, text: RwSignal<String>) -> impl IntoVi
 #[component]
 pub fn Boxlist(inputs: ReadSignal<Vec<RwSignal<String>>>, lines: ReadSignal<Vec<CodeLineEntry>>, button_click: WriteSignal<ButtonClickType>) -> impl IntoView {
     let push_line = move |_| {
-        leptos::logging::log!("Click Push");
         button_click.set(ButtonClickType::AddLine);
     };
 

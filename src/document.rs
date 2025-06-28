@@ -14,7 +14,7 @@ impl CodeLineEntry {
     pub fn new(text_input: ReadSignal<String>, id: usize) -> CodeLineEntry {
         CodeLineEntry {
             text: Signal::derive(move || text_input.get()),
-            well_formed: Memo::new(move |_| is_well_formed_instr(&text_input.get())).into(),
+            well_formed: Signal::derive(move || is_well_formed_instr(&text_input.get())),
             id
         }
     }
@@ -48,7 +48,9 @@ impl Document {
                     lines.write().pop();
                     box_text_inputs.write().pop();
                 }
-                _ => panic!("Unknown Button Click Type")
+                ButtonClickType::InitialState => {
+                    // Do nothing for initial state, unreachable
+                }
             }
         );
         Document { lines }
