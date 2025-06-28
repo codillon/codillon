@@ -1,5 +1,5 @@
-use codillon::frontend;
+use codillon::Website;
 
 fn main() {
-    leptos::mount::mount_to_body(frontend::App);
+    leptos::mount::mount_to_body(Website::app);
 }

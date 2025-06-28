@@ -42,6 +42,7 @@ pub fn is_well_formed_instr(s: &str) -> bool {
 ///
 /// # Assumptions
 /// Each instruction is plain
+#[allow(dead_code)]
 pub fn is_well_formed_func(lines: &str) -> bool {
     //wrap as module
     let func = format!("module (func {lines})");
