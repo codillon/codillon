@@ -207,8 +207,7 @@ mod tests {
         for expected in &expected_frames {
             assert!(
                 frames.contains(expected),
-                "Missing expected frame: {:?}",
-                expected
+                "Missing expected frame: {expected:?}",
             );
         }
     }
