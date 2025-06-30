@@ -3,15 +3,25 @@ use leptos::prelude::*;
 
 use crate::utils::is_well_formed_instr;
 
+/// It holds all logical signals corresponding to a single code line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodeLineEntry {
+    // Will be bind to a textbox
+    // Use Arc because they need to be wrapped in Rwsignal<Vec<_>>.
+    // See [link](https://book.leptos.dev/appendix_life_cycle.html#signals-can-be-used-after-they-are-disposed)
     pub text_input: ArcRwSignal<String>,
+
+    // Logical signal indicating correctness
     pub well_formed: ArcSignal<bool>,
-    pub id: usize,
+
+    // The id is unique to the containing EditorBuffer and is maintained across
+    // insertions and deletions elsewhere in the buffer. This lets Leptos and
+    // the browser avoid re-rendering unchanged lines.
+    pub unique_id: usize,
 }
 
 impl CodeLineEntry {
-    pub fn new(id: usize) -> CodeLineEntry {
+    pub fn new(unique_id: usize) -> CodeLineEntry {
         let text_input = ArcRwSignal::new(String::new());
         let cloned_text_input = text_input.clone();
         let well_formed = ArcSignal::derive(move || is_well_formed_instr(&cloned_text_input.get()));
@@ -19,14 +29,15 @@ impl CodeLineEntry {
         CodeLineEntry {
             text_input,
             well_formed,
-            id,
+            unique_id,
         }
     }
 }
 
+// Hold logical signals of the website
 #[derive(Debug)]
 pub struct Document {
-    pub lines: Signal<Vec<CodeLineEntry>>, // keep Signal for external read
+    pub lines: Signal<Vec<CodeLineEntry>>,
 }
 
 impl Document {

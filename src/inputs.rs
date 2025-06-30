@@ -1,5 +1,6 @@
 use leptos::prelude::*;
 
+// A simple enum for `Add Line` and `Remove Line` buttons
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ButtonClickType {
     AddLine,

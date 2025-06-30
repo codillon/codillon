@@ -5,9 +5,12 @@ mod frontend;
 mod inputs;
 mod utils;
 
+/// Hold logical items of our website
 #[derive(Debug)]
 pub struct Website {
+    // Hold signals corresponding with direct user input
     pub inputs: inputs::Inputs,
+    // Hold other logic signals
     pub doc: document::Document,
 }
 
@@ -28,8 +31,6 @@ impl Website {
         let button_click = website.inputs.button_on_click;
         let lines = website.doc.lines;
 
-        view! {
-            <frontend::Boxlist lines=lines button_click=button_click.write_only()/>
-        }
+        view! { <frontend::Boxlist lines button_click=button_click.write_only() /> }
     }
 }
