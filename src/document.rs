@@ -1,27 +1,34 @@
+use crate::utils::is_well_formed_func;
+
 use super::inputs::ButtonClickType;
-use super::utils::is_well_formed_instrline;
+use super::utils::{Frame, frame_match, is_well_formed_instrline};
 use leptos::prelude::*;
 
 // Hold properties of this code line
 #[derive(Debug, Clone)]
-pub struct InstrInfo
-{
+pub struct InstrInfo {
     pub well_formed: bool,
     pub kind: InstrKind,
 }
 
+impl Default for InstrInfo {
+    fn default() -> Self {
+        InstrInfo {
+            well_formed: true,
+            kind: InstrKind::Other,
+        }
+    }
+}
+
 /// For frame matching.
 #[derive(Debug, PartialEq, Clone, Copy)]
-pub enum InstrKind
-{ 
-    Entry,    // Consists of: block, loop 
-    If,
+pub enum InstrKind {
+    Entry, // Consists of: block, loop, if
     Else,
     End,
     Other,
-    Malformed // Will be remove in the future after enforcement is implemented
+    Malformed, // Will be remove in the future after enforcement is implemented
 }
-
 
 /// It holds all logical signals corresponding to a single code line.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,12 +51,11 @@ impl CodeLineEntry {
     pub fn new(unique_id: usize) -> CodeLineEntry {
         let text_input = ArcRwSignal::new(String::new());
         let cloned_text_input = text_input.clone();
-        let info = ArcSignal::derive(move || 
-        {
+        let info = ArcSignal::derive(move || {
             let result = is_well_formed_instrline(&cloned_text_input.get());
             InstrInfo {
                 well_formed: result.is_ok(),
-                kind: result.unwrap_or(InstrKind::Malformed), 
+                kind: result.unwrap_or(InstrKind::Malformed),
             }
         });
         CodeLineEntry {
@@ -63,14 +69,42 @@ impl CodeLineEntry {
 // Hold logical signals of the website
 #[derive(Debug)]
 pub struct Document {
+    // Signals related to a single codeline
     pub lines: Signal<Vec<CodeLineEntry>>,
+
+    // Matched Frames of the whole program
+    pub frames: Signal<Vec<Frame>>,
+
+    // Indicating correctness of the whole func
+    pub well_formed: Signal<bool>,
 }
 
 impl Document {
     pub fn new(button_on_click: ReadSignal<ButtonClickType>) -> Document {
         let mut id_counter: usize = 0;
-        let lines = RwSignal::new(Vec::new());
+        let lines: RwSignal<Vec<CodeLineEntry>> = RwSignal::new(Vec::new());
 
+        let frames = Signal::derive(move || {
+            frame_match(lines.get().iter().map(|entry| entry.info.get())).unwrap_or_default()
+        });
+        let well_formed: Signal<bool> = Signal::derive(move || {
+            let lines = lines.get();
+            if lines.iter().any(|entry| !entry.info.get().well_formed) {
+                return false;
+            }
+
+            let text = lines
+                .iter()
+                .map(|entry| entry.text_input.get())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if !is_well_formed_func(&text) {
+                return false;
+            }
+
+            true
+        });
         Effect::new(move |_| {
             match button_on_click.get() {
                 ButtonClickType::AddLine => {
@@ -85,9 +119,10 @@ impl Document {
                 }
             }
         });
-
         Document {
             lines: lines.into(),
+            frames,
+            well_formed,
         }
     }
 }

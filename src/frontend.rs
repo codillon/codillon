@@ -1,7 +1,7 @@
-use crate::document::InstrInfo;
-
 use super::document::CodeLineEntry;
 use super::inputs::ButtonClickType;
+use super::utils::Frame;
+use crate::document::InstrInfo;
 use leptos::prelude::*;
 
 const CORRECT_EMOJI: &str = "✅";
@@ -53,13 +53,35 @@ pub fn Boxlist(
                         <br />
                         {index}
                         ": "
-                        <Textbox
-                            info=entry.info.into()
-                            text=entry.text_input.into()
-                        />
+                        <Textbox info=entry.info.into() text=entry.text_input.into() />
                     }
                 }
             />
+        </div>
+    }
+}
+
+/// To show the well-formness of the whole function and framematching results.
+#[component]
+pub fn GlobalStatus(well_formed: Signal<bool>, frames: Signal<Vec<Frame>>) -> impl IntoView {
+    view! {
+        <div>
+            <div>
+                "Func Wellformness: "
+                {move || if well_formed.get() { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
+            </div>
+            <div>
+                <h4>"Frames:"</h4>
+                {move || {
+                    frames
+                        .get()
+                        .into_iter()
+                        .map(|frame| {
+                            view! { <div>{format!("{:?}", frame)}</div> }
+                        })
+                        .collect::<Vec<_>>()
+                }}
+            </div>
         </div>
     }
 }

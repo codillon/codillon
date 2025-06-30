@@ -31,6 +31,10 @@ impl Website {
         let button_click = website.inputs.button_on_click;
         let lines = website.doc.lines;
 
-        view! { <frontend::Boxlist lines button_click=button_click.write_only() /> }
+        view! {
+            <frontend::Boxlist lines button_click=button_click.write_only() />
+            <hr />
+            <frontend::GlobalStatus well_formed=website.doc.well_formed frames=website.doc.frames />
+        }
     }
 }
