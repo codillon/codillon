@@ -71,13 +71,16 @@ pub fn GlobalStatus(well_formed: Signal<bool>, frames: Signal<Vec<Frame>>) -> im
                 {move || if well_formed.get() { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
             </div>
             <div>
-                <h4>"Frames:"</h4>
+                "Frames:"
                 {move || {
                     frames
                         .get()
                         .into_iter()
                         .map(|frame| {
-                            view! { <div>{format!("{:?}", frame)}</div> }
+                            view! {
+                                <br />
+                                {format!("{frame:?}")}
+                            }
                         })
                         .collect::<Vec<_>>()
                 }}
