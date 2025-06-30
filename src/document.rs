@@ -1,7 +1,27 @@
 use super::inputs::ButtonClickType;
+use super::utils::is_well_formed_instrline;
 use leptos::prelude::*;
 
-use crate::utils::is_well_formed_instr;
+// Hold properties of this code line
+#[derive(Debug, Clone)]
+pub struct InstrInfo
+{
+    pub well_formed: bool,
+    pub kind: InstrKind,
+}
+
+/// For frame matching.
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum InstrKind
+{ 
+    Entry,    // Consists of: block, loop 
+    If,
+    Else,
+    End,
+    Other,
+    Malformed // Will be remove in the future after enforcement is implemented
+}
+
 
 /// It holds all logical signals corresponding to a single code line.
 #[derive(Debug, Clone, PartialEq)]
@@ -11,8 +31,8 @@ pub struct CodeLineEntry {
     // See [link](https://book.leptos.dev/appendix_life_cycle.html#signals-can-be-used-after-they-are-disposed)
     pub text_input: ArcRwSignal<String>,
 
-    // Logical signal indicating correctness
-    pub well_formed: ArcSignal<bool>,
+    // Logical signal
+    pub info: ArcSignal<InstrInfo>,
 
     // The id is unique to the containing EditorBuffer and is maintained across
     // insertions and deletions elsewhere in the buffer. This lets Leptos and
@@ -24,11 +44,17 @@ impl CodeLineEntry {
     pub fn new(unique_id: usize) -> CodeLineEntry {
         let text_input = ArcRwSignal::new(String::new());
         let cloned_text_input = text_input.clone();
-        let well_formed = ArcSignal::derive(move || is_well_formed_instr(&cloned_text_input.get()));
-
+        let info = ArcSignal::derive(move || 
+        {
+            let result = is_well_formed_instrline(&cloned_text_input.get());
+            InstrInfo {
+                well_formed: result.is_ok(),
+                kind: result.unwrap_or(InstrKind::Malformed), 
+            }
+        });
         CodeLineEntry {
             text_input,
-            well_formed,
+            info,
             unique_id,
         }
     }

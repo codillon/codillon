@@ -1,3 +1,5 @@
+use crate::document::InstrInfo;
+
 use super::document::CodeLineEntry;
 use super::inputs::ButtonClickType;
 use leptos::prelude::*;
@@ -12,10 +14,10 @@ const INCORRECT_EMOJI: &str = "❌";
 ///
 /// `text`: the signal for the text of this textbox
 #[component]
-pub fn Textbox(well_formed: Signal<bool>, text: RwSignal<String>) -> impl IntoView {
+pub fn Textbox(info: Signal<InstrInfo>, text: RwSignal<String>) -> impl IntoView {
     view! {
         <input type="text" bind:value=text placeholder="Enter Some Instruction" />
-        {move || if well_formed.get() { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
+        {move || if info.get().well_formed { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
     }
 }
 
@@ -52,7 +54,7 @@ pub fn Boxlist(
                         {index}
                         ": "
                         <Textbox
-                            well_formed=entry.well_formed.into()
+                            info=entry.info.into()
                             text=entry.text_input.into()
                         />
                     }
