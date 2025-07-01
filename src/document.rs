@@ -80,7 +80,7 @@ pub struct Document {
     pub active_line: RwSignal<Option<usize>>,
 
     // Forbits everything except the active line
-    pub is_frozen: Signal<bool>
+    pub is_frozen: Signal<bool>,
 }
 
 impl Document {
@@ -96,25 +96,18 @@ impl Document {
 
         let lines_clone = lines.clone();
         let active_line_clone = active_line.clone();
-        let is_frozen = Signal::derive(move ||
-        {
-            if let Some(active_line_num) = active_line_clone.get()
-            {
+        let is_frozen = Signal::derive(move || {
+            if let Some(active_line_num) = active_line_clone.get() {
                 leptos::logging::log!("ActiveLine Line {}", active_line_num);
                 lines_clone.with(|lines| {
-                    let entry:Option<CodeLineEntry> = lines.get(active_line_num).cloned();
-                    if let Some(entry) = entry
-                    {
+                    let entry: Option<CodeLineEntry> = lines.get(active_line_num).cloned();
+                    if let Some(entry) = entry {
                         !entry.info.get().well_formed
-                    }
-                    else
-                    {
+                    } else {
                         false
                     }
                 })
-            }
-            else
-            {
+            } else {
                 false
             }
         });
@@ -151,16 +144,13 @@ impl Document {
             match key.as_str() {
                 "Enter" => {
                     if let Some(active_idx) = active_line_clone.get_untracked() {
-                        if is_frozen
-                        {
+                        if is_frozen {
                             return;
                         }
                         lines_write.insert(active_idx + 1, CodeLineEntry::new(id_counter));
                         active_line_clone.set(Some(active_idx + 1));
                         id_counter += 1;
-                    }
-                    else
-                    {
+                    } else {
                         lines_write.insert(0, CodeLineEntry::new(id_counter));
                         active_line_clone.set(Some(0));
                         id_counter += 1;
@@ -178,7 +168,8 @@ impl Document {
                                 if lines_write.is_empty() {
                                     active_line_clone.set(None);
                                 } else {
-                                    active_line_clone.set(Some(max(active_idx.saturating_sub(1), 0)));
+                                    active_line_clone
+                                        .set(Some(max(active_idx.saturating_sub(1), 0)));
                                 }
                             }
                         }
@@ -214,8 +205,7 @@ impl Document {
         Effect::new(move |_| {
             let clicked_id = click_one_line.get();
             let is_frozen = is_frozen.get_untracked();
-            if is_frozen
-            {
+            if is_frozen {
                 return;
             }
 
@@ -232,7 +222,7 @@ impl Document {
             frames,
             well_formed,
             active_line: active_line.into(),
-            is_frozen
+            is_frozen,
         }
     }
 }

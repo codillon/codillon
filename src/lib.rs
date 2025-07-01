@@ -21,6 +21,10 @@ pub fn App() -> impl IntoView {
             click_one_line=inputs.click_one_line.write_only()
         />
         <hr />
-        <frontend::GlobalStatus well_formed=doc.well_formed frames=doc.frames is_frozen=doc.is_frozen/>
+        <frontend::GlobalStatus
+            well_formed=doc.well_formed
+            frames=doc.frames
+            is_frozen=doc.is_frozen
+        />
     }
 }
