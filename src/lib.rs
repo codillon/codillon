@@ -5,35 +5,22 @@ mod frontend;
 mod inputs;
 mod utils;
 
-/// Hold logical items of our website
-#[derive(Debug)]
-pub struct Website {
-    // Hold signals corresponding with direct user input
-    pub inputs: inputs::Inputs,
-    // Hold other logic signals
-    pub doc: document::Document,
-}
+/// Render the whole App
+#[component]
+pub fn App() -> impl IntoView {
+    let inputs = inputs::Inputs::default();
+    let doc = document::Document::new(
+        inputs.keystroke.into(),
+        inputs.click_one_line.read_only().into(),
+    );
 
-impl Default for Website {
-    fn default() -> Self {
-        let inputs = inputs::Inputs::default();
-        let keystroke = inputs.keystroke.clone().read_only();
-        Website {
-            inputs,
-            doc: document::Document::new(keystroke.into()),
-        }
-    }
-}
-
-impl Website {
-    pub fn app() -> impl IntoView {
-        let website = Website::default();
-        let lines = website.doc.lines;
-
-        view! {
-            <frontend::Editor lines active_line=website.doc.active_line.read_only() />
-            <hr />
-            <frontend::GlobalStatus well_formed=website.doc.well_formed frames=website.doc.frames />
-        }
+    view! {
+        <frontend::Editor
+            lines=doc.lines
+            active_line=doc.active_line.read_only()
+            click_one_line=inputs.click_one_line.write_only()
+        />
+        <hr />
+        <frontend::GlobalStatus well_formed=doc.well_formed frames=doc.frames />
     }
 }

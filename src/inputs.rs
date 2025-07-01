@@ -4,9 +4,13 @@ use leptos::{
 };
 use leptos_use::{use_event_listener, use_window};
 
+/// Store users' direct input signals
 #[derive(Debug)]
 pub struct Inputs {
+    // Signal for content of keystroke
     pub keystroke: RwSignal<String>,
+    // Signal for one code line being clicked, saves unique_id
+    pub click_one_line: RwSignal<usize>,
 }
 
 impl Default for Inputs {
@@ -16,6 +20,9 @@ impl Default for Inputs {
             keystroke.set(e.key());
         });
 
-        Self { keystroke }
+        Self {
+            keystroke,
+            click_one_line: RwSignal::new(0),
+        }
     }
 }

@@ -1,24 +1,59 @@
-.code-line {
-    padding: 0;
-    border: none;
-    border-radius: 0;
-    font-family: monospace;
-    white-space: pre;
-    margin: 0;
-
+.code-lines-container {
     display: flex;
-    justify-content: space-between;
-    align-items: center;
+    flex-direction: column;
 }
 
+.code-line-wrapper {
+    display: flex;
+    align-items: flex-start;
+}
+
+.line-number {
+    width: 2em;
+    text-align: right;
+    margin-right: 0.5em;
+    color: #888;
+    font-family: monospace;
+    padding-top: 0.2em;
+}
+
+.code-line {
+    display: flex;
+    flex: 1;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: flex-start;
+    font-family: monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background-color: transparent;
+    padding: 0;
+    margin: 0;
+    border: none;
+}
+
+.code-content {
+    white-space: pre-wrap;
+    flex-grow: 1;
+    word-break: break-word;
+}
+
+
 .code-line-active {
-    background-color: #cde9ff;  /* soft blue highlight */
+    background-color: #cde9ff;
     font-weight: bold;
 }
 
 .code-line-inactive {
     background-color: transparent;
     font-weight: normal;
+}
+
+.emoji {
+    user-select: none;
+    margin-left: 1rem;
+    flex-shrink: 0;
+    padding-top: 0.2em; /* optional, match line-number alignment */
 }
 
 .code-lines-container {
@@ -28,7 +63,7 @@
 
 .code-line-wrapper {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
 }
 
 .line-number {
@@ -37,19 +72,50 @@
     margin-right: 0.5em;
     color: #888;
     font-family: monospace;
+    padding-top: 0.2em;
 }
 
 .code-line {
+    display: flex;
     flex: 1;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: flex-start;
+    font-family: monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background-color: transparent;
+    padding: 0;
+    margin: 0;
+    border: none;
 }
 
 .code-content {
-    white-space: pre;
+    white-space: pre-wrap;
     flex-grow: 1;
+    word-break: break-word;
+}
+
+
+.code-line-active {
+    background-color: #cde9ff;
+    font-weight: bold;
+}
+
+.code-line-inactive {
+    background-color: transparent;
+    font-weight: normal;
 }
 
 .emoji {
     user-select: none;
     margin-left: 1rem;
     flex-shrink: 0;
+    padding-top: 0.2em; /* optional, match line-number alignment */
 }
+
+/* To remove the default border for focused element*/
+.code-line:focus {
+    outline: none;
+}
+

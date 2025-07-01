@@ -1,6 +1,7 @@
 use super::document::CodeLineEntry;
 use super::utils::Frame;
 use crate::document::InstrInfo;
+use leptos::ev::MouseEvent;
 use leptos::prelude::*;
 
 const CORRECT_EMOJI: &str = "✅";
@@ -9,20 +10,27 @@ const INCORRECT_EMOJI: &str = "❌";
 /// This component provides a textbox for one instruction and use emoji to indicate correctness.
 ///
 /// ### Parameters
-/// `well_formed`: the signal indicating correctness
+/// `info`: hold processed information of one code line
 ///
 /// `text`: the signal for the text of this textbox
 ///
 /// `is_active`: activity indicator
+///
+/// `clicked`: write signal for being clicked
 #[component]
 pub fn CodeLine(
     info: Signal<InstrInfo>,
     text: ReadSignal<String>,
     is_active: Signal<bool>,
+    clicked: WriteSignal<usize>,
+    unique_id: usize,
 ) -> impl IntoView {
     view! {
         <div
             tabindex="0"
+            on:click=move |_ev: MouseEvent| {
+                clicked.set(unique_id);
+            }
             class=move || {
                 if is_active.get() {
                     "code-line code-line-active"
@@ -45,11 +53,12 @@ pub fn CodeLine(
 /// ### Parameters
 /// `lines`: Read from this signal to get the content
 ///
-/// `button_click`: bind the buttons to this signal
+/// `active_line`: Signal for the active line's number
 #[component]
 pub fn Editor(
     lines: Signal<Vec<CodeLineEntry>>,
     active_line: ReadSignal<Option<usize>>,
+    click_one_line: WriteSignal<usize>,
 ) -> impl IntoView {
     let is_active = move |index: ReadSignal<usize>| {
         move || {
@@ -66,18 +75,21 @@ pub fn Editor(
                     each=move || lines.get()
                     key=|entry| entry.unique_id
                     children=move |index, entry| {
-                        let line_number = Signal::derive(move || index.get());
                         // 0-based line number
                         view! {
                             <div class="code-line-wrapper">
-                                <div class="line-number">
-                                    {move || line_number.get().to_string()}
-                                </div>
-                                <CodeLine
-                                    info=entry.info.into()
-                                    text=entry.text_input.read_only().into()
-                                    is_active=Signal::derive(is_active(index))
-                                />
+                                <div class="line-number">{move || index.get().to_string()}</div>
+                                {
+                                    view! {
+                                        <CodeLine
+                                            info=entry.info.into()
+                                            text=entry.text_input.read_only().into()
+                                            is_active=Signal::derive(is_active(index))
+                                            clicked=click_one_line
+                                            unique_id=entry.unique_id
+                                        />
+                                    }
+                                }
                             </div>
                         }
                     }

@@ -1,6 +1,6 @@
-use super::utils::{Frame, frame_match, is_well_formed_instrline};
-use crate::utils::is_well_formed_func;
+use super::utils::{Frame, frame_match, is_well_formed_func, is_well_formed_instrline};
 use leptos::prelude::*;
+use std::cmp::max;
 
 // Hold properties of this code line
 #[derive(Debug, Clone)]
@@ -67,7 +67,7 @@ impl CodeLineEntry {
 // Hold logical signals of the website
 #[derive(Debug)]
 pub struct Document {
-    // Signals related to a single codeline
+    // Signal for inserting/deleting line
     pub lines: Signal<Vec<CodeLineEntry>>,
 
     // Matched Frames of the whole program
@@ -81,13 +81,14 @@ pub struct Document {
 }
 
 impl Document {
-    pub fn new(keystroke: Signal<String>) -> Document {
-        let mut id_counter: usize = 0;
+    pub fn new(keystroke: Signal<String>, click_one_line: Signal<usize>) -> Document {
         let lines: RwSignal<Vec<CodeLineEntry>> = RwSignal::new(Vec::new());
         let active_line = RwSignal::new(None);
         let frames = Signal::derive(move || {
             frame_match(lines.get().iter().map(|entry| entry.info.get())).unwrap_or_default()
         });
+        let mut id_counter: usize = 0;
+
         let well_formed: Signal<bool> = Signal::derive(move || {
             let lines = lines.get();
             if lines.iter().any(|entry| !entry.info.get().well_formed) {
@@ -123,18 +124,15 @@ impl Document {
                     if let Some(active_idx) = active_line.get_untracked() {
                         if active_idx < lines_write.len() {
                             let entry = &lines_write[active_idx];
-                            let mut text = entry.text_input.get_untracked();
+                            let text = entry.text_input.get_untracked();
                             if !text.is_empty() {
-                                text.pop();
-                                entry.text_input.set(text);
-                            } else if lines_write.len() > 1 {
+                                entry.text_input.write().pop();
+                            } else {
                                 lines_write.remove(active_idx);
                                 if lines_write.is_empty() {
                                     active_line.set(None);
-                                } else if active_idx == 0 {
-                                    active_line.set(Some(0));
                                 } else {
-                                    active_line.set(Some(active_idx - 1));
+                                    active_line.set(Some(max(active_idx.saturating_sub(1), 0)));
                                 }
                             }
                         }
@@ -157,14 +155,20 @@ impl Document {
                 _ => {
                     if let Some(active_idx) = active_line.get_untracked() {
                         if active_idx < lines_write.len() {
-                            let entry = &lines_write[active_idx];
-                            let mut text = entry.text_input.get_untracked();
-                            if key.len() == 1 {
-                                text.push_str(&key);
-                                entry.text_input.set(text);
-                            }
+                            lines_write[active_idx].text_input.write().push_str(&key);
                         }
                     }
+                }
+            }
+        });
+
+        // Effect for clicking one line
+        Effect::new(move |_| {
+            let clicked_id = click_one_line.get();
+            for (idx, codeline) in lines.get_untracked().into_iter().enumerate() {
+                if codeline.unique_id == clicked_id {
+                    active_line.set(Some(idx));
+                    break;
                 }
             }
         });
