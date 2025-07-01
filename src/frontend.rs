@@ -101,7 +101,7 @@ pub fn Editor(
 
 /// To show the well-formness of the whole function and framematching results.
 #[component]
-pub fn GlobalStatus(well_formed: Signal<bool>, frames: Signal<Vec<Frame>>) -> impl IntoView {
+pub fn GlobalStatus(well_formed: Signal<bool>, frames: Signal<Vec<Frame>>, is_frozen: Signal<bool>) -> impl IntoView {
     view! {
         <div>
             <div>
@@ -122,6 +122,9 @@ pub fn GlobalStatus(well_formed: Signal<bool>, frames: Signal<Vec<Frame>>) -> im
                         })
                         .collect::<Vec<_>>()
                 }}
+            </div>
+            <div>
+                "Frozen:" {move || is_frozen.get()}
             </div>
         </div>
     }

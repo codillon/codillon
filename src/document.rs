@@ -36,7 +36,7 @@ pub struct CodeLineEntry {
     // See [link](https://book.leptos.dev/appendix_life_cycle.html#signals-can-be-used-after-they-are-disposed)
     pub text_input: ArcRwSignal<String>,
 
-    // Logical signal
+    // Logical signal for processed information of this signal codeline
     pub info: ArcSignal<InstrInfo>,
 
     // The id is unique to the containing EditorBuffer and is maintained across
@@ -78,19 +78,50 @@ pub struct Document {
 
     // Indication the line which will react to user's keystroke. Saves Some(LineNumber), initialized to None
     pub active_line: RwSignal<Option<usize>>,
+
+    // Forbits everything except the active line
+    pub is_frozen: Signal<bool>
 }
 
 impl Document {
     pub fn new(keystroke: Signal<String>, click_one_line: Signal<usize>) -> Document {
-        let lines: RwSignal<Vec<CodeLineEntry>> = RwSignal::new(Vec::new());
-        let active_line = RwSignal::new(None);
+        let lines: ArcRwSignal<Vec<CodeLineEntry>> = ArcRwSignal::new(Vec::new());
+        let active_line = ArcRwSignal::new(None);
+
+        let lines_clone = lines.clone();
         let frames = Signal::derive(move || {
-            frame_match(lines.get().iter().map(|entry| entry.info.get())).unwrap_or_default()
+            frame_match(lines_clone.get().iter().map(|entry| entry.info.get())).unwrap_or_default()
         });
         let mut id_counter: usize = 0;
 
+        let lines_clone = lines.clone();
+        let active_line_clone = active_line.clone();
+        let is_frozen = Signal::derive(move ||
+        {
+            if let Some(active_line_num) = active_line_clone.get()
+            {
+                leptos::logging::log!("ActiveLine Line {}", active_line_num);
+                lines_clone.with(|lines| {
+                    let entry:Option<CodeLineEntry> = lines.get(active_line_num).cloned();
+                    if let Some(entry) = entry
+                    {
+                        !entry.info.get().well_formed
+                    }
+                    else
+                    {
+                        false
+                    }
+                })
+            }
+            else
+            {
+                false
+            }
+        });
+
+        let lines_clone = lines.clone();
         let well_formed: Signal<bool> = Signal::derive(move || {
-            let lines = lines.get();
+            let lines = lines_clone.get();
             if lines.iter().any(|entry| !entry.info.get().well_formed) {
                 return false;
             }
@@ -108,20 +139,35 @@ impl Document {
             true
         });
 
+        let lines_clone = lines.clone();
+        let active_line_clone = active_line.clone();
+
         // Effect for keystroke handling
         Effect::new(move |_| {
             let key = keystroke.get();
+            let is_frozen = is_frozen.get_untracked();
 
-            let mut lines_write = lines.write();
+            let mut lines_write = lines_clone.write();
             match key.as_str() {
                 "Enter" => {
-                    let insert_index = active_line.get_untracked().map_or(0, |idx| idx + 1);
-                    lines_write.insert(insert_index, CodeLineEntry::new(id_counter));
-                    active_line.set(Some(insert_index));
-                    id_counter += 1;
+                    if let Some(active_idx) = active_line_clone.get_untracked() {
+                        if is_frozen
+                        {
+                            return;
+                        }
+                        lines_write.insert(active_idx + 1, CodeLineEntry::new(id_counter));
+                        active_line_clone.set(Some(active_idx + 1));
+                        id_counter += 1;
+                    }
+                    else
+                    {
+                        lines_write.insert(0, CodeLineEntry::new(id_counter));
+                        active_line_clone.set(Some(0));
+                        id_counter += 1;
+                    }
                 }
                 "Backspace" => {
-                    if let Some(active_idx) = active_line.get_untracked() {
+                    if let Some(active_idx) = active_line_clone.get_untracked() {
                         if active_idx < lines_write.len() {
                             let entry = &lines_write[active_idx];
                             let text = entry.text_input.get_untracked();
@@ -130,30 +176,30 @@ impl Document {
                             } else {
                                 lines_write.remove(active_idx);
                                 if lines_write.is_empty() {
-                                    active_line.set(None);
+                                    active_line_clone.set(None);
                                 } else {
-                                    active_line.set(Some(max(active_idx.saturating_sub(1), 0)));
+                                    active_line_clone.set(Some(max(active_idx.saturating_sub(1), 0)));
                                 }
                             }
                         }
                     }
                 }
                 "ArrowUp" => {
-                    if let Some(active_idx) = active_line.get_untracked() {
-                        if active_idx > 0 {
-                            active_line.set(Some(active_idx - 1));
+                    if let Some(active_idx) = active_line_clone.get_untracked() {
+                        if active_idx > 0 && !is_frozen {
+                            active_line_clone.set(Some(active_idx - 1));
                         }
                     }
                 }
                 "ArrowDown" => {
-                    if let Some(active_idx) = active_line.get_untracked() {
-                        if active_idx + 1 < lines_write.len() {
-                            active_line.set(Some(active_idx + 1));
+                    if let Some(active_idx) = active_line_clone.get_untracked() {
+                        if active_idx + 1 < lines_write.len() && !is_frozen {
+                            active_line_clone.set(Some(active_idx + 1));
                         }
                     }
                 }
                 _ => {
-                    if let Some(active_idx) = active_line.get_untracked() {
+                    if let Some(active_idx) = active_line_clone.get_untracked() {
                         if active_idx < lines_write.len() {
                             lines_write[active_idx].text_input.write().push_str(&key);
                         }
@@ -162,12 +208,20 @@ impl Document {
             }
         });
 
+        let lines_clone = lines.clone();
+        let active_line_clone = active_line.clone();
         // Effect for clicking one line
         Effect::new(move |_| {
             let clicked_id = click_one_line.get();
-            for (idx, codeline) in lines.get_untracked().into_iter().enumerate() {
+            let is_frozen = is_frozen.get_untracked();
+            if is_frozen
+            {
+                return;
+            }
+
+            for (idx, codeline) in lines_clone.get_untracked().into_iter().enumerate() {
                 if codeline.unique_id == clicked_id {
-                    active_line.set(Some(idx));
+                    active_line_clone.set(Some(idx));
                     break;
                 }
             }
@@ -177,7 +231,8 @@ impl Document {
             lines: lines.into(),
             frames,
             well_formed,
-            active_line,
+            active_line: active_line.into(),
+            is_frozen
         }
     }
 }
