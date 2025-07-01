@@ -88,18 +88,41 @@ impl Document {
         let lines: ArcRwSignal<Vec<CodeLineEntry>> = ArcRwSignal::new(Vec::new());
         let active_line = ArcRwSignal::new(None);
 
-        let lines_clone = lines.clone();
-        let frames = Signal::derive(move || {
-            frame_match(lines_clone.get().iter().map(|entry| entry.info.get())).unwrap_or_default()
-        });
-        let mut id_counter: usize = 0;
+        let frames = Self::create_frames_signal(lines.clone());
+        let well_formed = Self::create_well_formed_signal(lines.clone());
+        let is_frozen = Self::create_is_frozen_signal(lines.clone(), active_line.clone());
 
-        let lines_clone = lines.clone();
-        let active_line_clone = active_line.clone();
-        let is_frozen = Signal::derive(move || {
-            if let Some(active_line_num) = active_line_clone.get() {
+        Self::setup_keystroke_handler(keystroke, lines.clone(), active_line.clone(), is_frozen);
+        Self::setup_click_handler(
+            click_one_line,
+            lines.clone(),
+            active_line.clone(),
+            is_frozen,
+        );
+
+        Document {
+            lines: lines.into(),
+            frames,
+            well_formed,
+            active_line: active_line.into(),
+            is_frozen,
+        }
+    }
+
+    fn create_frames_signal(lines: ArcRwSignal<Vec<CodeLineEntry>>) -> Signal<Vec<Frame>> {
+        Signal::derive(move || {
+            frame_match(lines.get().iter().map(|entry| entry.info.get())).unwrap_or_default()
+        })
+    }
+
+    fn create_is_frozen_signal(
+        lines: ArcRwSignal<Vec<CodeLineEntry>>,
+        active_line: ArcRwSignal<Option<usize>>,
+    ) -> Signal<bool> {
+        Signal::derive(move || {
+            if let Some(active_line_num) = active_line.get() {
                 leptos::logging::log!("ActiveLine Line {}", active_line_num);
-                lines_clone.with(|lines| {
+                lines.with(|lines| {
                     let entry: Option<CodeLineEntry> = lines.get(active_line_num).cloned();
                     if let Some(entry) = entry {
                         !entry.info.get().well_formed
@@ -110,11 +133,12 @@ impl Document {
             } else {
                 false
             }
-        });
+        })
+    }
 
-        let lines_clone = lines.clone();
-        let well_formed: Signal<bool> = Signal::derive(move || {
-            let lines = lines_clone.get();
+    fn create_well_formed_signal(lines: ArcRwSignal<Vec<CodeLineEntry>>) -> Signal<bool> {
+        Signal::derive(move || {
+            let lines = lines.get();
             if lines.iter().any(|entry| !entry.info.get().well_formed) {
                 return false;
             }
@@ -130,12 +154,19 @@ impl Document {
             }
 
             true
-        });
+        })
+    }
 
+    fn setup_keystroke_handler(
+        keystroke: Signal<String>,
+        lines: ArcRwSignal<Vec<CodeLineEntry>>,
+        active_line: ArcRwSignal<Option<usize>>,
+        is_frozen: Signal<bool>,
+    ) {
         let lines_clone = lines.clone();
         let active_line_clone = active_line.clone();
 
-        // Effect for keystroke handling
+        let mut id_counter = 0;
         Effect::new(move |_| {
             let key = keystroke.get();
             let is_frozen = is_frozen.get_untracked();
@@ -198,10 +229,14 @@ impl Document {
                 }
             }
         });
+    }
 
-        let lines_clone = lines.clone();
-        let active_line_clone = active_line.clone();
-        // Effect for clicking one line
+    fn setup_click_handler(
+        click_one_line: Signal<usize>,
+        lines: ArcRwSignal<Vec<CodeLineEntry>>,
+        active_line: ArcRwSignal<Option<usize>>,
+        is_frozen: Signal<bool>,
+    ) {
         Effect::new(move |_| {
             let clicked_id = click_one_line.get();
             let is_frozen = is_frozen.get_untracked();
@@ -209,20 +244,12 @@ impl Document {
                 return;
             }
 
-            for (idx, codeline) in lines_clone.get_untracked().into_iter().enumerate() {
+            for (idx, codeline) in lines.get_untracked().into_iter().enumerate() {
                 if codeline.unique_id == clicked_id {
-                    active_line_clone.set(Some(idx));
+                    active_line.set(Some(idx));
                     break;
                 }
             }
         });
-
-        Document {
-            lines: lines.into(),
-            frames,
-            well_formed,
-            active_line: active_line.into(),
-            is_frozen,
-        }
     }
 }
