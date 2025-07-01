@@ -47,7 +47,9 @@ fn App() -> impl IntoView {
                 key=|line| line.clone()
                 children=move |line| {
                     view! {
-                        <div style="border: 1px solid black; padding: 8px; margin: 4px;">{line}</div>
+                        <div style="border: 1px solid black; padding: 8px; margin: 4px;">
+                            {line}
+                        </div>
                     }
                 }
             />
