@@ -1,0 +1,55 @@
+.code-line {
+    padding: 0;
+    border: none;
+    border-radius: 0;
+    font-family: monospace;
+    white-space: pre;
+    margin: 0;
+
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.code-line-active {
+    background-color: #cde9ff;  /* soft blue highlight */
+    font-weight: bold;
+}
+
+.code-line-inactive {
+    background-color: transparent;
+    font-weight: normal;
+}
+
+.code-lines-container {
+    display: flex;
+    flex-direction: column;
+}
+
+.code-line-wrapper {
+    display: flex;
+    align-items: center;
+}
+
+.line-number {
+    width: 2em;
+    text-align: right;
+    margin-right: 0.5em;
+    color: #888;
+    font-family: monospace;
+}
+
+.code-line {
+    flex: 1;
+}
+
+.code-content {
+    white-space: pre;
+    flex-grow: 1;
+}
+
+.emoji {
+    user-select: none;
+    margin-left: 1rem;
+    flex-shrink: 0;
+}

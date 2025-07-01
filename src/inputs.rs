@@ -1,22 +1,21 @@
-use leptos::prelude::*;
-
-// A simple enum for `Add Line` and `Remove Line` buttons
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ButtonClickType {
-    AddLine,
-    RemoveLine,
-    InitialState,
-}
+use leptos::{
+    ev::{self, KeyboardEvent},
+    prelude::*,
+};
+use leptos_use::{use_event_listener, use_window};
 
 #[derive(Debug)]
 pub struct Inputs {
-    pub button_on_click: RwSignal<ButtonClickType>,
+    pub keystroke: RwSignal<String>,
 }
 
 impl Default for Inputs {
     fn default() -> Self {
-        Self {
-            button_on_click: RwSignal::new(ButtonClickType::InitialState),
-        }
+        let keystroke = RwSignal::new(String::new());
+        let _listener = use_event_listener(use_window(), ev::keydown, move |e: KeyboardEvent| {
+            keystroke.set(e.key());
+        });
+
+        Self { keystroke }
     }
 }

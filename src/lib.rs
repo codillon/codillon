@@ -17,10 +17,10 @@ pub struct Website {
 impl Default for Website {
     fn default() -> Self {
         let inputs = inputs::Inputs::default();
-        let button_click = inputs.button_on_click.clone().read_only();
+        let keystroke = inputs.keystroke.clone().read_only();
         Website {
             inputs,
-            doc: document::Document::new(button_click),
+            doc: document::Document::new(keystroke.into()),
         }
     }
 }
@@ -28,11 +28,10 @@ impl Default for Website {
 impl Website {
     pub fn app() -> impl IntoView {
         let website = Website::default();
-        let button_click = website.inputs.button_on_click;
         let lines = website.doc.lines;
 
         view! {
-            <frontend::Boxlist lines button_click=button_click.write_only() />
+            <frontend::Editor lines active_line=website.doc.active_line.read_only() />
             <hr />
             <frontend::GlobalStatus well_formed=website.doc.well_formed frames=website.doc.frames />
         }

@@ -1,7 +1,5 @@
-use crate::utils::is_well_formed_func;
-
-use super::inputs::ButtonClickType;
 use super::utils::{Frame, frame_match, is_well_formed_instrline};
+use crate::utils::is_well_formed_func;
 use leptos::prelude::*;
 
 // Hold properties of this code line
@@ -77,13 +75,16 @@ pub struct Document {
 
     // Indicating correctness of the whole func
     pub well_formed: Signal<bool>,
+
+    // Indication the line which will react to user's keystroke. Saves Some(LineNumber), initialized to 0
+    pub active_line: RwSignal<Option<usize>>,
 }
 
 impl Document {
-    pub fn new(button_on_click: ReadSignal<ButtonClickType>) -> Document {
+    pub fn new(keystroke: Signal<String>) -> Document {
         let mut id_counter: usize = 0;
         let lines: RwSignal<Vec<CodeLineEntry>> = RwSignal::new(Vec::new());
-
+        let active_line = RwSignal::new(None);
         let frames = Signal::derive(move || {
             frame_match(lines.get().iter().map(|entry| entry.info.get())).unwrap_or_default()
         });
@@ -105,24 +106,74 @@ impl Document {
 
             true
         });
+
+        // Effect for keystroke handling
         Effect::new(move |_| {
-            match button_on_click.get() {
-                ButtonClickType::AddLine => {
-                    lines.write().push(CodeLineEntry::new(id_counter));
+            let key = keystroke.get();
+
+            let mut lines_write = lines.write();
+            match key.as_str() {
+                "Enter" => {
+                    let insert_index = active_line.get_untracked().map_or(0, |idx| idx + 1);
+                    lines_write.insert(insert_index, CodeLineEntry::new(id_counter));
+                    active_line.set(Some(insert_index));
                     id_counter += 1;
                 }
-                ButtonClickType::RemoveLine => {
-                    lines.write().pop();
+                "Backspace" => {
+                    if let Some(active_idx) = active_line.get_untracked() {
+                        if active_idx < lines_write.len() {
+                            let entry = &lines_write[active_idx];
+                            let mut text = entry.text_input.get_untracked();
+                            if !text.is_empty() {
+                                text.pop();
+                                entry.text_input.set(text);
+                            } else if lines_write.len() > 1 {
+                                lines_write.remove(active_idx);
+                                if lines_write.is_empty() {
+                                    active_line.set(None);
+                                } else if active_idx == 0 {
+                                    active_line.set(Some(0));
+                                } else {
+                                    active_line.set(Some(active_idx - 1));
+                                }
+                            }
+                        }
+                    }
                 }
-                ButtonClickType::InitialState => {
-                    // No-op
+                "ArrowUp" => {
+                    if let Some(active_idx) = active_line.get_untracked() {
+                        if active_idx > 0 {
+                            active_line.set(Some(active_idx - 1));
+                        }
+                    }
+                }
+                "ArrowDown" => {
+                    if let Some(active_idx) = active_line.get_untracked() {
+                        if active_idx + 1 < lines_write.len() {
+                            active_line.set(Some(active_idx + 1));
+                        }
+                    }
+                }
+                _ => {
+                    if let Some(active_idx) = active_line.get_untracked() {
+                        if active_idx < lines_write.len() {
+                            let entry = &lines_write[active_idx];
+                            let mut text = entry.text_input.get_untracked();
+                            if key.len() == 1 {
+                                text.push_str(&key);
+                                entry.text_input.set(text);
+                            }
+                        }
+                    }
                 }
             }
         });
+
         Document {
             lines: lines.into(),
             frames,
             well_formed,
+            active_line,
         }
     }
 }
