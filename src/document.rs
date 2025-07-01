@@ -76,7 +76,7 @@ pub struct Document {
     // Indicating correctness of the whole func
     pub well_formed: Signal<bool>,
 
-    // Indication the line which will react to user's keystroke. Saves Some(LineNumber), initialized to 0
+    // Indication the line which will react to user's keystroke. Saves Some(LineNumber), initialized to None
     pub active_line: RwSignal<Option<usize>>,
 }
 
