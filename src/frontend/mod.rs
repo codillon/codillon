@@ -50,18 +50,33 @@ pub fn App() -> impl IntoView {
                     doc.well_formed.set(false);
                 }
             } else if key == "Backspace" {
-                //update proposed input
                 let mut current = line.proposed_input.get();
-                current.pop();
-                line.proposed_input.set(current);
-                //check if proposed input instr is well formed
-                if is_well_formed_instr(&line.proposed_input.get()) {
-                    //update info and doc well-formed
-                    line.info = line.instruction_type();
-                    doc.well_formed.set(is_well_formed_func(&doc.concat()));
+                if current.is_empty() && doc.num_instructions > 1 {
+                    doc.remove_line(focused_line.get());
+                    if focused_line.get() > 0 {
+                        focused_line.set(focused_line.get() - 1);
+                    }
                 } else {
-                    //doc is automatically not well-formed
-                    doc.well_formed.set(false);
+                    current.pop();
+                    line.proposed_input.set(current);
+                    //check if proposed input instr is well formed
+                    if is_well_formed_instr(&line.proposed_input.get()) {
+                        //update info and doc well-formed
+                        line.info = line.instruction_type();
+                        doc.well_formed.set(is_well_formed_func(&doc.concat()));
+                    } else {
+                        //doc is automatically not well-formed
+                        doc.well_formed.set(false);
+                    }
+                }
+            } else if key == "Enter" {
+                if is_well_formed_instr(&line.proposed_input.get()) {
+                    line.contents = line.proposed_input.get();
+                }
+                if line.contents == line.proposed_input.get() {
+                    // If the proposed input is well-formed, add a new line
+                    doc.add_line();
+                    focused_line.set(focused_line.get() + 1);
                 }
             } else if key == "ArrowDown" {
                 // If the proposed input is well-formed, update the contents
@@ -69,7 +84,9 @@ pub fn App() -> impl IntoView {
                     line.contents = line.proposed_input.get();
                 }
                 // Move to next line if line is well-formed
-                if focused_line.get() < 1 && line.contents == line.proposed_input.get() {
+                if focused_line.get() < doc.num_instructions - 1
+                    && line.contents == line.proposed_input.get()
+                {
                     focused_line.set(focused_line.get() + 1);
                 }
             } else if key == "ArrowUp" {
@@ -95,11 +112,8 @@ pub fn App() -> impl IntoView {
                     let unique_id = line.unique_id;
 
                     view! {
-                        <div
-                            data-line-idx = {line.unique_id}
-                            class="textbox"
-                        >
-                            {move || format!("{}. {}", unique_id, input.get())}  
+                        <div data-line-idx=line.unique_id class="textbox">
+                            {move || format!("{}. {}", unique_id, input.get())}
                             <Show when=move || focused_line.get() == unique_id>
                                 <span class="cursor"></span>
                             </Show>
@@ -120,6 +134,7 @@ pub fn App() -> impl IntoView {
 struct Document {
     lines: Vec<CodeLine>,
     well_formed: RwSignal<bool>,
+    num_instructions: usize,
 }
 
 impl Document {
@@ -140,6 +155,7 @@ impl Document {
                 },
             ],
             well_formed: RwSignal::new(true),
+            num_instructions: 2,
         }
     }
     pub fn concat(&self) -> String {
@@ -148,6 +164,26 @@ impl Document {
             .map(|line| line.contents.clone())
             .collect::<Vec<String>>()
             .join("\n")
+    }
+
+    pub fn add_line(&mut self) {
+        self.lines.push(CodeLine {
+            proposed_input: RwSignal::new("".to_string()),
+            contents: "".to_string(),
+            unique_id: self.num_instructions,
+            info: InstrInfo::Other,
+        });
+        self.num_instructions += 1;
+    }
+
+    pub fn remove_line(&mut self, idx: usize) {
+        if idx < self.lines.len() {
+            self.lines.remove(idx);
+            self.num_instructions -= 1;
+            for (i, line) in self.lines.iter_mut().enumerate() {
+                line.unique_id = i;
+            }
+        }
     }
 }
 
