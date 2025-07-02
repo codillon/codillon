@@ -194,13 +194,12 @@ impl Document {
                             text = chars.into_iter().collect();
                             entry.text_input.set(text);
                             active_line_clone.set(CusorPosition(cursor.0, cursor.1 - 1));
-                        } else if cursor.0 > 0 {
-                            // At start of line, merge with previous line
+                        } else if cursor.0 > 0 && text.is_empty() {
+                            // At start of empty line, delete the line and move to the end of previous line
                             let prev_line = &lines_write[cursor.0 - 1];
                             let prev_text = prev_line.text_input.get_untracked();
                             let prev_len = prev_text.chars().count();
 
-                            prev_line.text_input.update(|s| *s = s.clone() + &text);
                             lines_write.remove(cursor.0);
                             active_line_clone.set(CusorPosition(cursor.0 - 1, prev_len));
                         }
