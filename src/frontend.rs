@@ -86,18 +86,18 @@ pub fn CodeLine(
 #[component]
 pub fn Editor(
     lines: Signal<Vec<CodeLineEntry>>,
-    active_line: ReadSignal<Option<CusorPosition>>,
+    active_line: ReadSignal<CusorPosition>,
     click_one_line: WriteSignal<(usize, usize)>,
 ) -> impl IntoView {
     let is_active = move |index: ReadSignal<usize>| {
-        move || match active_line.get() {
-            None => None,
-            Some(cursor) => {
-                if cursor.0 == index.get() {
-                    Some(cursor.1)
-                } else {
-                    None
-                }
+        move || {
+            let cursor = active_line.get();
+            if cursor.0 == index.get()
+            {
+                Some(cursor.1)
+            }
+            else {
+                None
             }
         }
     };
@@ -139,7 +139,7 @@ pub fn GlobalStatus(
     well_formed: Signal<bool>,
     frames: Signal<Vec<Frame>>,
     is_frozen: Signal<bool>,
-    cursor: Signal<Option<CusorPosition>>,
+    cursor: Signal<CusorPosition>,
 ) -> impl IntoView {
     view! {
         <div>
@@ -166,10 +166,8 @@ pub fn GlobalStatus(
             <div>
                 "Cursor: "
                 {move || {
-                    match cursor.get() {
-                        Some(cursor) => format!("Ln {}, Col {}", cursor.0, cursor.1),
-                        None => "None".to_string(),
-                    }
+                    let cursor = cursor.get();
+                    format!("Ln {}, Col {}", cursor.0, cursor.1)
                 }}
             </div>
         </div>
