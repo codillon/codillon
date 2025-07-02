@@ -39,7 +39,16 @@ pub fn CodeLine(
                 }
             }
         >
-            <code class="code-content">{move || text.get()}</code>
+            <code class="code-content">
+                {move || text.get()}
+                {move || {
+                    if is_active.get() {
+                        (view! { <span class="cursor">" "</span> }).into_any()
+                    } else {
+                        (view! {}).into_any()
+                    }
+                }}
+            </code>
             <span class="emoji">
                 {move || if info.get().well_formed { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
             </span>
