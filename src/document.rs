@@ -267,6 +267,11 @@ impl Document {
                     }
                 }
                 _ => {
+                    if key.chars().count() > 1
+                    {
+                        leptos::logging::log!("Ignore special keystroke {key}");
+                        return;
+                    }
                     if let Some(cursor) = active_line_clone.get_untracked() {
                         if cursor.0 < lines_write.len() {
                             // Insert at cursor position
