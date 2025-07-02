@@ -92,7 +92,7 @@ pub fn frame_match(instrs: impl Iterator<Item = InstrInfo>) -> Result<Vec<Frame>
     let mut frame_border_stack = Vec::new();
 
     for (idx, instr) in instrs.enumerate() {
-        match instr.kind {
+        match instr.prev_good_kind {
             InstrKind::Entry => {
                 frame_border_stack.push(idx);
             }
@@ -129,63 +129,63 @@ mod tests {
         // Create a vector of InstrInfo based on the comment indices
         let instrs = vec![
             InstrInfo {
-                kind: InstrKind::Entry,
+                prev_good_kind: InstrKind::Entry,
                 ..Default::default()
             }, // block (0)
             InstrInfo {
-                kind: InstrKind::Other,
+                prev_good_kind: InstrKind::Other,
                 ..Default::default()
             }, // i32.const 42 (1)
             InstrInfo {
-                kind: InstrKind::Other,
+                prev_good_kind: InstrKind::Other,
                 ..Default::default()
             }, // drop (2)
             InstrInfo {
-                kind: InstrKind::End,
+                prev_good_kind: InstrKind::End,
                 ..Default::default()
             }, // end (3)
             InstrInfo {
-                kind: InstrKind::Entry,
+                prev_good_kind: InstrKind::Entry,
                 ..Default::default()
             }, // block (4)
             InstrInfo {
-                kind: InstrKind::Entry,
+                prev_good_kind: InstrKind::Entry,
                 ..Default::default()
             }, // loop (5)
             InstrInfo {
-                kind: InstrKind::Entry,
+                prev_good_kind: InstrKind::Entry,
                 ..Default::default()
             }, // if (6)
             InstrInfo {
-                kind: InstrKind::Other,
+                prev_good_kind: InstrKind::Other,
                 ..Default::default()
             }, // i32.const 43 (7)
             InstrInfo {
-                kind: InstrKind::Other,
+                prev_good_kind: InstrKind::Other,
                 ..Default::default()
             }, // drop (8)
             InstrInfo {
-                kind: InstrKind::Else,
+                prev_good_kind: InstrKind::Else,
                 ..Default::default()
             }, // else (9)
             InstrInfo {
-                kind: InstrKind::Other,
+                prev_good_kind: InstrKind::Other,
                 ..Default::default()
             }, // i32.const 44 (10)
             InstrInfo {
-                kind: InstrKind::Other,
+                prev_good_kind: InstrKind::Other,
                 ..Default::default()
             }, // drop (11)
             InstrInfo {
-                kind: InstrKind::End,
+                prev_good_kind: InstrKind::End,
                 ..Default::default()
             }, // end (12)
             InstrInfo {
-                kind: InstrKind::End,
+                prev_good_kind: InstrKind::End,
                 ..Default::default()
             }, // end (13)
             InstrInfo {
-                kind: InstrKind::End,
+                prev_good_kind: InstrKind::End,
                 ..Default::default()
             }, // end (14)
         ];

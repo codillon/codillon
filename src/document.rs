@@ -4,16 +4,16 @@ use leptos::prelude::*;
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstrInfo {
     pub prev_good_instr: String,
+    pub prev_good_kind: InstrKind,
     pub well_formed: bool,
-    pub kind: InstrKind,
 }
 
 impl Default for InstrInfo {
     fn default() -> Self {
         InstrInfo {
             prev_good_instr: String::new(),
+            prev_good_kind: InstrKind::Other,
             well_formed: true,
-            kind: InstrKind::Other,
         }
     }
 }
@@ -29,7 +29,6 @@ pub enum InstrKind {
     Else,
     End,
     Other,
-    Malformed, // Will be remove in the future after enforcement is implemented
 }
 
 /// It holds all logical signals corresponding to a single code line.
@@ -59,8 +58,8 @@ impl CodeLineEntry {
             {
                 InstrInfo {
                     prev_good_instr: cloned_text_input.get_untracked(),
+                    prev_good_kind: result.unwrap(),
                     well_formed: true,
-                    kind: result.unwrap()
                 }
             }
             else
@@ -68,8 +67,8 @@ impl CodeLineEntry {
                 let prev_info: InstrInfo = prev_info.cloned().unwrap_or_default();
                 InstrInfo {
                     prev_good_instr: prev_info.prev_good_instr,
+                    prev_good_kind: prev_info.prev_good_kind,
                     well_formed: false,
-                    kind: InstrKind::Malformed
                 }
             }
         });
