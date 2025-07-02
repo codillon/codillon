@@ -1,0 +1,15 @@
+.textbox {
+  border: 1px solid black;
+  padding: 8px;
+  border-radius: 6px;
+  background-color: white;
+  margin-bottom: 8px;
+}
+
+.textbox-focused {
+  border: 1px solid red;
+  padding: 8px;
+  border-radius: 6px;
+  background-color: white;
+  margin-bottom: 8px;
+}
