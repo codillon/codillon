@@ -361,9 +361,11 @@ dependencies = [
  "getrandom 0.2.16",
  "leptos",
  "leptos-use",
+ "wasm-bindgen",
  "wasm-tools",
  "wasmparser",
  "wast",
+ "web-sys",
 ]
 
 [[package]]

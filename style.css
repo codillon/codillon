@@ -6,10 +6,13 @@
   margin-bottom: 8px;
 }
 
-.textbox-focused {
-  border: 1px solid red;
-  padding: 8px;
-  border-radius: 6px;
-  background-color: white;
-  margin-bottom: 8px;
+.cursor {
+  display: inline-block;
+  width: 1px;
+  height: 1em;              /* roughly the font height */
+  background: currentColor;
+  animation: blink 1s steps(1) infinite;
+  vertical-align: -0.15em;  /* fine‑tune vertical alignment */
 }
+
+@keyframes blink { 50% { opacity: 0; } }

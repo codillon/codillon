@@ -1,8 +1,9 @@
 //! This module contains the frontend components for index page.
 use super::utils::{is_well_formed_func, is_well_formed_instr};
-use leptos::ev::keydown;
+use leptos::ev::{click, keydown};
 use leptos::prelude::*;
 use leptos_use::{use_event_listener, use_window};
+use wasm_bindgen::JsCast;
 
 mod boxlist;
 mod textbox;
@@ -11,6 +12,26 @@ mod textbox;
 pub fn App() -> impl IntoView {
     let document = RwSignal::new(Document::new());
     let focused_line = RwSignal::new(0);
+
+    let _ = use_event_listener(use_window(), click, move |event| {
+        let id = event
+            .target()
+            .expect("click on target error")
+            .dyn_into::<web_sys::Element>()
+            .expect("element error")
+            .get_attribute("data-line-idx")
+            .expect("expected data-line-idx")
+            .parse::<usize>()
+            .unwrap();
+        let mut doc = document.get();
+        let current_line = doc.lines.get_mut(focused_line.get()).unwrap();
+        if is_well_formed_instr(&current_line.proposed_input.get()) {
+            current_line.contents = current_line.proposed_input.get();
+        }
+        if current_line.proposed_input.get() == current_line.contents {
+            focused_line.set(id);
+        }
+    });
 
     let _ = use_event_listener(use_window(), keydown, move |event| {
         let key = event.key();
@@ -75,25 +96,13 @@ pub fn App() -> impl IntoView {
 
                     view! {
                         <div
-                            class=move || {
-                                if focused_line.get() == unique_id {
-                                    "textbox-focused"
-                                } else {
-                                    "textbox"
-                                }
-                            }
-                            on:click=move |_| {
-                                if is_well_formed_instr(&line.proposed_input.get()) {
-                                    line.contents = line.proposed_input.get();
-                                }
-                                if focused_line.get() < 1
-                                    && line.contents == line.proposed_input.get()
-                                {
-                                    focused_line.set(unique_id);
-                                }
-                            }
+                            data-line-idx = {line.unique_id}
+                            class="textbox"
                         >
-                            {move || format!("{}. {}", unique_id, input.get())}
+                            {move || format!("{}. {}", unique_id, input.get())}  
+                            <Show when=move || focused_line.get() == unique_id>
+                                <span class="cursor"></span>
+                            </Show>
                         </div>
                     }
                 }
