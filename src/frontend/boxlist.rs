@@ -1,4 +1,4 @@
-use super::EditorBuffer;
+/*use super::EditorBuffer;
 use super::textbox::Textbox;
 use leptos::prelude::*;
 
@@ -67,4 +67,4 @@ mod tests {
             .set(String::from("Leptos"));
         assert_eq!(editor_buffer.concat(), "Hello\nLeptos".to_string());
     }
-}
+}*/

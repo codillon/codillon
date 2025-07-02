@@ -1,63 +1,172 @@
 //! This module contains the frontend components for index page.
+use super::utils::{is_well_formed_func, is_well_formed_instr};
+use leptos::ev::keydown;
 use leptos::prelude::*;
-use std::collections::LinkedList;
+use leptos_use::{use_event_listener, use_window};
 
 mod boxlist;
 mod textbox;
 
 #[component]
 pub fn App() -> impl IntoView {
-    view! { <boxlist::Boxlist /> }
+    let document = RwSignal::new(Document::new());
+    let focused_line = RwSignal::new(0);
+
+    let _ = use_event_listener(use_window(), keydown, move |event| {
+        let key = event.key();
+        document.update(|doc| {
+            let line = doc.lines.get_mut(focused_line.get()).unwrap();
+            if key.len() == 1 {
+                //update proposed input
+                line.proposed_input.set(line.proposed_input.get() + &key);
+                //check if proposed input instr is well formed
+                if is_well_formed_instr(&line.proposed_input.get()) {
+                    //update info and doc well-formed
+                    line.info = line.instruction_type();
+                    doc.well_formed.set(is_well_formed_func(&doc.concat()));
+                } else {
+                    //doc is automatically not well-formed
+                    doc.well_formed.set(false);
+                }
+            } else if key == "Backspace" {
+                //update proposed input
+                let mut current = line.proposed_input.get();
+                current.pop();
+                line.proposed_input.set(current);
+                //check if proposed input instr is well formed
+                if is_well_formed_instr(&line.proposed_input.get()) {
+                    //update info and doc well-formed
+                    line.info = line.instruction_type();
+                    doc.well_formed.set(is_well_formed_func(&doc.concat()));
+                } else {
+                    //doc is automatically not well-formed
+                    doc.well_formed.set(false);
+                }
+            } else if key == "ArrowDown" {
+                // If the proposed input is well-formed, update the contents
+                if is_well_formed_instr(&line.proposed_input.get()) {
+                    line.contents = line.proposed_input.get();
+                }
+                // Move to next line if line is well-formed
+                if focused_line.get() < 1 && line.contents == line.proposed_input.get() {
+                    focused_line.set(focused_line.get() + 1);
+                }
+            } else if key == "ArrowUp" {
+                // If the proposed input is well-formed, update the contents
+                if is_well_formed_instr(&line.proposed_input.get()) {
+                    line.contents = line.proposed_input.get();
+                }
+                //Move to previous line if line is well-formed
+                if focused_line.get() > 0 && line.contents == line.proposed_input.get() {
+                    focused_line.set(focused_line.get() - 1);
+                }
+            }
+        });
+    });
+
+    view! {
+        <div class="code-box">
+            <For
+                each=move || document.get().lines.clone()
+                key=|line| line.unique_id
+                children=move |mut line: CodeLine| {
+                    let input = line.proposed_input;
+                    let unique_id = line.unique_id;
+
+                    view! {
+                        <div
+                            class=move || {
+                                if focused_line.get() == unique_id {
+                                    "textbox-focused"
+                                } else {
+                                    "textbox"
+                                }
+                            }
+                            on:click=move |_| {
+                                if is_well_formed_instr(&line.proposed_input.get()) {
+                                    line.contents = line.proposed_input.get();
+                                }
+                                if focused_line.get() < 1
+                                    && line.contents == line.proposed_input.get()
+                                {
+                                    focused_line.set(unique_id);
+                                }
+                            }
+                        >
+                            {move || format!("{}. {}", unique_id, input.get())}
+                        </div>
+                    }
+                }
+            />
+        </div>
+        <div class="status">
+            {move || {
+                if document.get().well_formed.get() { "Well-formed" } else { "Not Well-formed" }
+            }}
+        </div>
+    }
 }
 
-/// Hold all the code lines in a linked list as a buffer.
-/// Each line is represented by a `CodeLineEntry`, it possesses the code text
-/// in a `RwSignal` to allow reactive updates.
-#[derive(Debug, Clone, Default)]
-struct EditorBuffer {
-    lines: LinkedList<CodeLineEntry>,
-    id_counter: usize,
+#[derive(Clone)]
+struct Document {
+    lines: Vec<CodeLine>,
+    well_formed: RwSignal<bool>,
 }
 
-impl EditorBuffer {
-    #[allow(dead_code)]
+impl Document {
+    pub fn new() -> Self {
+        Self {
+            lines: vec![
+                CodeLine {
+                    proposed_input: RwSignal::new("".to_string()),
+                    contents: "".to_string(),
+                    unique_id: 0,
+                    info: InstrInfo::Other,
+                },
+                CodeLine {
+                    proposed_input: RwSignal::new("".to_string()),
+                    contents: "".to_string(),
+                    unique_id: 1,
+                    info: InstrInfo::Other,
+                },
+            ],
+            well_formed: RwSignal::new(true),
+        }
+    }
     pub fn concat(&self) -> String {
         self.lines
             .iter()
-            .map(|entry| entry.value.get())
-            .collect::<Vec<_>>()
+            .map(|line| line.contents.clone())
+            .collect::<Vec<String>>()
             .join("\n")
     }
-
-    pub fn push_line(&mut self) {
-        self.id_counter += 1;
-        self.lines.push_back(CodeLineEntry::new(self.id_counter));
-    }
-
-    pub fn pop_line(&mut self) {
-        self.lines.pop_back();
-    }
 }
 
-/// For now, it only holds a single line of code with a `RwSignal`
-/// `RwSignal` will cause reactive updates when it is modified.
-///
-/// The id is unique to the containing EditorBuffer and is maintained across
-/// insertions and deletions elsewhere in the buffer. This lets Leptos and
-/// the browser avoid re-rendering unchanged lines.
-#[derive(Debug, Clone)]
-struct CodeLineEntry {
-    pub value: RwSignal<String>,
-    id: usize,
+#[derive(Clone)]
+struct CodeLine {
+    proposed_input: RwSignal<String>,
+    contents: String,
+    unique_id: usize,
+    info: InstrInfo,
 }
 
-impl CodeLineEntry {
-    /// ### Returns
-    /// An instance holding an empty String.
-    pub fn new(id: usize) -> CodeLineEntry {
-        CodeLineEntry {
-            value: RwSignal::new(String::new()),
-            id,
+impl CodeLine {
+    pub fn instruction_type(&self) -> InstrInfo {
+        match self.contents.as_str() {
+            "if" => InstrInfo::Entry,
+            "block" => InstrInfo::Entry,
+            "loop" => InstrInfo::Entry,
+            "else" => InstrInfo::Else,
+            "end" => InstrInfo::End,
+            _ => InstrInfo::Other,
         }
     }
+}
+
+#[derive(Clone)]
+enum InstrInfo {
+    Entry,
+    Else,
+    End,
+    Other,
 }

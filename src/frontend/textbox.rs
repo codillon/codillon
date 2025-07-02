@@ -1,4 +1,4 @@
-//! This is the textbox component for the index page.
+/*//! This is the textbox component for the index page.
 
 use crate::utils::is_well_formed_instr;
 use leptos::prelude::*;
@@ -19,4 +19,4 @@ pub fn Textbox(text: RwSignal<String>) -> impl IntoView {
         <input type="text" bind:value=text placeholder="Enter Some Instruction" />
         {move || if is_valid() { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
     }
-}
+}*/
