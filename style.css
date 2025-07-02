@@ -137,3 +137,11 @@
     outline: none;
 }
 
+.prev-good-instr {
+    color: #999;
+    font-family: monospace;
+    margin-left: 1rem;
+    white-space: pre;
+    flex-shrink: 0;
+    padding-top: 0.2em;
+}

@@ -69,6 +69,8 @@ pub fn CodeLine(
                     {move || text.get()}
                 </span>
             </code>
+
+            <span class="prev-good-instr">{move || info.get().prev_good_instr.clone()}</span>
             <span class="emoji">
                 {move || if info.get().well_formed { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
             </span>

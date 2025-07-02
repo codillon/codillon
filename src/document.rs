@@ -1,8 +1,9 @@
 use super::utils::{Frame, frame_match, is_well_formed_func, is_well_formed_instrline};
 use leptos::prelude::*;
 // Hold properties of this code line
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InstrInfo {
+    pub prev_good_instr: String,
     pub well_formed: bool,
     pub kind: InstrKind,
 }
@@ -10,6 +11,7 @@ pub struct InstrInfo {
 impl Default for InstrInfo {
     fn default() -> Self {
         InstrInfo {
+            prev_good_instr: String::new(),
             well_formed: true,
             kind: InstrKind::Other,
         }
@@ -33,7 +35,7 @@ pub enum InstrKind {
 /// It holds all logical signals corresponding to a single code line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodeLineEntry {
-    // Will be bind to a textbox
+    // As the buffer of the context of the line
     // Use Arc because they need to be wrapped in Rwsignal<Vec<_>>.
     // See [link](https://book.leptos.dev/appendix_life_cycle.html#signals-can-be-used-after-they-are-disposed)
     pub text_input: ArcRwSignal<String>,
@@ -51,16 +53,30 @@ impl CodeLineEntry {
     pub fn new(unique_id: usize) -> CodeLineEntry {
         let text_input = ArcRwSignal::new(String::new());
         let cloned_text_input = text_input.clone();
-        let info = ArcSignal::derive(move || {
+        let info = ArcMemo::new(move |prev_info| {
             let result = is_well_formed_instrline(&cloned_text_input.get());
-            InstrInfo {
-                well_formed: result.is_ok(),
-                kind: result.unwrap_or(InstrKind::Malformed),
+            if result.is_ok()
+            {
+                InstrInfo {
+                    prev_good_instr: cloned_text_input.get_untracked(),
+                    well_formed: true,
+                    kind: result.unwrap()
+                }
+            }
+            else
+            {
+                let prev_info: InstrInfo = prev_info.cloned().unwrap_or_default();
+                InstrInfo {
+                    prev_good_instr: prev_info.prev_good_instr,
+                    well_formed: false,
+                    kind: InstrKind::Malformed
+                }
             }
         });
+
         CodeLineEntry {
             text_input,
-            info,
+            info: info.into(),
             unique_id,
         }
     }
