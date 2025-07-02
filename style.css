@@ -32,6 +32,24 @@
     border: none;
 }
 
+.code-line-text {
+  position: relative;
+  white-space: pre;
+  font-family: monospace;
+}
+
+.code-line-text.has-cursor::after {
+  content: "";
+  position: absolute;
+  width: 2px;
+  height: 1em;
+  background: black;
+  animation: blink 1s step-start infinite;
+  top: 0;
+  left: calc(var(--cursor-col, 0)); /* 0.6ch = avg char width */
+}
+
+
 .code-content {
     white-space: pre-wrap;
     flex-grow: 1;

@@ -17,7 +17,7 @@ pub fn App() -> impl IntoView {
     view! {
         <frontend::Editor
             lines=doc.lines
-            active_line=doc.active_line.read_only()
+            active_line=doc.cursor.read_only()
             click_one_line=inputs.click_one_line.write_only()
         />
         <hr />
@@ -25,6 +25,7 @@ pub fn App() -> impl IntoView {
             well_formed=doc.well_formed
             frames=doc.frames
             is_frozen=doc.is_frozen
+            cursor=doc.cursor.into()
         />
     }
 }

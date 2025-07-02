@@ -1,8 +1,8 @@
-use super::document::CodeLineEntry;
+use super::document::{CodeLineEntry, CusorPosition, InstrInfo};
 use super::utils::Frame;
-use crate::document::InstrInfo;
 use leptos::ev::MouseEvent;
 use leptos::prelude::*;
+use web_sys::{window};
 
 const CORRECT_EMOJI: &str = "✅";
 const INCORRECT_EMOJI: &str = "❌";
@@ -14,25 +14,36 @@ const INCORRECT_EMOJI: &str = "❌";
 ///
 /// `text`: the signal for the text of this textbox
 ///
-/// `is_active`: activity indicator
+/// `active_cursor_col`: if Some, this is the active line. Saves column number
 ///
 /// `clicked`: write signal for being clicked
 #[component]
 pub fn CodeLine(
     info: Signal<InstrInfo>,
     text: ReadSignal<String>,
-    is_active: Signal<bool>,
-    clicked: WriteSignal<usize>,
+    active_cursor_col: Signal<Option<usize>>,
+    clicked: WriteSignal<(usize, usize)>,
     unique_id: usize,
 ) -> impl IntoView {
     view! {
         <div
             tabindex="0"
             on:click=move |_ev: MouseEvent| {
-                clicked.set(unique_id);
+                request_animation_frame(move || {
+                    if let Some(window) = window() {
+                        if let Ok(Some(selection)) = window.get_selection() {
+                            if let Ok(range) = selection.get_range_at(0) {
+                                if let Ok(offset) = range.start_offset() {
+                                    clicked.set((unique_id, offset as usize));
+                                }
+                            }
+                        }
+                    }
+                });
             }
+
             class=move || {
-                if is_active.get() {
+                if active_cursor_col.get().is_some() {
                     "code-line code-line-active"
                 } else {
                     "code-line code-line-inactive"
@@ -40,14 +51,23 @@ pub fn CodeLine(
             }
         >
             <code class="code-content">
-                {move || text.get()}
-                {move || {
-                    if is_active.get() {
-                        (view! { <span class="cursor">" "</span> }).into_any()
-                    } else {
-                        (view! {}).into_any()
+                <span
+                    class=move || {
+                        if active_cursor_col.get().is_some() {
+                            "code-line-text has-cursor"
+                        } else {
+                            "code-line-text"
+                        }
                     }
-                }}
+                    style=move || {
+                        active_cursor_col
+                            .get()
+                            .map(|col| format!("--cursor-col: {}ch;", col))
+                            .unwrap_or_default()
+                    }
+                >
+                    {move || text.get()}
+                </span>
             </code>
             <span class="emoji">
                 {move || if info.get().well_formed { CORRECT_EMOJI } else { INCORRECT_EMOJI }}
@@ -66,14 +86,19 @@ pub fn CodeLine(
 #[component]
 pub fn Editor(
     lines: Signal<Vec<CodeLineEntry>>,
-    active_line: ReadSignal<Option<usize>>,
-    click_one_line: WriteSignal<usize>,
+    active_line: ReadSignal<Option<CusorPosition>>,
+    click_one_line: WriteSignal<(usize, usize)>,
 ) -> impl IntoView {
     let is_active = move |index: ReadSignal<usize>| {
-        move || {
-            active_line
-                .get()
-                .is_some_and(|active_index| active_index == index.get())
+        move || match active_line.get() {
+            None => None,
+            Some(cursor) => {
+                if cursor.0 == index.get() {
+                    Some(cursor.1)
+                } else {
+                    None
+                }
+            }
         }
     };
 
@@ -93,7 +118,7 @@ pub fn Editor(
                                         <CodeLine
                                             info=entry.info.into()
                                             text=entry.text_input.read_only().into()
-                                            is_active=Signal::derive(is_active(index))
+                                            active_cursor_col=Signal::derive(is_active(index))
                                             clicked=click_one_line
                                             unique_id=entry.unique_id
                                         />
@@ -114,6 +139,7 @@ pub fn GlobalStatus(
     well_formed: Signal<bool>,
     frames: Signal<Vec<Frame>>,
     is_frozen: Signal<bool>,
+    cursor: Signal<Option<CusorPosition>>,
 ) -> impl IntoView {
     view! {
         <div>
@@ -137,6 +163,15 @@ pub fn GlobalStatus(
                 }}
             </div>
             <div>"Frozen:" {move || is_frozen.get()}</div>
+            <div>
+                "Cursor: "
+                {move || {
+                    match cursor.get() {
+                        Some(cursor) => format!("Ln {}, Col {}", cursor.0, cursor.1),
+                        None => "None".to_string(),
+                    }
+                }}
+            </div>
         </div>
     }
 }

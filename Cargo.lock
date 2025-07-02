@@ -365,6 +365,7 @@ dependencies = [
  "wasm-tools",
  "wasmparser",
  "wast",
+ "web-sys",
 ]
 
 [[package]]

@@ -10,7 +10,7 @@ pub struct Inputs {
     // Signal for content of keystroke
     pub keystroke: RwSignal<String>,
     // Signal for one code line being clicked, saves unique_id
-    pub click_one_line: RwSignal<usize>,
+    pub click_one_line: RwSignal<(usize, usize)>,
 }
 
 impl Default for Inputs {
@@ -22,7 +22,7 @@ impl Default for Inputs {
 
         Self {
             keystroke,
-            click_one_line: RwSignal::new(0),
+            click_one_line: RwSignal::new((0, 0)),
         }
     }
 }
