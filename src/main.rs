@@ -1,5 +1,6 @@
-use codillon::frontend;
+mod components;
+mod utils;
 
 fn main() {
-    leptos::mount::mount_to_body(frontend::App);
+    leptos::mount::mount_to_body(components::App);
 }
