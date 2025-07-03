@@ -1,4 +1,4 @@
-use super::document::Document;
+use super::document::{Document, InstrInfo::*};
 use crate::utils::{is_well_formed_func, is_well_formed_instr};
 use leptos::ev::{click, keydown};
 use leptos::logging::log;
@@ -68,8 +68,9 @@ pub fn App() -> impl IntoView {
                         }
                     }
                 } else if key == "Enter" {
-                    if is_well_formed_func(&line.proposed_input.get()) {
+                    if is_well_formed_instr(&line.proposed_input.get()) {
                         line.contents = line.proposed_input.get();
+                        line.info = line.instruction_type();
                     }
                 } else if key == "ArrowDown" {
                     // If the proposed input is well-formed, update the contents
@@ -101,9 +102,13 @@ pub fn App() -> impl IntoView {
                 });
                 log!("Length of lines: {}", doc.lines.len());
             } else if key == "Enter"
-                && is_well_formed_func(&doc.lines[focused_idx].proposed_input.get())
+                && is_well_formed_instr(&doc.lines[focused_idx].proposed_input.get())
             {
-                doc.insert_after(focused_idx);
+                if matches!(doc.lines[focused_idx].info, Entry) && doc.frame_matching() == Some(1) {
+                    doc.insert_with_end(focused_idx);
+                } else {
+                    doc.insert_after(focused_idx);
+                }
                 focused_line.set(doc.lines[focused_idx + 1].unique_id);
             }
         });

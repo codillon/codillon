@@ -41,6 +41,20 @@ impl Document {
         self.next_id += 1;
     }
 
+    pub fn insert_with_end(&mut self, idx: usize) {
+        self.insert_after(idx);
+        self.lines.insert(
+            idx + 2,
+            CodeLine {
+                proposed_input: RwSignal::new("end".to_string()),
+                contents: "end".to_string(),
+                unique_id: self.next_id,
+                info: InstrInfo::End,
+            },
+        );
+        self.next_id += 1;
+    }
+
     pub fn remove_line(&mut self, idx: usize) {
         if idx < self.lines.len() {
             self.lines.remove(idx);
@@ -49,6 +63,21 @@ impl Document {
 
     pub fn index_of(&self, id: usize) -> Option<usize> {
         self.lines.iter().position(|line| line.unique_id == id)
+    }
+
+    pub fn frame_matching(&self) -> Option<i32> {
+        let mut stack = 0;
+        for line in self.lines.iter() {
+            match line.info {
+                InstrInfo::Entry => stack += 1,
+                InstrInfo::Else => continue,
+                InstrInfo::End => {
+                    stack -= 1;
+                }
+                InstrInfo::Other => continue,
+            }
+        }
+        Some(stack)
     }
 }
 
