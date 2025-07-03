@@ -1,0 +1,18 @@
+.textbox {
+  border: 1px solid black;
+  padding: 8px;
+  border-radius: 6px;
+  background-color: white;
+  margin-bottom: 8px;
+}
+
+.cursor {
+  display: inline-block;
+  width: 1px;
+  height: 1em;
+  background: currentColor;
+  animation: blink 1s steps(1) infinite;
+  vertical-align: -0.15em;
+}
+
+@keyframes blink { 50% { opacity: 0; } }
