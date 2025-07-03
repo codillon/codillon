@@ -9,10 +9,10 @@
 .cursor {
   display: inline-block;
   width: 1px;
-  height: 1em;              /* roughly the font height */
+  height: 1em;
   background: currentColor;
   animation: blink 1s steps(1) infinite;
-  vertical-align: -0.15em;  /* fine‑tune vertical alignment */
+  vertical-align: -0.15em;
 }
 
 @keyframes blink { 50% { opacity: 0; } }
