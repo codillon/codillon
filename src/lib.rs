@@ -4,6 +4,7 @@ mod document;
 mod frontend;
 mod inputs;
 mod utils;
+mod backup;
 
 /// Render the whole App
 #[component]
