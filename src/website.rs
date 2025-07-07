@@ -78,7 +78,7 @@ impl Website {
         }
     }
 
-    fn check(content: &Vec<CodelineEntry>) -> bool {
+    fn check(content: &[CodelineEntry]) -> bool {
         content
             .iter()
             .all(|entry| is_well_formed_instr(&entry.line))

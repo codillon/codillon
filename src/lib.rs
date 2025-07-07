@@ -15,19 +15,21 @@ pub fn App() -> impl IntoView {
     });
 
     view! {
-        {
-            move || website.get().get_content()
-            .iter().enumerate().map(
-                |(index, entry)|
-                {
+        {move || {
+            website
+                .get()
+                .get_content()
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| {
                     view! {
                         <div>
-                        <span> {index} " :" </span>
-                        <span> {entry.line.clone()} </span>
+                            <span>{index} " :"</span>
+                            <span>{entry.line.clone()}</span>
                         </div>
                     }
-                }
-            ).collect_view()
-        }
+                })
+                .collect_view()
+        }}
     }
 }
