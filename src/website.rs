@@ -42,10 +42,33 @@ impl Website {
                     leptos::logging::log!("Unhandled Special Keystroke {}", key);
                     return;
                 }
-                let (first_part, second_part) = self.active_line().split_at(self.cursor.1);
-                *self.mut_active_line() = [first_part, key, second_part].join("");
-                self.cursor.1 += 1;
+                self.insert_normal_char_at_cursor(key.chars().next().unwrap());
             }
+        }
+    }
+
+    fn insert_normal_char_at_cursor(&mut self, ch: char) {
+        let (first_part, second_part) = self.active_line().split_at(self.cursor.1);
+        *self.mut_active_line() = [first_part, &ch.to_string(), second_part].join("");
+        self.cursor.1 += 1;
+        self.automatic_append_end_after_cursor();
+    }
+
+    fn automatic_append_end_after_cursor(&mut self) {
+        match self.active_line() {
+            "block" | "loop" | "if" => {
+                let mut new_content = self.content.clone();
+                new_content.insert(
+                    self.cursor.0 + 1,
+                    CodelineEntry {
+                        line: "end".to_string(),
+                    },
+                );
+                if Self::check(&new_content) {
+                    let _ = std::mem::replace(&mut self.content, new_content);
+                }
+            }
+            _ => (),
         }
     }
 
@@ -80,6 +103,7 @@ impl Website {
     }
 
     fn cursor_move_left(&mut self) {
+        leptos::logging::log!("Move left {}", self.cursor.1);
         if self.cursor.1 > 0 {
             self.cursor.1 -= 1;
         } else if self.cursor.0 > 0 && Self::check(&self.content) {
@@ -97,7 +121,8 @@ impl Website {
 
     fn cursor_move_down(&mut self) {
         if Self::check(&self.content) {
-            self.cursor.0 = std::cmp::min(self.cursor.0 + 1, self.content.len() - 1)
+            self.cursor.0 = std::cmp::min(self.cursor.0 + 1, self.content.len() - 1);
+            self.cursor.1 = std::cmp::min(self.cursor.1, self.active_line().chars().count());
         }
     }
 
@@ -115,7 +140,7 @@ impl Website {
 
         new_content.splice(
             self.cursor.0..self.cursor.0 + 1,
-            vec![
+            [
                 CodelineEntry {
                     line: first_part.to_string(),
                 },

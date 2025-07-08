@@ -46,15 +46,9 @@ pub fn is_well_formed_func(lines: &str) -> bool {
     // Remove all comments and whitespace from each line
     let lines = lines
         .lines()
-        .map(|line| {
-            line.split(";;")
-                .next()
-                .unwrap_or("")
-                .trim()
-        })
+        .map(|line| line.split(";;").next().unwrap_or("").trim())
         .collect::<Vec<_>>()
         .join("\n");
-
 
     let func = format!("module (func {lines})");
     let Ok(buf) = ParseBuffer::new(&func) else {
@@ -122,6 +116,8 @@ mod tests {
         //unrecognized instructions
         assert!(!is_well_formed_func("i32.const 1\ni32.adx"));
         // allow comment
-        assert!(!is_well_formed_func("block\ni32.const 1 ;; Comment\nend\nend"));
+        assert!(!is_well_formed_func(
+            "block\ni32.const 1 ;; Comment\nend\nend"
+        ));
     }
 }
