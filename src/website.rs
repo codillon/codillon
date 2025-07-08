@@ -8,7 +8,7 @@ pub struct CodelineEntry {
 #[derive(Debug, Clone)]
 pub struct Website {
     content: Vec<CodelineEntry>,
-    cursor: (usize, usize),
+    cursor: (usize, usize), //  Line #, Col #
 }
 
 impl Default for Website {
@@ -27,6 +27,23 @@ impl Website {
 
     pub fn get_cursor(&self) -> (usize, usize) {
         self.cursor
+    }
+
+    pub fn update_line_index(&mut self, index: usize) {
+        if self.content.is_empty() {
+            return;
+        }
+        if !Self::check(&self.content) {
+            // Cursor cannot move if the code is invalid.
+            return;
+        }
+
+        if index >= self.content.len() {
+            self.cursor.0 = self.content.len() - 1;
+        } else {
+            self.cursor.0 = index;
+        }
+        self.update_cursor_index();
     }
 
     pub fn keystroke(&mut self, key: &str) {
@@ -70,6 +87,14 @@ impl Website {
             }
             _ => (),
         }
+    }
+
+    fn update_cursor_index(&mut self) {
+        // Ensure that the cursor index is within the content
+        if self.cursor.1 <= self.active_line().len() {
+            return;
+        }
+        self.cursor.1 = 0;
     }
 
     fn backspace_at_cursor(&mut self) {

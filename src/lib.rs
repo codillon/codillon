@@ -1,8 +1,10 @@
+use leptos::web_sys::window;
 use leptos::{
-    ev::{self, KeyboardEvent},
+    ev::{self, KeyboardEvent, MouseEvent},
     prelude::*,
 };
-use leptos_use::{use_event_listener, use_window};
+use leptos_use::use_event_listener;
+
 mod website;
 
 pub mod utils;
@@ -10,14 +12,33 @@ pub mod utils;
 #[component]
 pub fn App() -> impl IntoView {
     let website = RwSignal::new(website::Website::default());
-    let _listener = use_event_listener(use_window(), ev::keydown, move |e: KeyboardEvent| {
-        match e.key().as_str() {
-            "ArrowUp" | "ArrowDown" => {
-                e.prevent_default(); // prevent browser scroll, TODO: add the scroll control ourselves
+
+    let window = window().unwrap_or_else(|| panic!("window should be available"));
+    let document = window
+        .document()
+        .unwrap_or_else(|| panic!("document should be available"));
+
+    let _keyboardListener =
+        use_event_listener(window.clone(), ev::keydown, move |e: KeyboardEvent| {
+            match e.key().as_str() {
+                "ArrowUp" | "ArrowDown" => {
+                    e.prevent_default(); // prevent browser scroll, TODO: add the scroll control ourselves
+                }
+                _ => {}
             }
-            _ => {}
+            website.write().keystroke(&e.key());
+        });
+
+    let _mouseListener = use_event_listener(window.clone(), ev::click, move |e: MouseEvent| {
+        if let Some(el) = document.element_from_point(e.client_x() as f32, e.client_y() as f32) {
+            if let Some(text_line_el) = el.closest(".textLine").ok().flatten() {
+                if let Some(index_attr) = text_line_el.get_attribute("data-index") {
+                    if let Ok(idx) = index_attr.parse::<usize>() {
+                        website.write().update_line_index(idx);
+                    }
+                }
+            }
         }
-        website.write().keystroke(&e.key());
     });
 
     view! {
@@ -30,7 +51,7 @@ pub fn App() -> impl IntoView {
                 .enumerate()
                 .map(|(index, entry)| {
                     view! {
-                        <div>
+                        <div class="textLine" data-index=index>
                             <span class="line-number">{index} " :"</span>
 
                             {if index == cursor.0 {
