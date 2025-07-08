@@ -11,6 +11,12 @@ pub mod utils;
 pub fn App() -> impl IntoView {
     let website = RwSignal::new(website::Website::default());
     let _listener = use_event_listener(use_window(), ev::keydown, move |e: KeyboardEvent| {
+        match e.key().as_str() {
+        "ArrowUp" | "ArrowDown" => {
+            e.prevent_default(); // prevent browser scroll, TODO: add the scroll control ourselves
+        }
+        _ => {}
+    }
         website.write().keystroke(&e.key());
     });
 
