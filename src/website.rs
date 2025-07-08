@@ -27,6 +27,11 @@ impl Website {
         &self.content
     }
 
+    pub fn get_frames(&self) -> &Vec<Frame>
+    {
+        &self.frames
+    }
+
     pub fn get_cursor(&self) -> (usize, usize) {
         self.cursor
     }

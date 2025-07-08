@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use leptos::web_sys::window;
 use leptos::{
     ev::{self, KeyboardEvent, MouseEvent},
@@ -44,7 +46,15 @@ pub fn App() -> impl IntoView {
     view! {
         {move || {
             let cursor = website.read_untracked().get_cursor();
-
+            let mut frames_map: HashMap<usize, usize> = std::collections::HashMap::new();
+            website
+                .read_untracked()
+                .get_frames()
+                .iter()
+                .for_each(|frame| {
+                    frames_map.insert(*frame.start(), *frame.end());
+                    frames_map.insert(*frame.end(), *frame.start());
+                });
             website
                 .get()
                 .get_content()
@@ -52,9 +62,24 @@ pub fn App() -> impl IntoView {
                 .enumerate()
                 .map(|(index, entry)| {
                     let is_selected = index == cursor.0;
+
                     view! {
-                        <div class="codeline" data-selected={is_selected} data-index=index>
-                            <span class="line-number">{index} " :"</span>
+                        <div class="codeline" data-selected=is_selected data-index=index>
+
+                            {
+                                let related_line = frames_map.get(&index);
+                                if let Some(related_line) = related_line {
+                                    (view! {
+                                        <span class="line-number" data-related=true>
+                                            {index}"("{*related_line}"):"
+                                        </span>
+                                    })
+                                        .into_any()
+                                } else {
+                                    (view! { <span class="line-number">{index} ":"</span> })
+                                        .into_any()
+                                }
+                            }
 
                             {if is_selected {
                                 (view! {

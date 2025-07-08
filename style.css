@@ -42,3 +42,12 @@
 {
   font-family: monospace;
 }
+
+.line-number[data-related]
+{
+ font-family: monospace;
+  border: 1px solid #ccc;
+  border-radius: 2px;
+  cursor: pointer;
+  text-align: center;
+}
