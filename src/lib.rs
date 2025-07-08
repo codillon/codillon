@@ -12,16 +12,17 @@ pub fn App() -> impl IntoView {
     let website = RwSignal::new(website::Website::default());
     let _listener = use_event_listener(use_window(), ev::keydown, move |e: KeyboardEvent| {
         match e.key().as_str() {
-        "ArrowUp" | "ArrowDown" => {
-            e.prevent_default(); // prevent browser scroll, TODO: add the scroll control ourselves
+            "ArrowUp" | "ArrowDown" => {
+                e.prevent_default(); // prevent browser scroll, TODO: add the scroll control ourselves
+            }
+            _ => {}
         }
-        _ => {}
-    }
         website.write().keystroke(&e.key());
     });
 
     view! {
         {move || {
+            let cursor = website.read_untracked().get_cursor();
             website
                 .get()
                 .get_content()
@@ -31,11 +32,18 @@ pub fn App() -> impl IntoView {
                     view! {
                         <div>
                             <span>{index} " :"</span>
-                            <span>{entry.line.clone()}</span>
-                            {if index == website.read_untracked().get_cursor() {
-                                (view! { <span class="caret">"|"</span> }).into_any()
+
+                            {if index == cursor.0 {
+                                let first_part = &entry.line[..cursor.1];
+                                let second_part = &entry.line[cursor.1..];
+                                (view! {
+                                    <span>{first_part}</span>
+                                    <span class="caret">"|"</span>
+                                    <span>{second_part}</span>
+                                })
+                                    .into_any()
                             } else {
-                                (view! {}).into_any()
+                                (view! { <span>{entry.line.clone()}</span> }).into_any()
                             }}
                         </div>
                     }

@@ -1,5 +1,3 @@
-use std::cmp;
-
 use crate::utils::*;
 
 #[derive(Debug, Clone, Default)]
@@ -10,14 +8,14 @@ pub struct CodelineEntry {
 #[derive(Debug, Clone)]
 pub struct Website {
     content: Vec<CodelineEntry>,
-    cursor: usize,
+    cursor: (usize, usize),
 }
 
 impl Default for Website {
     fn default() -> Self {
         Website {
             content: vec![CodelineEntry::default()],
-            cursor: 0,
+            cursor: (0, 0),
         }
     }
 }
@@ -27,58 +25,110 @@ impl Website {
         &self.content
     }
 
-    pub fn get_cursor(&self) -> usize {
+    pub fn get_cursor(&self) -> (usize, usize) {
         self.cursor
     }
 
     pub fn keystroke(&mut self, key: &str) {
         match key {
-            "Enter" => self.insert_line_at_cursor(),
-            "Backspace" => {
-                let line_len = self.content[self.cursor].line.len();
-                if line_len > 0 {
-                    self.content[self.cursor].line.pop();
-                } else {
-                    self.remove_line_at_cursor();
-                }
-            }
-            "ArrowDown" => {
-                if Self::check(&self.content) {
-                    self.cursor = cmp::min(self.cursor + 1, self.content.len() - 1)
-                }
-            }
-            "ArrowUp" => {
-                if Self::check(&self.content) {
-                    self.cursor = self.cursor.saturating_sub(1);
-                }
-            }
+            "Enter" => self.enter_at_cursor(),
+            "Backspace" => self.backspace_at_cursor(),
+            "ArrowDown" => self.cursor_move_down(),
+            "ArrowUp" => self.cursor_move_up(),
+            "ArrowLeft" => self.cursor_move_left(),
+            "ArrowRight" => self.cursor_move_right(),
             _ => {
                 if key.chars().count() > 1 {
                     leptos::logging::log!("Unhandled Special Keystroke {}", key);
                     return;
                 }
-                self.content[self.cursor].line.push_str(key);
+                let (first_part, second_part) = self.active_line().split_at(self.cursor.1);
+                *self.mut_active_line() = [first_part, key, second_part].join("");
+                self.cursor.1 += 1;
             }
         }
     }
 
-    fn insert_line_at_cursor(&mut self) {
-        if Self::check(&self.content) {
-            self.cursor += 1;
-            self.content.insert(self.cursor, CodelineEntry::default());
+    fn backspace_at_cursor(&mut self) {
+        if self.cursor.1 > 0 {
+            let first_part = &self.active_line()[..self.cursor.1 - 1];
+            let second_part = &self.active_line()[self.cursor.1..];
+            *self.mut_active_line() = [first_part, second_part].join("");
+            self.cursor.1 -= 1;
+        } else if self.cursor.0 > 0 {
+            let mut new_line = self.content[self.cursor.0 - 1].line.clone();
+            new_line.push_str(self.active_line());
+            let mut new_content = self.content.clone();
+            new_content.splice(
+                self.cursor.0 - 1..self.cursor.0 + 1,
+                std::iter::once(CodelineEntry { line: new_line }),
+            );
+            if Self::check(&new_content) {
+                let _ = std::mem::replace(&mut self.content, new_content);
+                self.cursor.0 -= 1;
+                self.cursor.1 = self.active_line().chars().count();
+            }
+        }
+    }
+    fn cursor_move_right(&mut self) {
+        if self.cursor.1 < self.active_line().chars().count() {
+            self.cursor.1 += 1;
+        } else if self.cursor.0 < self.content.len() - 1 && Self::check(&self.content) {
+            self.cursor.0 += 1;
+            self.cursor.1 = 0;
         }
     }
 
-    fn remove_line_at_cursor(&mut self) {
-        if self.cursor == 0 {
-            return;
+    fn cursor_move_left(&mut self) {
+        if self.cursor.1 > 0 {
+            self.cursor.1 -= 1;
+        } else if self.cursor.0 > 0 && Self::check(&self.content) {
+            self.cursor.0 -= 1;
+            self.cursor.1 = self.active_line().chars().count();
         }
+    }
 
+    fn cursor_move_up(&mut self) {
+        if Self::check(&self.content) {
+            self.cursor.0 = self.cursor.0.saturating_sub(1);
+            self.cursor.1 = std::cmp::min(self.cursor.1, self.active_line().chars().count());
+        }
+    }
+
+    fn cursor_move_down(&mut self) {
+        if Self::check(&self.content) {
+            self.cursor.0 = std::cmp::min(self.cursor.0 + 1, self.content.len() - 1)
+        }
+    }
+
+    fn active_line(&self) -> &str {
+        &self.content[self.cursor.0].line
+    }
+
+    fn mut_active_line(&mut self) -> &mut String {
+        &mut self.content[self.cursor.0].line
+    }
+
+    fn enter_at_cursor(&mut self) {
         let mut new_content = self.content.clone();
-        new_content.remove(self.cursor);
+        let (first_part, second_part) = self.active_line().split_at(self.cursor.1);
+
+        new_content.splice(
+            self.cursor.0..self.cursor.0 + 1,
+            vec![
+                CodelineEntry {
+                    line: first_part.to_string(),
+                },
+                CodelineEntry {
+                    line: second_part.to_string(),
+                },
+            ],
+        );
+
         if Self::check(&new_content) {
+            self.cursor.0 += 1;
+            self.cursor.1 = 0;
             let _ = std::mem::replace(&mut self.content, new_content);
-            self.cursor -= 1;
         }
     }
 
