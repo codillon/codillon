@@ -26,6 +26,11 @@ pub fn App() -> impl IntoView {
                         <div>
                             <span>{index} " :"</span>
                             <span>{entry.line.clone()}</span>
+                            {if index == website.read_untracked().get_cursor() {
+                                (view! { <span class="caret">"|"</span> }).into_any()
+                            } else {
+                                (view! {}).into_any()
+                            }}
                         </div>
                     }
                 })

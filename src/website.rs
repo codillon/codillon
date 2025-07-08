@@ -27,6 +27,10 @@ impl Website {
         &self.content
     }
 
+    pub fn get_cursor(&self) -> usize {
+        self.cursor
+    }
+
     pub fn keystroke(&mut self, key: &str) {
         match key {
             "Enter" => self.insert_line_at_cursor(),

@@ -1,0 +1,13 @@
+/* For Custom Caret */
+.caret {
+    animation: caretBlink 1s infinite steps(1);
+}
+
+@keyframes caretBlink {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
