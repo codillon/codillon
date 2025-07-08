@@ -13,8 +13,10 @@ pub mod utils;
 pub fn App() -> impl IntoView {
     let website = RwSignal::new(website::Website::default());
 
-    let window = window().expect("window should be available");
-    let document = window.document().expect("document should be available");
+    let window = window().unwrap_or_else(|| panic!("window should be available"));
+    let document = window
+        .document()
+        .unwrap_or_else(|| panic!("document should be available"));
 
     let _keyboardListener =
         use_event_listener(window.clone(), ev::keydown, move |e: KeyboardEvent| {
