@@ -8,6 +8,7 @@ pub struct CodelineEntry {
 #[derive(Debug, Clone)]
 pub struct Website {
     content: Vec<CodelineEntry>,
+    frames: Vec<Frame>,
     cursor: (usize, usize), //  Line #, Col #
 }
 
@@ -15,6 +16,7 @@ impl Default for Website {
     fn default() -> Self {
         Website {
             content: vec![CodelineEntry::default()],
+            frames: Vec::new(),
             cursor: (0, 0),
         }
     }
@@ -69,7 +71,13 @@ impl Website {
         *self.mut_active_line() = [first_part, &ch.to_string(), second_part].join("");
         self.cursor.1 += 1;
         self.automatic_append_end_after_cursor();
+        if self.active_line().split(";;").next().unwrap_or_default() == "else"
+        && Self::check(&self.content)
+        {
+            self.update_frames();
+        }
     }
+
 
     fn automatic_append_end_after_cursor(&mut self) {
         match self.active_line() {
@@ -83,6 +91,7 @@ impl Website {
                 );
                 if Self::check(&new_content) {
                     let _ = std::mem::replace(&mut self.content, new_content);
+                    self.update_frames();
                 }
             }
             _ => (),
@@ -113,6 +122,7 @@ impl Website {
             );
             if Self::check(&new_content) {
                 let _ = std::mem::replace(&mut self.content, new_content);
+                self.update_frames();
                 self.cursor.0 -= 1;
                 self.cursor.1 = self.active_line().chars().count();
             }
@@ -178,6 +188,7 @@ impl Website {
             self.cursor.0 += 1;
             self.cursor.1 = 0;
             let _ = std::mem::replace(&mut self.content, new_content);
+            self.update_frames();
         }
     }
 
@@ -192,5 +203,9 @@ impl Website {
                     .collect::<Vec<_>>()
                     .join("\n"),
             )
+    }
+
+    fn update_frames(&mut self) {
+        self.frames = frame_match(self.content.iter().map(|entry| entry.line.as_str()))
     }
 }

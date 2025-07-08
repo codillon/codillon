@@ -44,6 +44,8 @@ pub fn App() -> impl IntoView {
     view! {
         {move || {
             let cursor = website.read_untracked().get_cursor();
+
+
             website
                 .get()
                 .get_content()
