@@ -34,12 +34,11 @@ pub fn App() -> impl IntoView {
                             <span>{index} " :"</span>
 
                             {if index == cursor.0 {
-                                let first_part = &entry.line[..cursor.1];
-                                let second_part = &entry.line[cursor.1..];
+                                let (first_part, second_part) = entry.line.split_at(cursor.1);
                                 (view! {
-                                    <span>{first_part}</span>
+                                    <span class="codetext">{first_part}</span>
                                     <span class="caret">"|"</span>
-                                    <span>{second_part}</span>
+                                    <span class="codetext">{second_part}</span>
                                 })
                                     .into_any()
                             } else {

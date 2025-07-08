@@ -11,3 +11,8 @@
     opacity: 0;
   }
 }
+/* For Code Text*/
+.codetext
+{
+  white-space: pre; /*To show whitespace in the codeline*/
+}
