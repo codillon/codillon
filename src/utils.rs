@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 use wasm_tools::parse_binary_wasm;
 use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
@@ -64,6 +66,51 @@ pub fn is_well_formed_func(lines: &str) -> bool {
     parse_binary_wasm(parser, &bin).is_ok()
 }
 
+/// Represents a frame entry (like "block end" pair, etc.), with range recorded.
+/// The range is inclusive, containing both start instr number and end instr number.
+/// The start number begins at 0.
+pub type Frame = RangeInclusive<usize>;
+/// Match frames for a vec of Codeline(Instruction or empty).
+///
+/// ### Panics
+/// When the input has unmatched frames
+///
+/// ### Warning
+/// This is a simplified version and does not cover all frames in a WebAssembly function.
+/// There is no support for `try` or `catch` frames. etc.
+/// For now, we only support "block", "loop", "if", "else"
+pub fn frame_match<'a>(instrs: impl Iterator<Item = &'a str>) -> Vec<Frame> {
+    let mut frames = Vec::new();
+    // Use stacks as memory of frame begining borders.
+    let mut frame_border_stack = Vec::new();
+
+    for (idx, instr) in instrs.enumerate() {
+        match instr.split(";;").next().unwrap_or("").trim() {
+            "block" | "if" | "loop" => {
+                frame_border_stack.push(idx);
+            }
+            "else" => {
+                if let Some(last_span_start) = frame_border_stack.pop() {
+                    let last_span_end = idx - 1;
+                    frames.push(last_span_start..=last_span_end);
+                } else {
+                    panic!("Unmatched else");
+                }
+                frame_border_stack.push(idx);
+            }
+            "end" => {
+                if let Some(last_span_start) = frame_border_stack.pop() {
+                    frames.push(last_span_start..=idx);
+                } else {
+                    panic!("Unmatched end");
+                }
+            }
+            _ => (), // Ignore other instructions
+        }
+    }
+    frames
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +166,66 @@ mod tests {
         assert!(!is_well_formed_func(
             "block\ni32.const 1 ;; Comment\nend\nend"
         ));
+    }
+
+    #[test]
+    fn test_frame_match() {
+        // Test case 1: Simple block
+        let instrs1 = vec!["block", "i32.const 42", "drop", "end"];
+        let frames1 = frame_match(instrs1.iter().map(|s| *s));
+        let expected1 = vec![0..=3]; // block from 0 to 3
+        assert_eq!(frames1, expected1);
+
+        // Test case 2: Complex nested structure
+        let instrs2 = vec![
+            "block",        // 0
+            "i32.const 42", // 1
+            "drop",         // 2
+            "end",          // 3
+            "block",        // 4
+            "loop",         // 5
+            "if",           // 6
+            "i32.const 43", // 7
+            "drop",         // 8
+            "else",         // 9
+            "i32.const 44", // 10
+            "drop",         // 11
+            "end",          // 12
+            "end",          // 13
+            "end",          // 14
+        ];
+
+        let frames2 = frame_match(instrs2.iter().map(|s| *s));
+        let expected2 = vec![
+            0..=3,  // first block
+            4..=14, // second block
+            6..=8,  // if part
+            5..=13, // loop
+            9..=12, // else part
+        ];
+
+        // Sort both vectors for comparison since order might vary
+        let mut frames2_sorted = frames2;
+        let mut expected2_sorted = expected2;
+        frames2_sorted.sort_by_key(|r| *r.start());
+        expected2_sorted.sort_by_key(|r| *r.start());
+
+        assert_eq!(frames2_sorted, expected2_sorted);
+
+        // Test case 3: Simple if-else
+        let instrs3 = vec!["if", "i32.const 1", "else", "i32.const 2", "end"];
+        let frames3 = frame_match(instrs3.iter().map(|s| *s));
+        let expected3 = vec![0..=1, 2..=4]; // if part, else part
+        assert_eq!(frames3, expected3);
+
+        // Test case 4: With comments (should be ignored)
+        let instrs4 = vec![
+            "block ;; start block",
+            "i32.const 42 ;; push 42",
+            "end ;; end block",
+        ];
+        let frames4 = frame_match(instrs4.iter().map(|s| *s));
+        let expected4 = vec![0..=2];
+        assert_eq!(frames4, expected4);
     }
 }
