@@ -4,7 +4,7 @@
   display: flex;
 }
 
-.codeline-selected
+.codeline[data-selected]
 {
   display: flex;
   background-color: rgb(227, 243, 243);

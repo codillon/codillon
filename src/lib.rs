@@ -31,7 +31,7 @@ pub fn App() -> impl IntoView {
 
     let _mouseListener = use_event_listener(window.clone(), ev::click, move |e: MouseEvent| {
         if let Some(el) = document.element_from_point(e.client_x() as f32, e.client_y() as f32) {
-            if let Some(text_line_el) = el.closest(".textLine").ok().flatten() {
+            if let Some(text_line_el) = el.closest(".codeline").ok().flatten() {
                 if let Some(index_attr) = text_line_el.get_attribute("data-index") {
                     if let Ok(idx) = index_attr.parse::<usize>() {
                         website.write().update_line_index(idx);
@@ -45,7 +45,6 @@ pub fn App() -> impl IntoView {
         {move || {
             let cursor = website.read_untracked().get_cursor();
 
-
             website
                 .get()
                 .get_content()
@@ -54,7 +53,7 @@ pub fn App() -> impl IntoView {
                 .map(|(index, entry)| {
                     let is_selected = index == cursor.0;
                     view! {
-                        <div class=if is_selected { "codeline-selected" } else { "codeline" } data-index=index>
+                        <div class="codeline" data-selected={is_selected} data-index=index>
                             <span class="line-number">{index} " :"</span>
 
                             {if is_selected {
