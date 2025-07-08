@@ -1,4 +1,5 @@
 use crate::utils::*;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
 pub struct CodelineEntry {
@@ -8,16 +9,18 @@ pub struct CodelineEntry {
 #[derive(Debug, Clone)]
 pub struct Website {
     content: Vec<CodelineEntry>,
-    frames: Vec<Frame>,
+    frames: HashMap<usize, usize>,
     cursor: (usize, usize), //  Line #, Col #
+    selection: Option<Frame>,
 }
 
 impl Default for Website {
     fn default() -> Self {
         Website {
             content: vec![CodelineEntry::default()],
-            frames: Vec::new(),
+            frames: HashMap::new(),
             cursor: (0, 0),
+            selection: None,
         }
     }
 }
@@ -27,8 +30,7 @@ impl Website {
         &self.content
     }
 
-    pub fn get_frames(&self) -> &Vec<Frame>
-    {
+    pub fn get_frames(&self) -> &HashMap<usize, usize> {
         &self.frames
     }
 
@@ -71,18 +73,21 @@ impl Website {
         }
     }
 
+    pub fn get_selection(&self) -> &Option<Frame> {
+        &self.selection
+    }
+
     fn insert_normal_char_at_cursor(&mut self, ch: char) {
         let (first_part, second_part) = self.active_line().split_at(self.cursor.1);
         *self.mut_active_line() = [first_part, &ch.to_string(), second_part].join("");
         self.cursor.1 += 1;
         self.automatic_append_end_after_cursor();
         if self.active_line().split(";;").next().unwrap_or_default() == "else"
-        && Self::check(&self.content)
+            && Self::check(&self.content)
         {
             self.update_frames();
         }
     }
-
 
     fn automatic_append_end_after_cursor(&mut self) {
         match self.active_line() {
@@ -117,6 +122,29 @@ impl Website {
             let second_part = &self.active_line()[self.cursor.1..];
             *self.mut_active_line() = [first_part, second_part].join("");
             self.cursor.1 -= 1;
+        } else if self.selection.is_some()
+        {
+            let mut new_content = self.content.clone();
+            let selection = self.selection.clone().unwrap();
+            new_content.splice(selection.clone(), []);
+            if new_content.is_empty()
+            {
+                new_content.push(CodelineEntry{line: String::new()});
+            }
+            if Self::check(&new_content) {
+                self.selection = None;
+                let _ = std::mem::replace(&mut self.content, new_content);
+                self.update_frames();
+                self.cursor.0 = selection.start().saturating_sub(1);
+                self.cursor.1 = self.active_line().chars().count();
+            }
+        } 
+        else if self.frames.get(&self.cursor.0).is_some() {
+            let related_line = self.frames.get(&self.cursor.0).unwrap();
+            self.selection = Some(
+                std::cmp::min(self.cursor.0, *related_line)
+                    ..=std::cmp::max(self.cursor.0, *related_line),
+            );
         } else if self.cursor.0 > 0 {
             let mut new_line = self.content[self.cursor.0 - 1].line.clone();
             new_line.push_str(self.active_line());
@@ -134,6 +162,7 @@ impl Website {
         }
     }
     fn cursor_move_right(&mut self) {
+        self.selection = None;
         if self.cursor.1 < self.active_line().chars().count() {
             self.cursor.1 += 1;
         } else if self.cursor.0 < self.content.len() - 1 && Self::check(&self.content) {
@@ -143,6 +172,7 @@ impl Website {
     }
 
     fn cursor_move_left(&mut self) {
+        self.selection = None;
         if self.cursor.1 > 0 {
             self.cursor.1 -= 1;
         } else if self.cursor.0 > 0 && Self::check(&self.content) {
@@ -152,6 +182,7 @@ impl Website {
     }
 
     fn cursor_move_up(&mut self) {
+        self.selection = None;
         if Self::check(&self.content) {
             self.cursor.0 = self.cursor.0.saturating_sub(1);
             self.cursor.1 = std::cmp::min(self.cursor.1, self.active_line().chars().count());
@@ -159,6 +190,7 @@ impl Website {
     }
 
     fn cursor_move_down(&mut self) {
+        self.selection = None;
         if Self::check(&self.content) {
             self.cursor.0 = std::cmp::min(self.cursor.0 + 1, self.content.len() - 1);
             self.cursor.1 = std::cmp::min(self.cursor.1, self.active_line().chars().count());
@@ -174,6 +206,7 @@ impl Website {
     }
 
     fn enter_at_cursor(&mut self) {
+        self.selection = None;
         let mut new_content = self.content.clone();
         let (first_part, second_part) = self.active_line().split_at(self.cursor.1);
 
@@ -211,6 +244,12 @@ impl Website {
     }
 
     fn update_frames(&mut self) {
-        self.frames = frame_match(self.content.iter().map(|entry| entry.line.as_str()))
+        self.frames.clear();
+        frame_match(self.content.iter().map(|entry| entry.line.as_str()))
+            .iter()
+            .for_each(|frame| {
+                self.frames.insert(*frame.start(), *frame.end());
+                self.frames.insert(*frame.end(), *frame.start());
+            });
     }
 }

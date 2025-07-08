@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use leptos::web_sys::window;
 use leptos::{
     ev::{self, KeyboardEvent, MouseEvent},
@@ -45,33 +43,31 @@ pub fn App() -> impl IntoView {
 
     view! {
         {move || {
-            let cursor = website.read_untracked().get_cursor();
-            let mut frames_map: HashMap<usize, usize> = std::collections::HashMap::new();
+            let website = website.read();
+            let cursor = website.get_cursor();
+            let frames = website.get_frames();
+            let selection = website.get_selection();
             website
-                .read_untracked()
-                .get_frames()
-                .iter()
-                .for_each(|frame| {
-                    frames_map.insert(*frame.start(), *frame.end());
-                    frames_map.insert(*frame.end(), *frame.start());
-                });
-            website
-                .get()
                 .get_content()
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
-                    let is_selected = index == cursor.0;
+                    let is_selected = selection
+                        .as_ref()
+                        .map_or(false, |range| range.contains(&index));
 
                     view! {
                         <div class="codeline" data-selected=is_selected data-index=index>
 
                             {
-                                let related_line = frames_map.get(&index);
+                                let related_line = frames.get(&index);
                                 if let Some(related_line) = related_line {
                                     (view! {
                                         <span class="line-number" data-related=true>
-                                            {index}"("{*related_line}"):"
+                                            {index}
+                                            "("
+                                            {*related_line}
+                                            "):"
                                         </span>
                                     })
                                         .into_any()
@@ -81,7 +77,7 @@ pub fn App() -> impl IntoView {
                                 }
                             }
 
-                            {if is_selected {
+                            {if index == cursor.0 {
                                 (view! {
                                     <span
                                         class="codetext has-cursor"
