@@ -50,11 +50,12 @@ pub fn App() -> impl IntoView {
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
+                    let is_selected = index == cursor.0;
                     view! {
-                        <div class="textLine" data-index=index>
+                        <div class=if is_selected { "codeline-selected" } else { "codeline" } data-index=index>
                             <span class="line-number">{index} " :"</span>
 
-                            {if index == cursor.0 {
+                            {if is_selected {
                                 (view! {
                                     <span
                                         class="codetext has-cursor"

@@ -1,3 +1,15 @@
+/*Codeline Wrapper*/
+.codeline
+{
+  display: flex;
+}
+
+.codeline-selected
+{
+  display: flex;
+  background-color: rgb(227, 243, 243);
+}
+
 /* For Code Text*/
 .codetext
 {
