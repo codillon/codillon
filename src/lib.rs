@@ -31,18 +31,21 @@ pub fn App() -> impl IntoView {
                 .map(|(index, entry)| {
                     view! {
                         <div>
-                            <span>{index} " :"</span>
+                            <span class="line-number">{index} " :"</span>
 
                             {if index == cursor.0 {
-                                let (first_part, second_part) = entry.line.split_at(cursor.1);
                                 (view! {
-                                    <span class="codetext">{first_part}</span>
-                                    <span class="caret">"|"</span>
-                                    <span class="codetext">{second_part}</span>
+                                    <span
+                                        class="codetext has-cursor"
+                                        style=format!("--cursor-col: {}ch;", cursor.1)
+                                    >
+                                        {entry.line.clone()}
+                                    </span>
                                 })
                                     .into_any()
                             } else {
-                                (view! { <span>{entry.line.clone()}</span> }).into_any()
+                                (view! { <span class="codetext">{entry.line.clone()}</span> })
+                                    .into_any()
                             }}
                         </div>
                     }

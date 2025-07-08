@@ -1,9 +1,22 @@
-/* For Custom Caret */
-.caret {
-    animation: caretBlink 1s infinite steps(1);
+/* For Code Text*/
+.codetext
+{
+  white-space: pre; /*To show whitespace in the codeline*/
+  font-family: monospace; /*For cursor alignment*/
+  position: relative;
 }
 
-@keyframes caretBlink {
+.codetext.has-cursor::after {
+  content: '';
+  position: absolute;
+  width: 2px;
+  height: 1rem;
+  background-color: black;
+  left: calc(var(--cursor-col));
+  animation: blink 1s step-start infinite;
+}
+
+@keyframes blink {
   0%, 100% {
     opacity: 1;
   }
@@ -11,8 +24,9 @@
     opacity: 0;
   }
 }
-/* For Code Text*/
-.codetext
+
+/*For Line Number*/
+.line-number
 {
-  white-space: pre; /*To show whitespace in the codeline*/
+  font-family: monospace;
 }

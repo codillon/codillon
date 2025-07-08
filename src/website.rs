@@ -103,7 +103,6 @@ impl Website {
     }
 
     fn cursor_move_left(&mut self) {
-        leptos::logging::log!("Move left {}", self.cursor.1);
         if self.cursor.1 > 0 {
             self.cursor.1 -= 1;
         } else if self.cursor.0 > 0 && Self::check(&self.content) {
