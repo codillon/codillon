@@ -12,3 +12,9 @@ getrandom = { version = "0.2", features = ["js"] }
 console_error_panic_hook = "0.1.7"
 use = "0.0.1-pre.0"
 leptos-use = "0.16.2"
+web-sys = { version = "0.3.77", features = [
+    "Window",
+    "Selection",
+    "Range",
+    "Node",
+] }
