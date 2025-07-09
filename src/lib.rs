@@ -1,9 +1,9 @@
-use leptos::web_sys::window;
 use leptos::{
     ev::{self, KeyboardEvent, MouseEvent},
     prelude::*,
 };
 use leptos_use::use_event_listener;
+use web_sys::window;
 
 mod website;
 
@@ -33,8 +33,14 @@ pub fn App() -> impl IntoView {
         if let Some(el) = document.element_from_point(e.client_x() as f32, e.client_y() as f32) {
             if let Some(text_line_el) = el.closest(".codeline").ok().flatten() {
                 if let Some(index_attr) = text_line_el.get_attribute("data-index") {
-                    if let Ok(idx) = index_attr.parse::<usize>() {
-                        website.write().update_line_index(idx);
+                    if let Ok(Some(selection)) = window.get_selection() {
+                        if let Ok(range) = selection.get_range_at(0) {
+                            if let Ok(offset) = range.start_offset() {
+                                if let Ok(line_idx) = index_attr.parse::<usize>() {
+                                    website.write().update_cursor(line_idx, offset as usize);
+                                }
+                            }
+                        }
                     }
                 }
             }

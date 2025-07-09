@@ -38,21 +38,28 @@ impl Website {
         self.cursor
     }
 
-    pub fn update_line_index(&mut self, index: usize) {
+    pub fn update_cursor(&mut self, line_index: usize, line_offset: usize) {
         if self.content.is_empty() {
             return;
         }
-        if !Self::check(&self.content) {
-            // Cursor cannot move if the code is invalid.
+
+        if line_index != self.cursor.0 && !Self::check(&self.content) {
+            // Only check for validity if we're moving to a new line.
             return;
         }
 
-        if index >= self.content.len() {
+        if line_index >= self.content.len() {
             self.cursor.0 = self.content.len() - 1;
         } else {
-            self.cursor.0 = index;
+            self.cursor.0 = line_index;
         }
-        self.update_cursor_index();
+
+        // Ensure that the cursor index is within the content
+        if self.cursor.1 <= self.active_line().len() {
+            self.cursor.1 = line_offset;
+        } else {
+            self.cursor.1 = 0;
+        }
     }
 
     pub fn keystroke(&mut self, key: &str) {
@@ -108,28 +115,20 @@ impl Website {
         }
     }
 
-    fn update_cursor_index(&mut self) {
-        // Ensure that the cursor index is within the content
-        if self.cursor.1 <= self.active_line().len() {
-            return;
-        }
-        self.cursor.1 = 0;
-    }
-
     fn backspace_at_cursor(&mut self) {
         if self.cursor.1 > 0 {
             let first_part = &self.active_line()[..self.cursor.1 - 1];
             let second_part = &self.active_line()[self.cursor.1..];
             *self.mut_active_line() = [first_part, second_part].join("");
             self.cursor.1 -= 1;
-        } else if self.selection.is_some()
-        {
+        } else if self.selection.is_some() {
             let mut new_content = self.content.clone();
             let selection = self.selection.clone().unwrap();
             new_content.splice(selection.clone(), []);
-            if new_content.is_empty()
-            {
-                new_content.push(CodelineEntry{line: String::new()});
+            if new_content.is_empty() {
+                new_content.push(CodelineEntry {
+                    line: String::new(),
+                });
             }
             if Self::check(&new_content) {
                 self.selection = None;
@@ -138,8 +137,7 @@ impl Website {
                 self.cursor.0 = selection.start().saturating_sub(1);
                 self.cursor.1 = self.active_line().chars().count();
             }
-        } 
-        else if self.frames.get(&self.cursor.0).is_some() {
+        } else if self.frames.get(&self.cursor.0).is_some() {
             let related_line = self.frames.get(&self.cursor.0).unwrap();
             self.selection = Some(
                 std::cmp::min(self.cursor.0, *related_line)
