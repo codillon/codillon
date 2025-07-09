@@ -148,11 +148,6 @@ impl Website {
                 line: "end".to_string(),
             }),
         );
-        if new_content.is_empty() {
-            new_content.push(CodelineEntry {
-                line: String::new(),
-            });
-        }
 
         if self.try_commit_new_content(new_content.clone()) {
             self.cursor.0 = *selection.start();
@@ -160,6 +155,13 @@ impl Website {
         }
 
         new_content.remove(*selection.start());
+
+        if new_content.is_empty() {
+            new_content.push(CodelineEntry {
+                line: String::new(),
+            });
+        }
+        
         if self.try_commit_new_content(new_content) {
             self.cursor.0 = selection.start().saturating_sub(1);
             self.cursor.1 = self.active_line().chars().count();
