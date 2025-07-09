@@ -17,9 +17,11 @@ web-sys = { version = "0.3.77", features = [
     "Event",
     "Window",
     "Selection",
+    "Range",
     "Document",
     "Node",
     "Element",
     "HtmlDivElement",
+    "MouseEvent"
 ] }
 wasm-bindgen = "0.2.100"
