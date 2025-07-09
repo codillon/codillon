@@ -363,9 +363,11 @@ dependencies = [
  "leptos",
  "leptos-use",
  "use",
+ "wasm-bindgen",
  "wasm-tools",
  "wasmparser",
  "wast",
+ "web-sys",
 ]
 
 [[package]]

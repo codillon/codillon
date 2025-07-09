@@ -7,7 +7,7 @@ pub struct CodelineEntry {
 
 #[derive(Debug, Clone)]
 pub struct Website {
-    content: Vec<CodelineEntry>,
+    pub content: Vec<CodelineEntry>,
     cursor: (usize, usize),
 }
 
