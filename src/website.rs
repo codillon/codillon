@@ -1,4 +1,5 @@
 use crate::utils::*;
+use segment_tree::{self, ops::Add};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
@@ -10,6 +11,7 @@ pub struct CodelineEntry {
 pub struct Website {
     content: Vec<CodelineEntry>,
     frames: HashMap<usize, usize>,
+    indents: Vec<usize>,
     cursor: (usize, usize), //  Line #, Col #
     selection: Option<Frame>,
 }
@@ -19,6 +21,7 @@ impl Default for Website {
         Website {
             content: vec![CodelineEntry::default()],
             frames: HashMap::new(),
+            indents: vec![1],
             cursor: (0, 0),
             selection: None,
         }
@@ -26,7 +29,7 @@ impl Default for Website {
 }
 
 impl Website {
-    const TAB_SIZE:usize = 2;
+    pub const TAB_SIZE: usize = 4;
 
     pub fn get_content(&self) -> &Vec<CodelineEntry> {
         &self.content
@@ -73,9 +76,12 @@ impl Website {
         &self.selection
     }
 
-    fn tab_at_cursor(&mut self)
-    {
-        (0..Self::TAB_SIZE).for_each(|_| self.keystroke(" "));
+    pub fn get_indents(&self) -> &Vec<usize> {
+        &self.indents
+    }
+
+    fn tab_at_cursor(&mut self) {
+        (0..1).for_each(|_| self.keystroke(" "));
     }
 
     fn insert_normal_char_at_cursor(&mut self, ch: char) {
@@ -84,7 +90,7 @@ impl Website {
         self.cursor.1 += 1;
         self.automatic_append_end_after_cursor();
         if Self::check(&self.content) {
-            self.update_frames();
+            self.update_frames_and_indents();
         }
     }
 
@@ -110,12 +116,12 @@ impl Website {
             let second_part = &self.active_line()[self.cursor.1..];
             *self.mut_active_line() = [first_part, second_part].join("");
             self.cursor.1 -= 1;
-            if self.frames.get(&self.cursor.0).is_some() && Self::check(&self.content) {
-                self.update_frames();
+            if self.frames.contains_key(&self.cursor.0) && Self::check(&self.content) {
+                self.update_frames_and_indents();
             }
         } else if self.selection.is_some() {
             self.try_delete_selection();
-        } else if self.frames.get(&self.cursor.0).is_some() {
+        } else if self.frames.contains_key(&self.cursor.0) {
             let related_line = self.frames.get(&self.cursor.0).unwrap();
             self.selection = Some(
                 std::cmp::min(self.cursor.0, *related_line)
@@ -169,7 +175,7 @@ impl Website {
                 line: String::new(),
             });
         }
-        
+
         if self.try_commit_new_content(new_content) {
             self.cursor.0 = selection.start().saturating_sub(1);
             self.cursor.1 = self.active_line().chars().count();
@@ -185,7 +191,7 @@ impl Website {
         if Self::check(&new_content) {
             self.selection = None;
             let _ = std::mem::replace(&mut self.content, new_content);
-            self.update_frames();
+            self.update_frames_and_indents();
             true
         } else {
             false
@@ -262,13 +268,26 @@ impl Website {
             )
     }
 
-    fn update_frames(&mut self) {
+    fn update_frames_and_indents(&mut self) {
         self.frames.clear();
+        let mut segtree = segment_tree::PointSegment::build(vec![1; self.content.len()], Add);
         frame_match(self.content.iter().map(|entry| entry.line.as_str()))
             .iter()
             .for_each(|frame| {
                 self.frames.insert(*frame.start(), *frame.end());
                 self.frames.insert(*frame.end(), *frame.start());
+                segtree.modify(frame.start() + 1, *frame.end(), 1);
             });
+        self.content.iter().enumerate().for_each(|(index, entry)| {
+            if entry.line.split(";;").next().unwrap_or_default().trim() == "else"
+                && self
+                    .frames
+                    .get(&(index - 1))
+                    .is_none_or(|&related_line| related_line < index - 1)
+            {
+                segtree.modify(index - 1, index, 1);
+            }
+        });
+        self.indents = segtree.propogate().to_vec();
     }
 }

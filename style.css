@@ -41,13 +41,29 @@
 .line-number
 {
   font-family: monospace;
+  display: inline-block;
+  width:10ch;
+  text-align: left;
+  border-right: 1px solid #ccc;
+  border-top: none;
+  border-bottom: none;
 }
 
 .line-number[data-related]
 {
- font-family: monospace;
-  border: 1px solid #ccc;
-  border-radius: 2px;
   cursor: pointer;
-  text-align: center;
+}
+
+/*For Indent*/
+.indent
+{
+  white-space: pre;
+  font-family: monospace;
+}
+
+.indent[data-border]
+{
+  white-space: pre;
+  border-right: 1px solid #ccc;
+  font-family: monospace;
 }

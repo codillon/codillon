@@ -53,6 +53,7 @@ pub fn App() -> impl IntoView {
             let cursor = website.get_cursor();
             let frames = website.get_frames();
             let selection = website.get_selection();
+            let indents = website.get_indents();
             website
                 .get_content()
                 .iter()
@@ -60,7 +61,7 @@ pub fn App() -> impl IntoView {
                 .map(|(index, entry)| {
                     let is_selected = selection
                         .as_ref()
-                        .map_or(false, |range| range.contains(&index));
+                        .is_some_and(|range| range.contains(&index));
 
                     view! {
                         <div class="codeline" data-selected=is_selected data-index=index>
@@ -73,14 +74,29 @@ pub fn App() -> impl IntoView {
                                             {index}
                                             "("
                                             {*related_line}
-                                            "):"
+                                            ")"
                                         </span>
                                     })
                                         .into_any()
                                 } else {
-                                    (view! { <span class="line-number">{index} ":"</span> })
-                                        .into_any()
+                                    (view! { <span class="line-number">{index}</span> }).into_any()
                                 }
+                            }
+
+                            {
+                                let singal_indent = " ".repeat(website::Website::TAB_SIZE);
+                                (0..indents[index])
+                                    .map(|ith_indent| {
+                                        view! {
+                                            <span
+                                                class="indent"
+                                                data-border=ith_indent < indents[index] - 1
+                                            >
+                                                {singal_indent.clone()}
+                                            </span>
+                                        }
+                                    })
+                                    .collect_view()
                             }
 
                             {if index == cursor.0 {

@@ -362,6 +362,7 @@ dependencies = [
  "getrandom 0.2.16",
  "leptos",
  "leptos-use",
+ "segment-tree",
  "use",
  "wasm-tools",
  "wasmparser",
@@ -2110,6 +2111,12 @@ name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
+
+[[package]]
+name = "segment-tree"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f7dbd0d32cabaa6c7c3286d756268247538d613b621227bfe59237d7bbb271a"
 
 [[package]]
 name = "semver"
