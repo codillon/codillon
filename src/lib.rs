@@ -21,8 +21,8 @@ pub fn App() -> impl IntoView {
     let _keyboardListener =
         use_event_listener(window.clone(), ev::keydown, move |e: KeyboardEvent| {
             match e.key().as_str() {
-                "ArrowUp" | "ArrowDown" => {
-                    e.prevent_default(); // prevent browser scroll, TODO: add the scroll control ourselves
+                "ArrowUp" | "ArrowDown" | "Tab" => {
+                    e.prevent_default(); // prevent browser control for these keys
                 }
                 _ => {}
             }

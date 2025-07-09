@@ -26,6 +26,8 @@ impl Default for Website {
 }
 
 impl Website {
+    const TAB_SIZE:usize = 2;
+
     pub fn get_content(&self) -> &Vec<CodelineEntry> {
         &self.content
     }
@@ -56,6 +58,7 @@ impl Website {
             "ArrowUp" => self.cursor_move_up(),
             "ArrowLeft" => self.cursor_move_left(),
             "ArrowRight" => self.cursor_move_right(),
+            "Tab" => self.tab_at_cursor(),
             _ => {
                 if key.chars().count() > 1 {
                     leptos::logging::log!("Unhandled Special Keystroke {}", key);
@@ -68,6 +71,11 @@ impl Website {
 
     pub fn get_selection(&self) -> &Option<Frame> {
         &self.selection
+    }
+
+    fn tab_at_cursor(&mut self)
+    {
+        (0..Self::TAB_SIZE).for_each(|_| self.keystroke(" "));
     }
 
     fn insert_normal_char_at_cursor(&mut self, ch: char) {
