@@ -10,10 +10,12 @@ pub struct CodelineEntry {
 #[derive(Debug, Clone)]
 pub struct Website {
     content: Vec<CodelineEntry>,
+
     frames: HashMap<usize, usize>,
     indents: Vec<usize>,
-    cursor: (usize, usize), //  Line #, Col #
-    selection: Option<Frame>,
+
+    cursor: (usize, usize),   //  Line #, Col #
+    selection: Option<Frame>, // Only support multi-line selection
 }
 
 impl Default for Website {
@@ -21,6 +23,7 @@ impl Default for Website {
         Website {
             content: vec![CodelineEntry::default()],
             frames: HashMap::new(),
+            // All instrs have >= 1 indentation to make them speparate frome the line mumber
             indents: vec![1],
             cursor: (0, 0),
             selection: None,
@@ -43,14 +46,44 @@ impl Website {
         self.cursor
     }
 
-    pub fn update_cursor(&mut self, line_index: usize, line_offset: usize) {
+    /// if not frozen, update the cursor.
+    ///
+    /// ### Returns
+    /// Success or not
+    pub fn try_update_cursor(&mut self, line_index: usize, line_offset: usize) -> bool {
         if line_index != self.cursor.0 && !Self::check(&self.content) {
             // Only check for validity if we're moving to a new line.
-            return;
+            return false;
         }
 
         self.cursor.0 = std::cmp::min(line_index, self.content.len() - 1);
         self.cursor.1 = std::cmp::min(line_offset, self.active_line().chars().count());
+        true
+    }
+
+    /// Only allow when the selction area is exactly a frame.
+    /// If success, try to update the cursor as well
+    ///
+    /// ### Returns
+    /// Success or not
+    #[allow(dead_code)]
+    pub fn try_update_selection(&mut self, new_selection: Frame) -> bool {
+        let start_line = *new_selection.start();
+        if let Some(&related_line) = self.frames.get(&start_line) {
+            if related_line == *new_selection.end() &&
+            // Because self.frames are unordered
+            related_line > start_line
+            {
+                self.selection = Some(new_selection);
+                let line_offset = self.content[start_line].line.chars().count();
+                self.try_update_cursor(start_line, line_offset);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
     }
 
     pub fn keystroke(&mut self, key: &str) {
@@ -81,7 +114,7 @@ impl Website {
     }
 
     fn tab_at_cursor(&mut self) {
-        (0..1).for_each(|_| self.keystroke(" "));
+        (0..Self::TAB_SIZE).for_each(|_| self.keystroke(" "));
     }
 
     fn insert_normal_char_at_cursor(&mut self, ch: char) {
@@ -94,6 +127,7 @@ impl Website {
         }
     }
 
+    // Insert end so that wellformness can be maintained even if there's only one signal line modified
     fn automatic_append_end_after_cursor(&mut self) {
         match self.active_line() {
             "block" | "loop" | "if" => {
@@ -116,18 +150,23 @@ impl Website {
             let second_part = &self.active_line()[self.cursor.1..];
             *self.mut_active_line() = [first_part, second_part].join("");
             self.cursor.1 -= 1;
+
+            // Case: elp|se -> else
             if self.frames.contains_key(&self.cursor.0) && Self::check(&self.content) {
                 self.update_frames_and_indents();
             }
         } else if self.selection.is_some() {
+            // try to delete selected lines if the cursor is at the beginning of the line
             self.try_delete_selection();
         } else if self.frames.contains_key(&self.cursor.0) {
+            // try to select the block, may be deleted later
             let related_line = self.frames.get(&self.cursor.0).unwrap();
             self.selection = Some(
                 std::cmp::min(self.cursor.0, *related_line)
                     ..=std::cmp::max(self.cursor.0, *related_line),
             );
         } else if self.cursor.0 > 0 {
+            // remove the line if it is not the first line
             let mut new_line = self.content[self.cursor.0 - 1].line.clone();
             new_line.push_str(self.active_line());
             let mut new_content = self.content.clone();
@@ -141,6 +180,7 @@ impl Website {
             }
         }
     }
+
     fn cursor_move_right(&mut self) {
         self.selection = None;
         if self.cursor.1 < self.active_line().chars().count() {
@@ -151,11 +191,16 @@ impl Website {
         }
     }
 
+    /// Try to delete the selected lines.
+    /// If success, frames and indents will be updated.
+    ///
     /// ### Returns
     /// Success or not.
     fn try_delete_selection(&mut self) -> bool {
         let mut new_content = self.content.clone();
         let selection = self.selection.clone().unwrap();
+
+        // Case: Try to delete the "else - end" block
         new_content.splice(
             selection.clone(),
             std::iter::once(CodelineEntry {
@@ -168,6 +213,7 @@ impl Website {
             return true;
         }
 
+        // Case: Try to delete the "block - end" block
         new_content.remove(*selection.start());
 
         if new_content.is_empty() {
@@ -185,6 +231,9 @@ impl Website {
         }
     }
 
+    /// Replace the content if `new_content` is well-formed.
+    /// If success, frames and indents are updated.
+    ///
     /// ### Returns
     /// Success or not.
     fn try_commit_new_content(&mut self, new_content: Vec<CodelineEntry>) -> bool {
@@ -255,6 +304,7 @@ impl Website {
         }
     }
 
+    /// Indicates wellformness
     fn check(content: &[CodelineEntry]) -> bool {
         content
             .iter()
@@ -270,6 +320,8 @@ impl Website {
 
     fn update_frames_and_indents(&mut self) {
         self.frames.clear();
+
+        // Keep indents >= 1 to separate code from line number. Use segtree to avoid n^2 complexity.
         let mut segtree = segment_tree::PointSegment::build(vec![1; self.content.len()], Add);
         frame_match(self.content.iter().map(|entry| entry.line.as_str()))
             .iter()
@@ -278,6 +330,19 @@ impl Website {
                 self.frames.insert(*frame.end(), *frame.start());
                 segtree.modify(frame.start() + 1, *frame.end(), 1);
             });
+
+        // Case:
+        // ...
+        // 3  if
+        // 4  i32.const 5
+        // 5  drop
+        // 6  else
+        // 7  i32.const 4
+        // 8  drop
+        // 9  end
+        // ...
+        // The 5-th line is frame border related with 3-th line. But intuitively, we want to have indentation for
+        // the 5-th line. Also, handle special case if "if" and "else" is adjacent.
         self.content.iter().enumerate().for_each(|(index, entry)| {
             if entry.line.split(";;").next().unwrap_or_default().trim() == "else"
                 && self

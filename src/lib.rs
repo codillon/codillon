@@ -37,7 +37,7 @@ pub fn App() -> impl IntoView {
                         if let Ok(range) = selection.get_range_at(0) {
                             if let Ok(offset) = range.start_offset() {
                                 if let Ok(line_idx) = index_attr.parse::<usize>() {
-                                    website.write().update_cursor(line_idx, offset as usize);
+                                    website.write().try_update_cursor(line_idx, offset as usize);
                                 }
                             }
                         }
@@ -70,11 +70,8 @@ pub fn App() -> impl IntoView {
                                 let related_line = frames.get(&index);
                                 if let Some(related_line) = related_line {
                                     (view! {
-                                        <span class="line-number" data-related=true>
-                                            {index}
-                                            "("
-                                            {*related_line}
-                                            ")"
+                                        <span class="line-number">
+                                            {index} "(" {*related_line} ")"
                                         </span>
                                     })
                                         .into_any()
@@ -90,6 +87,7 @@ pub fn App() -> impl IntoView {
                                         view! {
                                             <span
                                                 class="indent"
+                                                // Border as vertical line to connect "block - end"
                                                 data-border=ith_indent < indents[index] - 1
                                             >
                                                 {singal_indent.clone()}

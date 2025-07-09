@@ -49,11 +49,6 @@
   border-bottom: none;
 }
 
-.line-number[data-related]
-{
-  cursor: pointer;
-}
-
 /*For Indent*/
 .indent
 {
