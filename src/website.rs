@@ -121,14 +121,14 @@ impl Website {
             let second_part = &self.active_line()[self.cursor.1..];
             *self.mut_active_line() = [first_part, second_part].join("");
             self.cursor.1 -= 1;
-        } else if self.selection.is_some()
-        {
+        } else if self.selection.is_some() {
             let mut new_content = self.content.clone();
             let selection = self.selection.clone().unwrap();
             new_content.splice(selection.clone(), []);
-            if new_content.is_empty()
-            {
-                new_content.push(CodelineEntry{line: String::new()});
+            if new_content.is_empty() {
+                new_content.push(CodelineEntry {
+                    line: String::new(),
+                });
             }
             if Self::check(&new_content) {
                 self.selection = None;
@@ -137,8 +137,7 @@ impl Website {
                 self.cursor.0 = selection.start().saturating_sub(1);
                 self.cursor.1 = self.active_line().chars().count();
             }
-        } 
-        else if self.frames.get(&self.cursor.0).is_some() {
+        } else if self.frames.get(&self.cursor.0).is_some() {
             let related_line = self.frames.get(&self.cursor.0).unwrap();
             self.selection = Some(
                 std::cmp::min(self.cursor.0, *related_line)
