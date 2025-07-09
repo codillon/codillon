@@ -39,27 +39,13 @@ impl Website {
     }
 
     pub fn update_cursor(&mut self, line_index: usize, line_offset: usize) {
-        if self.content.is_empty() {
-            return;
-        }
-
         if line_index != self.cursor.0 && !Self::check(&self.content) {
             // Only check for validity if we're moving to a new line.
             return;
         }
 
-        if line_index >= self.content.len() {
-            self.cursor.0 = self.content.len() - 1;
-        } else {
-            self.cursor.0 = line_index;
-        }
-
-        // Ensure that the cursor index is within the content
-        if self.cursor.1 <= self.active_line().len() {
-            self.cursor.1 = line_offset;
-        } else {
-            self.cursor.1 = 0;
-        }
+        self.cursor.0 = std::cmp::min(line_index, self.content.len() - 1);
+        self.cursor.1 = std::cmp::min(line_offset, self.active_line().chars().count());
     }
 
     pub fn keystroke(&mut self, key: &str) {
@@ -89,9 +75,7 @@ impl Website {
         *self.mut_active_line() = [first_part, &ch.to_string(), second_part].join("");
         self.cursor.1 += 1;
         self.automatic_append_end_after_cursor();
-        if self.active_line().split(";;").next().unwrap_or_default() == "else"
-            && Self::check(&self.content)
-        {
+        if Self::check(&self.content) {
             self.update_frames();
         }
     }
@@ -106,10 +90,7 @@ impl Website {
                         line: "end".to_string(),
                     },
                 );
-                if Self::check(&new_content) {
-                    let _ = std::mem::replace(&mut self.content, new_content);
-                    self.update_frames();
-                }
+                self.try_commit_new_content(new_content);
             }
             _ => (),
         }
@@ -121,22 +102,11 @@ impl Website {
             let second_part = &self.active_line()[self.cursor.1..];
             *self.mut_active_line() = [first_part, second_part].join("");
             self.cursor.1 -= 1;
-        } else if self.selection.is_some() {
-            let mut new_content = self.content.clone();
-            let selection = self.selection.clone().unwrap();
-            new_content.splice(selection.clone(), []);
-            if new_content.is_empty() {
-                new_content.push(CodelineEntry {
-                    line: String::new(),
-                });
-            }
-            if Self::check(&new_content) {
-                self.selection = None;
-                let _ = std::mem::replace(&mut self.content, new_content);
+            if self.frames.get(&self.cursor.0).is_some() && Self::check(&self.content) {
                 self.update_frames();
-                self.cursor.0 = selection.start().saturating_sub(1);
-                self.cursor.1 = self.active_line().chars().count();
             }
+        } else if self.selection.is_some() {
+            self.try_delete_selection();
         } else if self.frames.get(&self.cursor.0).is_some() {
             let related_line = self.frames.get(&self.cursor.0).unwrap();
             self.selection = Some(
@@ -151,9 +121,7 @@ impl Website {
                 self.cursor.0 - 1..self.cursor.0 + 1,
                 std::iter::once(CodelineEntry { line: new_line }),
             );
-            if Self::check(&new_content) {
-                let _ = std::mem::replace(&mut self.content, new_content);
-                self.update_frames();
+            if self.try_commit_new_content(new_content) {
                 self.cursor.0 -= 1;
                 self.cursor.1 = self.active_line().chars().count();
             }
@@ -166,6 +134,51 @@ impl Website {
         } else if self.cursor.0 < self.content.len() - 1 && Self::check(&self.content) {
             self.cursor.0 += 1;
             self.cursor.1 = 0;
+        }
+    }
+
+    /// ### Returns
+    /// Success or not.
+    fn try_delete_selection(&mut self) -> bool {
+        let mut new_content = self.content.clone();
+        let selection = self.selection.clone().unwrap();
+        new_content.splice(
+            selection.clone(),
+            std::iter::once(CodelineEntry {
+                line: "end".to_string(),
+            }),
+        );
+        if new_content.is_empty() {
+            new_content.push(CodelineEntry {
+                line: String::new(),
+            });
+        }
+
+        if self.try_commit_new_content(new_content.clone()) {
+            self.cursor.0 = *selection.start();
+            return true;
+        }
+
+        new_content.remove(*selection.start());
+        if self.try_commit_new_content(new_content) {
+            self.cursor.0 = selection.start().saturating_sub(1);
+            self.cursor.1 = self.active_line().chars().count();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// ### Returns
+    /// Success or not.
+    fn try_commit_new_content(&mut self, new_content: Vec<CodelineEntry>) -> bool {
+        if Self::check(&new_content) {
+            self.selection = None;
+            let _ = std::mem::replace(&mut self.content, new_content);
+            self.update_frames();
+            true
+        } else {
+            false
         }
     }
 
@@ -220,11 +233,9 @@ impl Website {
             ],
         );
 
-        if Self::check(&new_content) {
+        if self.try_commit_new_content(new_content) {
             self.cursor.0 += 1;
             self.cursor.1 = 0;
-            let _ = std::mem::replace(&mut self.content, new_content);
-            self.update_frames();
         }
     }
 
