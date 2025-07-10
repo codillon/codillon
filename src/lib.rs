@@ -240,7 +240,7 @@ impl EditLine {
             range.end_offset().expect("offset"),
         );
 
-        if self.text.chars().next() == Some(Self::COSMETIC_SPACE) {
+        if self.text.starts_with(Self::COSMETIC_SPACE) {
             self.text.clear();
         }
 
