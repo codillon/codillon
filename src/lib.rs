@@ -11,7 +11,7 @@ use web_sys::*;
 // The "Editor" holds a vector of EditLines, as well as bookkeeping information related to
 // creating new lines and finding lines given their unique long-lived ID.
 pub struct Editor {
-    next_id: usize, // TODO: will be used when insertParagraph creates a new line
+    //    next_id: usize, // TODO: will be used when insertParagraph creates a new line
     id_map: HashMap<usize, usize>,
     lines: Store<CodeLines>,
     cursor_line: RwSignal<Option<usize>>,
@@ -26,7 +26,7 @@ pub struct CodeLines {
 impl Editor {
     fn new() -> Self {
         Self {
-            next_id: 6,
+            //            next_id: 6,
             lines: Store::new(CodeLines {
                 lines: vec![EditLine::new(3), EditLine::new(5), EditLine::new(7)], // demo initial contents
             }),
@@ -77,16 +77,6 @@ impl Editor {
             self.cursor_line.set(Some(0));
             self.lines.lines().at_unkeyed(0).write().cursor_pos = Some(0);
         }
-    }
-
-    fn handle_key(&mut self, ev: KeyboardEvent) {
-        leptos_dom::log!("key: {}", ev.char_code());
-        ev.prevent_default();
-    }
-
-    fn handle_mouse(&mut self, ev: MouseEvent) {
-        leptos_dom::log!("buttons: {}", ev.buttons());
-        ev.prevent_default();
     }
 
     // Dispatch an InputEvent to the appropriate EditLine.
