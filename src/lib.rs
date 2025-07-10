@@ -59,6 +59,8 @@ impl Editor {
     fn handle_input(&mut self, ev: InputEvent) {
         ev.prevent_default();
 
+        leptos_dom::log!("{}", ev.input_type());
+
         let selection_range = get_current_selection()
             .get_range_at(0)
             .expect("selection range");
@@ -70,13 +72,21 @@ impl Editor {
             && let Some(id) = start_id
         {
             self.dispatch(id, ev);
-            self.update_selection();
         } else {
             leptos_dom::log!("resetting cursor. Ids are {:?} {:?}", start_id, end_id);
             self.cursor_line.set(Some(0));
             self.lines.lines().at_unkeyed(0).write().cursor_pos = Some(0);
-            self.update_selection();
         }
+    }
+
+    fn handle_key(&mut self, ev: KeyboardEvent) {
+        leptos_dom::log!("key: {}", ev.char_code());
+        ev.prevent_default();
+    }
+
+    fn handle_mouse(&mut self, ev: MouseEvent) {
+        leptos_dom::log!("buttons: {}", ev.buttons());
+        ev.prevent_default();
     }
 
     // Dispatch an InputEvent to the appropriate EditLine.
@@ -94,21 +104,19 @@ impl Editor {
     // in the first line), Leptos will re-render the line contents after the selection is updated,
     // so the cursor gets warped back to the beginning of the line.
     fn update_selection(&self) {
-        let Some(line_no) = self.cursor_line.get() else {
+        let Some(line_no) = self.cursor_line.get_untracked() else {
             leptos_dom::log!("no cursor line");
             return;
         };
-        let the_line = self.lines.lines().at_unkeyed(line_no).read();
+        let the_line = &self.lines.lines().read_untracked()[line_no];
         let Some(pos) = the_line.cursor_pos else {
             leptos_dom::log!("no cursor pos");
             return;
         };
         let text_node = descend_until_text_node(the_line.div_element().into());
-        request_animation_frame(move || {
-            get_current_selection()
-                .set_base_and_extent(&text_node, pos as u32, &text_node, pos as u32)
-                .expect("set selection base and extent")
-        });
+        get_current_selection()
+            .set_base_and_extent(&text_node, pos as u32, &text_node, pos as u32)
+            .expect("set selection base and extent");
     }
 }
 
@@ -137,21 +145,32 @@ fn descend_until_text_node(mut node: Node) -> Node {
 // (each in their own div).
 #[component]
 pub fn Editor() -> impl IntoView {
-    let mut editor = Editor::new();
+    let (editor, set_editor) = signal(Editor::new());
+
+    // If the cursor moves, update it *after* updating the text.
+    let cursor_signal = editor.read_untracked().cursor_line;
+    Effect::watch(
+        move || cursor_signal.get(),
+        move |_, _, _| set_editor.write().update_selection(),
+        false,
+    );
 
     view! {
         <div
             class="textentry"
             contenteditable
             spellcheck="false"
-            on:beforeinput=move |ev| { editor.handle_input(ev) }
+            on:beforeinput=move |ev| { set_editor.write().handle_input(ev) }
         >
-            <For each=move || editor.lines.lines() key=|line| line.read().id let(child)>
+            <For each=move || editor.read().lines.lines() key=|line| line.read().id let(child)>
                 <div
                     data-codillon-line-id=move || child.read().id
                     node_ref=child.read_untracked().div_ref
                 >
-                    {move || child.read().as_string().to_string()}
+                    {move || {
+                        set_editor.write().cursor_line.write();
+                        child.read().as_string().to_string()
+                    }}
                 </div>
             </For>
         </div>
@@ -272,6 +291,6 @@ impl EditLine {
     }
 
     fn div_element(&self) -> HtmlDivElement {
-        self.div_ref.get().expect("div element")
+        self.div_ref.get_untracked().expect("div element")
     }
 }
