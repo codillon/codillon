@@ -20,16 +20,12 @@ pub fn App() -> impl IntoView {
 
     let _keyboardListener =
         use_event_listener(window.clone(), ev::keydown, move |e: KeyboardEvent| {
-            match e.key().as_str() {
-                "ArrowUp" | "ArrowDown" | "Tab" => {
-                    e.prevent_default(); // prevent browser control for these keys
-                }
-                _ => {}
-            }
+            e.prevent_default(); // prevent browser control for these keys
             website.write().keystroke(&e.key());
         });
 
     let _mouseListener = use_event_listener(window.clone(), ev::click, move |e: MouseEvent| {
+        e.prevent_default();
         if let Some(el) = document.element_from_point(e.client_x() as f32, e.client_y() as f32) {
             if let Some(text_line_el) = el.closest(".codeline").ok().flatten() {
                 if let Some(index_attr) = text_line_el.get_attribute("data-index") {
