@@ -14,9 +14,18 @@ pub struct Editor {
     //    next_id: usize, // TODO: will be used when insertParagraph creates a new line
     id_map: HashMap<usize, usize>,
     lines: Store<CodeLines>,
-    cursor_line: RwSignal<Option<usize>>,
+    selection: RwSignal<Option<SetSelection>>,
 }
 
+// The SetSelection struct describes changes to be made to the browser's global selection.
+// E.g. after typing a letter of text, the cursor should be advanced to follow the new text.
+#[derive(Clone, Copy)]
+enum SetSelection {
+    Cursor(usize, usize),    // line index, pos
+    MultiLine(usize, usize), // anchor line number, focus line number
+}
+
+// The individual lines of code.
 #[derive(Store)]
 pub struct CodeLines {
     #[store(key: usize = |line| line.id)]
@@ -31,86 +40,235 @@ impl Editor {
                 lines: vec![EditLine::new(3), EditLine::new(5), EditLine::new(7)], // demo initial contents
             }),
             id_map: HashMap::from([(3, 0), (5, 1), (7, 2)]),
-            cursor_line: RwSignal::new(None),
-        }
-    }
-
-    // Given an HTML Node, finds the Codillion-assigned unique ID of the EditLine.
-    // These are stored in HTML attributes of the line-by-line Div elements.
-    fn find_id_from_node(&self, mut node: Node) -> Option<usize> {
-        loop {
-            if let Ok(elem) = node.clone().dyn_into::<Element>()
-                && let Some(id_str) = elem.get_attribute("data-codillon-line-id")
-            {
-                return id_str.parse::<usize>().ok();
-            }
-            match node.parent_node() {
-                Some(n) => node = n,
-                None => return None,
-            }
+            selection: RwSignal::new(None),
         }
     }
 
     // Handle an input to the Editor window, by dispatching to the appropriate EditLine.
-    // TODO: properly handle when the selection spans lines (expand the selection to the whole lines,
-    //                                                       and delete lines as necessary on input)
     // TODO: handle insertParagraph and insertLineBreak (add a line)
     // TODO: handle line deletion
     fn handle_input(&mut self, ev: InputEvent) {
         ev.prevent_default();
 
-        leptos_dom::log!("{}", ev.input_type());
-
-        let selection_range = get_current_selection()
-            .get_range_at(0)
-            .expect("selection range");
-        let start_id =
-            self.find_id_from_node(selection_range.start_container().expect("container"));
-        let end_id = self.find_id_from_node(selection_range.end_container().expect("container"));
+        let target_range = ev
+            .get_target_ranges()
+            .get(0)
+            .clone()
+            .unchecked_into::<web_sys::Range>();
+        let start_id = find_id_from_node(&target_range.start_container().expect("container"));
+        let end_id = find_id_from_node(&target_range.end_container().expect("container"));
 
         if start_id == end_id
             && let Some(id) = start_id
         {
-            self.dispatch(id, ev);
+            let line_no = self.id_map.get(&id).expect("can't find line");
+            let new_cursor_pos = self
+                .lines
+                .lines()
+                .at_unkeyed(*line_no)
+                .write()
+                .handle_input(ev);
+            self.selection
+                .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
         } else {
-            leptos_dom::log!("resetting cursor. Ids are {:?} {:?}", start_id, end_id);
-            self.cursor_line.set(Some(0));
-            self.lines.lines().at_unkeyed(0).write().cursor_pos = Some(0);
+            leptos_dom::log!("unhandled: multiline select input");
+        }
+
+        self.rationalize_selection();
+    }
+
+    // Cancel an ArrowDown in the last line (to prevent the cursor from leaving the editor window)
+    fn maybe_cancel(&self, ev: KeyboardEvent) {
+        if ev.key() != "ArrowDown" {
+            return;
+        }
+        let selection = get_current_selection();
+        if selection.is_collapsed()
+            && let Some(focus) = selection.focus_node()
+            && let Some(id) = find_id_from_node(&focus)
+            && id
+                == self
+                    .lines
+                    .lines()
+                    .read_untracked()
+                    .last()
+                    .expect("last line")
+                    .id
+        {
+            ev.prevent_default();
         }
     }
 
-    // Dispatch an InputEvent to the appropriate EditLine.
-    fn dispatch(&mut self, id: usize, ev: InputEvent) {
-        let Some(line_no) = self.id_map.get(&id) else {
-            panic!("can't find line");
+    // "Rationalize" the selection to (1) make multi-line selections include the entire lines, and
+    // (2) correct situations where the selection starts or ends outside the editor area.
+    fn rationalize_selection(&mut self) {
+        let selection = get_current_selection();
+        let Some(anchor) = selection.anchor_node() else {
+            return;
         };
-        let the_line = self.lines.lines().at_unkeyed(*line_no);
-        the_line.write().handle_input(ev);
-        self.cursor_line.set(Some(*line_no));
+        let focus = selection.focus_node().expect("focus");
+
+        let anchor_id = find_id_from_node(&anchor);
+        let focus_id = find_id_from_node(&focus);
+
+        match (anchor_id, focus_id) {
+            (Some(anchor_id), Some(focus_id)) => {
+                let anchor_offset = selection.anchor_offset() as usize;
+                self.handle_in_bounds_selection(anchor_id, anchor_offset, focus_id);
+            }
+            _ => self.handle_out_of_bounds_selection(&selection),
+        }
     }
 
-    // Update Codillion's idea of the current selection / cursor position to the browser.
-    // We need to use "request_animation_frame" or *sometimes* (especially when the cursor position is
-    // in the first line), Leptos will re-render the line contents after the selection is updated,
-    // so the cursor gets warped back to the beginning of the line.
+    // If the selection includes areas outside the editor window, rationalize it
+    // to fit inside the window.
+    fn handle_out_of_bounds_selection(&mut self, selection: &Selection) {
+        if selection.is_collapsed() {
+            if selection.focus_offset() == 0 {
+                self.selection.set(Some(SetSelection::Cursor(0, 0)));
+            } else {
+                self.selection.set(Some(SetSelection::Cursor(
+                    self.lines.lines().read_untracked().len() - 1,
+                    self.lines
+                        .lines()
+                        .read_untracked()
+                        .last()
+                        .expect("last line")
+                        .text
+                        .len(),
+                )));
+            }
+            return;
+        }
+
+        let anchor_id = find_id_from_node(&selection.anchor_node().expect("anchor"));
+        let focus_id = find_id_from_node(&selection.focus_node().expect("focus"));
+
+        match (anchor_id, focus_id) {
+            (Some(anchor_id), None) => {
+                let anchor_offset = selection.anchor_offset() as usize;
+                self.handle_in_bounds_selection(
+                    anchor_id,
+                    anchor_offset,
+                    self.lines
+                        .lines()
+                        .read_untracked()
+                        .last()
+                        .expect("last line")
+                        .id,
+                );
+            }
+            (None, Some(focus_id)) => {
+                self.handle_in_bounds_selection(
+                    self.lines
+                        .lines()
+                        .read_untracked()
+                        .first()
+                        .expect("first line")
+                        .id,
+                    0,
+                    focus_id,
+                );
+            }
+            (None, None) => {
+                if selection.anchor_offset() > selection.focus_offset() {
+                    self.selection.set(Some(SetSelection::MultiLine(
+                        self.lines.lines().read_untracked().len() - 1,
+                        0,
+                    )));
+                } else {
+                    self.selection.set(Some(SetSelection::MultiLine(
+                        0,
+                        self.lines.lines().read_untracked().len() - 1,
+                    )));
+                }
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    // If the selection is fully in-bounds, rationalize it by expanding multi-line selections
+    // to include the entire lines in question.
+    fn handle_in_bounds_selection(
+        &mut self,
+        anchor_id: usize,
+        anchor_offset: usize,
+        focus_id: usize,
+    ) {
+        if anchor_id == focus_id {
+            return; // single-line selection, no action needed
+        }
+        // Apparent multiline selection, but is this really a single-line or n-1 line selection?
+        let mut anchor_idx: usize = *self.id_map.get(&anchor_id).expect("can't find line");
+        let focus_idx: usize = *self.id_map.get(&focus_id).expect("can't find line");
+        let anchor_line = &self.lines.lines().read_untracked()[anchor_idx];
+
+        // Is the anchor at the very end of a line (for a forward selection),
+        // or the very beginning of a line (for a backward selection)?
+        if anchor_idx < focus_idx {
+            if anchor_offset == anchor_line.text.len() {
+                anchor_idx += 1;
+            }
+        } else if focus_idx < anchor_idx {
+            if anchor_offset == 0 {
+                anchor_idx -= 1;
+            }
+        }
+
+        if anchor_idx == focus_idx {
+            // It was really a single-line selection that overlapped
+            // the end-of-previous or beginning-of-next line. Do nothing.
+        } else {
+            // It's a real multi-line selection. Expand to the full lines on next tick.
+            self.selection
+                .set(Some(SetSelection::MultiLine(anchor_idx, focus_idx)));
+        }
+    }
+
+    // Execute a SetSelection to transfer Codillion's idea of the current selection / cursor position
+    // to the browser. We want Leptos to run this (and update the selection) *after* updating
+    // line contents, which will warp the cursor back to the beginning of the line.
     fn update_selection(&self) {
-        let Some(line_no) = self.cursor_line.get_untracked() else {
-            leptos_dom::log!("no cursor line");
-            return;
-        };
-        let the_line = &self.lines.lines().read_untracked()[line_no];
-        let Some(pos) = the_line.cursor_pos else {
-            leptos_dom::log!("no cursor pos");
-            return;
-        };
-        let text_node = descend_until_text_node(the_line.div_element().into());
-        get_current_selection()
-            .set_base_and_extent(&text_node, pos as u32, &text_node, pos as u32)
-            .expect("set selection base and extent");
+        match self.selection.get_untracked() {
+            Some(SetSelection::Cursor(line_no, pos)) => {
+                let the_line = &self.lines.lines().read_untracked()[line_no];
+                let text_node = descend_until_text_node(the_line.div_element().into());
+                get_current_selection()
+                    .set_base_and_extent(&text_node, pos as u32, &text_node, pos as u32)
+                    .expect("set selection base and extent");
+            }
+            Some(SetSelection::MultiLine(anchor_idx, focus_idx)) => {
+                let anchor_line = &self.lines.lines().read_untracked()[anchor_idx];
+                let anchor_node = descend_until_text_node(anchor_line.div_element().into());
+                let focus_line = &self.lines.lines().read_untracked()[focus_idx];
+                let focus_node = descend_until_text_node(focus_line.div_element().into());
+
+                let anchor_offset = if anchor_idx > focus_idx {
+                    anchor_line.text.len() as u32
+                } else {
+                    0
+                };
+
+                let focus_offset = if anchor_idx > focus_idx {
+                    0
+                } else {
+                    focus_line.text.len() as u32
+                };
+
+                get_current_selection()
+                    .set_base_and_extent(&anchor_node, anchor_offset, &focus_node, focus_offset)
+                    .expect("set multiline selection");
+            }
+            None => (),
+        }
+
+        self.selection.write_untracked().take();
     }
 }
 
-// General DOM helper functions.
+// DOM helper functions
 
 fn get_current_selection() -> Selection {
     web_sys::window()
@@ -131,17 +289,34 @@ fn descend_until_text_node(mut node: Node) -> Node {
     }
 }
 
+// Given an HTML Node, finds the Codillion-assigned unique ID of the EditLine.
+// These are stored in HTML attributes of the line-by-line Div elements.
+fn find_id_from_node(orig_node: &Node) -> Option<usize> {
+    let mut node = orig_node.clone();
+    loop {
+        if let Ok(elem) = node.clone().dyn_into::<Element>()
+            && let Some(id_str) = elem.get_attribute("data-codillon-line-id")
+        {
+            return id_str.parse::<usize>().ok();
+        }
+        match node.parent_node() {
+            Some(n) => node = n,
+            None => return None,
+        }
+    }
+}
+
 // The editor component is a single contenteditable div, surrounding a collection of EditLines
 // (each in their own div).
 #[component]
 pub fn Editor() -> impl IntoView {
     let (editor, set_editor) = signal(Editor::new());
 
-    // If the cursor moves, update it *after* updating the text.
-    let cursor_signal = editor.read_untracked().cursor_line;
+    // If the selection or cursor changes, update it *after* updating the text.
+    let selection_signal = editor.read_untracked().selection;
     Effect::watch(
-        move || cursor_signal.get(),
-        move |_, _, _| set_editor.write().update_selection(),
+        move || selection_signal.get(),
+        move |_, _, _| set_editor.write_untracked().update_selection(),
         false,
     );
 
@@ -150,7 +325,14 @@ pub fn Editor() -> impl IntoView {
             class="textentry"
             contenteditable
             spellcheck="false"
-            on:beforeinput=move |ev| { set_editor.write().handle_input(ev) }
+            on:beforeinput=move |ev| { set_editor.write_untracked().handle_input(ev) }
+            on:mousedown=move |_| { set_editor.write_untracked().rationalize_selection() }
+            on:keydown=move |ev| {
+                editor.read_untracked().maybe_cancel(ev);
+                set_editor.write_untracked().rationalize_selection();
+            }
+            on:mouseup=move |_| { set_editor.write_untracked().rationalize_selection() }
+            on:keyup=move |_| { set_editor.write_untracked().rationalize_selection() }
         >
             <For each=move || editor.read().lines.lines() key=|line| line.read().id let(child)>
                 <div
@@ -158,7 +340,7 @@ pub fn Editor() -> impl IntoView {
                     node_ref=child.read_untracked().div_ref
                 >
                     {move || {
-                        set_editor.write().cursor_line.write();
+                        selection_signal.write();
                         child.read().as_string().to_string()
                     }}
                 </div>
@@ -173,7 +355,6 @@ pub fn Editor() -> impl IntoView {
 pub struct EditLine {
     id: usize,
     text: String,
-    cursor_pos: Option<usize>,
     div_ref: NodeRef<leptos::html::Div>,
 }
 
@@ -182,7 +363,6 @@ impl EditLine {
         Self {
             id,
             text: String::from("Hello, world"),
-            cursor_pos: None,
             div_ref: NodeRef::new(),
         }
     }
@@ -206,19 +386,15 @@ impl EditLine {
 
     const COSMETIC_SPACE: char = '\u{FEFF}';
 
-    fn rationalize(&mut self) {
+    fn rationalize(&mut self, cursor_pos: &mut usize) {
         // Adjust the line so the cursor still shows up even if the text is empty,
         // by replacing empty strings with a zero-width space character and removing it
         // later -- adjusting cursor position to match.
 
         self.text.retain(|c| c != Self::COSMETIC_SPACE);
-        if let Some(ref mut pos) = self.cursor_pos {
-            *pos = (*pos).min(self.text.len())
-        }
+        *cursor_pos = (*cursor_pos).min(self.text.len());
         let no_initial_ws = self.text.trim_start();
-        if let Some(ref mut pos) = self.cursor_pos {
-            *pos = (*pos).saturating_sub(self.text.len() - no_initial_ws.len());
-        }
+        *cursor_pos = (*cursor_pos).saturating_sub(self.text.len() - no_initial_ws.len());
         self.text = no_initial_ws.to_string();
 
         if self.text.is_empty() {
@@ -227,10 +403,13 @@ impl EditLine {
     }
 
     // Handle insert and delete events for this line.
-    fn handle_input(&mut self, ev: InputEvent) {
-        let range = get_current_selection()
-            .get_range_at(0)
-            .expect("selection range");
+    fn handle_input(&mut self, ev: InputEvent) -> usize {
+        let range = ev
+            .get_target_ranges()
+            .get(0)
+            .clone()
+            .unchecked_into::<web_sys::Range>();
+
         let mut start_pos = self.offset_to_pos(
             range.start_container().expect("container"),
             range.start_offset().expect("offset"),
@@ -251,19 +430,20 @@ impl EditLine {
             (start_pos, end_pos) = (end_pos, start_pos);
         }
 
+        let mut cursor_pos = start_pos;
+
         match ev.input_type().as_str() {
             "insertText" => {
                 let new_text = &ev.data().unwrap_or_default();
                 self.text.replace_range(start_pos..end_pos, new_text);
-                self.cursor_pos = Some(start_pos + new_text.len());
+                cursor_pos = start_pos + new_text.len();
             }
             "deleteContentBackward" => {
                 if start_pos == end_pos && start_pos > 0 {
                     self.text.replace_range(start_pos - 1..start_pos, "");
-                    self.cursor_pos = Some(start_pos - 1);
+                    cursor_pos = start_pos - 1;
                 } else {
                     self.text.replace_range(start_pos..end_pos, "");
-                    self.cursor_pos = Some(start_pos);
                 }
             }
             "deleteContentForward" => {
@@ -272,12 +452,12 @@ impl EditLine {
                 } else {
                     self.text.replace_range(start_pos..end_pos, "");
                 }
-                self.cursor_pos = Some(start_pos);
             }
             other => leptos_dom::log!("unhandled: {other}"),
         }
 
-        self.rationalize();
+        self.rationalize(&mut cursor_pos);
+        cursor_pos
     }
 
     fn div_element(&self) -> HtmlDivElement {
