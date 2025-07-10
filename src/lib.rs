@@ -217,7 +217,7 @@ impl EditLine {
         }
         let no_initial_ws = self.text.trim_start();
         if let Some(ref mut pos) = self.cursor_pos {
-            *pos -= self.text.len() - no_initial_ws.len();
+            *pos = (*pos).saturating_sub(self.text.len() - no_initial_ws.len());
         }
         self.text = no_initial_ws.to_string();
 
