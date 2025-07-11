@@ -326,7 +326,7 @@ pub fn Editor() -> impl IntoView {
                 >
                     {move || {
                         selection_signal.write();
-                        child.read().as_string().to_string()
+                        child.read().as_str().to_string()
                     }}
                 </div>
             </For>
@@ -352,7 +352,7 @@ impl EditLine {
         }
     }
 
-    fn as_string(&self) -> &str {
+    fn as_str(&self) -> &str {
         &self.text
     }
 
