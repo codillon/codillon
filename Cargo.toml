@@ -12,7 +12,6 @@ getrandom = { version = "0.2", features = ["js"] }
 web-sys = { version = "0.3.77", features = ["Selection", "Window", "Range"] }
 console_error_panic_hook = "0.1.7"
 reactive_stores = "0.2.2"
-leptos-use = "0.16.2"
 
 [package.metadata.leptos]
 assets-dir = "public"

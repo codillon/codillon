@@ -234,16 +234,16 @@ impl Editor {
         match self.selection.get_untracked() {
             Some(SetSelection::Cursor(line_no, pos)) => {
                 let the_line = &self.lines.lines().read_untracked()[line_no];
-                let text_node = descend_until_text_node(the_line.div_element().into());
+                let text_node = the_line.text_node();
                 get_current_selection()
                     .set_base_and_extent(&text_node, pos as u32, &text_node, pos as u32)
                     .expect("set selection base and extent");
             }
             Some(SetSelection::MultiLine(anchor_idx, focus_idx)) => {
                 let anchor_line = &self.lines.lines().read_untracked()[anchor_idx];
-                let anchor_node = descend_until_text_node(anchor_line.div_element().into());
+                let anchor_node = anchor_line.text_node();
                 let focus_line = &self.lines.lines().read_untracked()[focus_idx];
-                let focus_node = descend_until_text_node(focus_line.div_element().into());
+                let focus_node = focus_line.text_node();
 
                 let anchor_offset = if anchor_idx > focus_idx {
                     anchor_line.text.len() as u32
@@ -276,17 +276,6 @@ fn get_current_selection() -> Selection {
         .get_selection()
         .expect("selection error")
         .expect("selection not found")
-}
-
-// Given an HTML Node, descend until finding a text node.
-// This is used to place the cursor in text.
-fn descend_until_text_node(mut node: Node) -> Node {
-    loop {
-        if node.node_type() == Node::TEXT_NODE {
-            return node;
-        }
-        node = node.first_child().expect("child");
-    }
 }
 
 // Given an HTML Node, finds the Codillion-assigned unique ID of the EditLine.
@@ -371,19 +360,6 @@ impl EditLine {
         &self.text
     }
 
-    // Convert from a container+offset to a position within the text.
-    // The complexity is that sometimes the Div contains the start or end of the selection,
-    // and sometimes it's the Div's child (the text node).
-    fn offset_to_pos(&self, container: Node, offset: u32) -> usize {
-        if container == ***self.div_element() {
-            // If the selection container is the Div element itself, the offset is in units of the whole Div.
-            offset as usize * self.text.len()
-        } else {
-            // If the selection container is the Div's child (the text node), the offset is in characters.
-            offset as usize
-        }
-    }
-
     const COSMETIC_SPACE: char = '\u{FEFF}';
 
     fn rationalize(&mut self, cursor_pos: &mut usize) {
@@ -410,14 +386,16 @@ impl EditLine {
             .clone()
             .unchecked_into::<web_sys::Range>();
 
-        let mut start_pos = self.offset_to_pos(
-            range.start_container().expect("container"),
-            range.start_offset().expect("offset"),
-        );
-        let mut end_pos = self.offset_to_pos(
-            range.end_container().expect("container"),
-            range.end_offset().expect("offset"),
-        );
+        let text_node = self.text_node();
+
+        if range.start_container().expect("container") != text_node
+            || range.end_container().expect("container") != text_node
+        {
+            panic!("InputEvent targets a range outside the text node for this EditLine")
+        }
+
+        let mut start_pos = range.start_offset().expect("offset") as usize;
+        let mut end_pos = range.end_offset().expect("offset") as usize;
 
         if self.text.starts_with(Self::COSMETIC_SPACE) {
             self.text.clear();
@@ -460,7 +438,16 @@ impl EditLine {
         cursor_pos
     }
 
-    fn div_element(&self) -> HtmlDivElement {
-        self.div_ref.get_untracked().expect("div element")
+    fn text_node(&self) -> Node {
+        let node = self
+            .div_ref
+            .get_untracked()
+            .expect("div")
+            .first_child()
+            .expect("text");
+        if node.node_type() != Node::TEXT_NODE {
+            panic!("non-text node found");
+        }
+        node
     }
 }
