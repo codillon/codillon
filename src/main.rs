@@ -1,5 +1,4 @@
-use codillon::frontend;
-
 fn main() {
-    leptos::mount::mount_to_body(frontend::App);
+    console_error_panic_hook::set_once();
+    leptos::mount::mount_to_body(codillon::Editor);
 }
