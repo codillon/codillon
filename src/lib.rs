@@ -207,14 +207,10 @@ impl Editor {
 
         // Is the anchor at the very end of a line (for a forward selection),
         // or the very beginning of a line (for a backward selection)?
-        if anchor_idx < focus_idx {
-            if anchor_offset == anchor_line.text.len() {
-                anchor_idx += 1;
-            }
-        } else if focus_idx < anchor_idx {
-            if anchor_offset == 0 {
-                anchor_idx -= 1;
-            }
+        if anchor_idx < focus_idx && anchor_offset == anchor_line.text.len() {
+            anchor_idx += 1;
+        } else if focus_idx < anchor_idx && anchor_offset == 0 {
+            anchor_idx -= 1;
         }
 
         if anchor_idx == focus_idx {
