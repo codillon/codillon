@@ -2,6 +2,7 @@
 // while separating our core from direct DOM-handling.
 use leptos::prelude::*;
 use leptos::*;
+use web_sys::{Element, Node, Range, Selection};
 
 pub type DivRef = NodeRef<leptos::html::Div>;
 pub type DomNode = Node;
@@ -35,4 +36,4 @@ pub fn find_id_from_node(orig_node: &Node) -> Option<usize> {
 
 pub use leptos::prelude::GetUntracked;
 pub use leptos::wasm_bindgen::JsCast;
-pub use web_sys::{Element, InputEvent, KeyboardEvent, MouseEvent, Node, Range, Selection};
+pub use web_sys::{InputEvent, KeyboardEvent, MouseEvent};

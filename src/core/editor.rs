@@ -22,6 +22,12 @@ pub struct CodeLines {
     lines: Vec<EditLine>,
 }
 
+impl Default for Editor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Editor {
     pub fn new() -> Self {
         Self {
@@ -120,7 +126,7 @@ impl Editor {
 
     // If the selection includes areas outside the editor window, rationalize it
     // to fit inside the window.
-    fn handle_out_of_bounds_selection(&mut self, selection: &Selection) {
+    fn handle_out_of_bounds_selection(&mut self, selection: &DomSelection) {
         if selection.is_collapsed() {
             if selection.focus_offset() == 0 {
                 self.selection.set(Some(SetSelection::Cursor(0, 0)));
