@@ -12,11 +12,11 @@ pub struct EditLine {
 }
 
 impl EditLine {
-    pub fn new(id: usize) -> Self {
+    pub fn new(id: usize, start_text: String) -> Self {
         Self {
             id,
-            text: String::from("Hello, world"),
-            div_ref: DivRef::new(),
+            text: start_text,
+            div_ref: NodeRef::new(),
         }
     }
 

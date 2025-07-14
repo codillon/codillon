@@ -7,7 +7,7 @@ use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
 // The "Editor" holds a vector of EditLines, as well as bookkeeping information related to
 // creating new lines and finding lines given their unique long-lived ID.
 pub struct Editor {
-    //    next_id: usize, // TODO: will be used when insertParagraph creates a new line
+    next_id: usize,
     id_map: HashMap<usize, usize>,
     lines: Store<CodeLines>,
     selection: RwSignal<Option<SetSelection>>,
@@ -37,11 +37,15 @@ impl Default for Editor {
 impl Editor {
     pub fn new() -> Self {
         Self {
-            //            next_id: 6,
+            next_id: 3,
             lines: Store::new(CodeLines {
-                lines: vec![EditLine::new(3), EditLine::new(5), EditLine::new(7)], // demo initial contents
+                lines: vec![
+                    EditLine::new(0, String::from("Hello, world")),
+                    EditLine::new(1, String::from("Hello, world")),
+                    EditLine::new(2, String::from("Hello, world")),
+                ], // demo initial contents
             }),
-            id_map: HashMap::from([(3, 0), (5, 1), (7, 2)]),
+            id_map: HashMap::from([(0, 0), (1, 1), (2, 2)]),
             selection: RwSignal::new(None),
         }
     }
@@ -52,6 +56,49 @@ impl Editor {
 
     pub fn selection(&self) -> RwSignal<Option<SetSelection>> {
         self.selection
+    }
+
+    fn insert_line(&mut self, line_no: usize) {
+        // TODO: Disallow newline if the current line is the last line (and empty).
+
+        // Add a new line directly below, using the cosmetic space to keep the line's
+        // dimensional integrity.
+        let new_line = EditLine::new(self.next_id, String::from('\u{FEFF}'));
+        // Add a new line at the position below the current line number.
+        if line_no == self.lines.read_untracked().lines.len() - 1 {
+            self.lines.update(|code_lines| {
+                code_lines.lines.push(new_line);
+            });
+        } else {
+            self.lines.update(|code_lines| {
+                code_lines.lines.insert(line_no + 1, new_line);
+            });
+        }
+
+        // Re-map lines that will be affected by this change.
+        // For each value greater than line no, add 1 to it.
+        // I.e. if line_no is 1, we're creating a new line at idx 2
+        // The map's previous (NNN , 2) now maps to (NNN, 3)
+        self.id_map = self
+            .id_map
+            .iter()
+            .map(|(&id, &index)| {
+                if index > line_no {
+                    (id, index + 1)
+                } else {
+                    (id, index)
+                }
+            })
+            .collect();
+
+        // Update the position map.
+        self.id_map.insert(self.next_id, line_no + 1);
+        // Increment the next line ID
+        self.next_id += 1;
+
+        // Move cursor down to the new line
+        self.selection
+            .set(Some(SetSelection::Cursor(line_no + 1, 0)));
     }
 
     // Handle an input to the Editor window, by dispatching to the appropriate EditLine.
@@ -79,8 +126,10 @@ impl Editor {
                     let line_no = self.id_map.get(&id).expect("can't find line");
                     let the_line = self.lines.lines().at_unkeyed(*line_no);
                     let (start_pos, end_pos) = the_line.write().preprocess_input(ev.clone());
-                    if (start_pos == the_line.read().text().len()) {
-                        leptos_dom::log!("end of line")
+
+                    if start_pos == the_line.read().text().len() {
+                        leptos_dom::log!("end of line");
+                        self.insert_line(*line_no);
                     } else {
                         leptos_dom::log!("middle of line")
                     }
