@@ -52,13 +52,13 @@ impl EditLine {
         }
     }
 
-    // Handle insert and delete events for this line.
-    pub fn handle_input(&mut self, ev: InputEvent) -> usize {
+    // Handle leading spaces and return the selection range.
+    pub fn preprocess_input(&mut self, ev: InputEvent) -> (usize, usize) {
         let range = ev
             .get_target_ranges()
             .get(0)
             .clone()
-            .unchecked_into::<DomRange>();
+            .unchecked_into::<web_sys::Range>();
 
         let text_node = self.text_node();
 
@@ -79,9 +79,15 @@ impl EditLine {
         end_pos = end_pos.min(self.text.len());
 
         if start_pos > end_pos {
-            (start_pos, end_pos) = (end_pos, start_pos);
+            (end_pos, start_pos)
+        } else {
+            (start_pos, end_pos)
         }
+    }
 
+    // Handle insert and delete events for this line.
+    pub fn handle_input(&mut self, ev: InputEvent) -> usize {
+        let (start_pos, end_pos) = self.preprocess_input(ev.clone());
         let mut cursor_pos = start_pos;
 
         match ev.input_type().as_str() {
