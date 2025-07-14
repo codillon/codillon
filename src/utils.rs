@@ -1,7 +1,7 @@
 use wasm_tools::parse_binary_wasm;
+use wasmparser::{Operator, Payload, ValType};
 use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
-use wasmparser::{ValType, Operator, Payload};
 
 /// Decides if a given string is a well-formed text-format Wasm instruction
 /// (only accepts plain instructions)
@@ -59,7 +59,6 @@ pub fn is_well_formed_func(lines: &str) -> bool {
     parse_binary_wasm(parser, &bin).is_ok()
 }
 
-
 pub fn print_operands(lines: &str) -> Vec<String> {
     let func = format!("(module (func {lines}))");
     let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
@@ -67,19 +66,23 @@ pub fn print_operands(lines: &str) -> Vec<String> {
     let mut validator = wasmparser::Validator::new();
     let parser = wasmparser::Parser::new(0);
     let mut result = Vec::new();
-    
+
     for payload in parser.parse_all(&wasm_bin) {
         let payload = payload.unwrap();
         let validation_result = validator.payload(&payload).unwrap();
 
-        if let (Payload::CodeSectionEntry(body), wasmparser::ValidPayload::Func(func,_)) = (&payload, validation_result) {
+        if let (Payload::CodeSectionEntry(body), wasmparser::ValidPayload::Func(func, _)) =
+            (&payload, validation_result)
+        {
             let ops = body.get_operators_reader().unwrap();
-            let mut func_validator = func.into_validator(wasmparser::FuncValidatorAllocations::default());
+            let mut func_validator =
+                func.into_validator(wasmparser::FuncValidatorAllocations::default());
             for op in ops.into_iter_with_offsets() {
                 let (op, offset) = op.unwrap();
-                let (mut pop_count, mut push_count) = op.operator_arity(&func_validator.visitor(offset)).unwrap();
+                let (mut pop_count, mut push_count) =
+                    op.operator_arity(&func_validator.visitor(offset)).unwrap();
                 match op {
-                    Operator::Block{..} | Operator::If{..} | Operator::Loop{..} => {
+                    Operator::Block { .. } | Operator::If { .. } | Operator::Loop { .. } => {
                         push_count = push_count.saturating_sub(1);
                     }
                     Operator::End => {
@@ -101,7 +104,7 @@ pub fn print_operands(lines: &str) -> Vec<String> {
                     .map(valtype_to_str)
                     .collect::<Vec<_>>()
                     .join(" ");
-                result.push(format!("Inputs: [{}] Returns: [{}]", inputs, outputs));
+                result.push(format!("Inputs: [{inputs}] Returns: [{outputs}]"));
             }
         }
     }
@@ -183,7 +186,15 @@ mod tests {
             "Inputs: [] Returns: []",
             "Inputs: [i32] Returns: []",
             "Inputs: [] Returns: []",
-        ].into_iter().map(String::from).collect::<Vec<String>>();
-        assert_eq!(print_operands("i32.const 1\ni32.const 2\nblock (param i32 i32) (result i32)\ni32.add\nend\ndrop"), output);
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<String>>();
+        assert_eq!(
+            print_operands(
+                "i32.const 1\ni32.const 2\nblock (param i32 i32) (result i32)\ni32.add\nend\ndrop"
+            ),
+            output
+        );
     }
 }
