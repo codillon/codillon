@@ -61,15 +61,32 @@ impl Editor {
         if start_id == end_id
             && let Some(id) = start_id
         {
-            let line_no = self.id_map.get(&id).expect("can't find line");
-            let new_cursor_pos = self
-                .lines
-                .lines()
-                .at_unkeyed(*line_no)
-                .write()
-                .handle_input(ev);
-            self.selection
-                .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+            //         If the InputEvent requires changing lines, handle the event at the editor-level
+            match ev.input_type().as_str() {
+                "insertParagraph" => {
+                    // Figure out positioning, whether we have a clean line break or not
+                    // update metadata for cursor position (set cursor line happens after rationalizing the line...)
+                    let line_no = self.id_map.get(&id).expect("can't find line");
+                    let the_line = self.lines.lines().at_unkeyed(*line_no);
+                    let (start_pos, end_pos) = the_line.write().preprocess_input(ev.clone());
+                    if (start_pos == the_line.read().text.len()) {
+                        leptos_dom::log!("end of line")
+                    } else {
+                        leptos_dom::log!("middle of line")
+                    }
+                }
+                other => {
+                    let line_no = self.id_map.get(&id).expect("can't find line");
+                    let new_cursor_pos = self
+                        .lines
+                        .lines()
+                        .at_unkeyed(*line_no)
+                        .write()
+                        .handle_input(ev);
+                    self.selection
+                        .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+                }
+            }
         } else {
             leptos_dom::log!("unhandled: multiline select input");
         }
@@ -374,8 +391,8 @@ impl EditLine {
         }
     }
 
-    // Handle insert and delete events for this line.
-    fn handle_input(&mut self, ev: InputEvent) -> usize {
+    // Handle leading spaces and return the selection range.
+    fn preprocess_input(&mut self, ev: InputEvent) -> (usize, usize) {
         let range = ev
             .get_target_ranges()
             .get(0)
@@ -401,9 +418,15 @@ impl EditLine {
         end_pos = end_pos.min(self.text.len());
 
         if start_pos > end_pos {
-            (start_pos, end_pos) = (end_pos, start_pos);
+            (end_pos, start_pos)
+        } else {
+            (start_pos, end_pos)
         }
+    }
 
+    // Handle insert and delete events for this line.
+    fn handle_input(&mut self, ev: InputEvent) -> usize {
+        let (start_pos, end_pos) = self.preprocess_input(ev.clone());
         let mut cursor_pos = start_pos;
 
         match ev.input_type().as_str() {
