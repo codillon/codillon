@@ -335,7 +335,9 @@ dependencies = [
  "reactive_stores",
  "wasm-tools",
  "wasmparser",
+ "wasmprinter",
  "wast",
+ "wat",
  "web-sys",
 ]
 
