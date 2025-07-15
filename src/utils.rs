@@ -1,9 +1,45 @@
+use ouroboros::self_referencing;
 use wasm_tools::parse_binary_wasm;
-use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
 
-/// Decides if a given string is a well-formed text-format Wasm instruction
-/// (only accepts plain instructions)
+
+// Wrap wast instruction for future use.
+#[self_referencing]
+pub struct Instruction {
+    raw_string: String,
+    #[borrows(raw_string)]
+    #[covariant]
+    inner_buffer: ParseBuffer<'this>,
+    #[borrows(inner_buffer)]
+    #[covariant]
+    inner_instr: wast::core::Instruction<'this>,
+}
+
+impl Instruction {
+    pub fn from_str(s: &str) -> Option<Instruction> {
+        let Ok(buf) = ParseBuffer::new(&s) else {
+            return None;
+        };
+        if parser::parse::<wast::core::Instruction>(&buf).is_err() {
+            return None;
+        };
+        let result = InstructionBuilder {
+            raw_string: s.to_string(),
+            inner_buffer_builder: |raw_string| ParseBuffer::new(raw_string).unwrap(),
+            inner_instr_builder: |inner_buffer| {
+                parser::parse::<wast::core::Instruction>(&inner_buffer).unwrap()
+            },
+        }
+        .build();
+        Some(result)
+    }
+
+    pub fn as_wast_instruction(&self) -> &wast::core::Instruction {
+        self.borrow_inner_instr()
+    }
+}
+
+/// Parse one line of code
 ///
 /// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Instruction
 ///
@@ -11,8 +47,9 @@ use wast::parser::{self, ParseBuffer};
 /// s: A string slice representing a Wasm instruction
 ///
 /// # Returns
-/// true: if the instruction is syntactically well-formed; false otherwise
-pub fn is_well_formed_instr(s: &str) -> bool {
+/// Some(Instruction): if the line is a wellformed instr
+/// None: if the line is empty or malformed
+pub fn parse_instr(s: &str) -> Option<Instruction> {
     //get rid of comments and spaces (clippy says not to use nth...)
     let s = s
         .split(";;")
@@ -21,12 +58,10 @@ pub fn is_well_formed_instr(s: &str) -> bool {
         .trim();
     //manually check for empty line
     if s.is_empty() {
-        return true;
+        return None;
     }
-    let Ok(buf) = ParseBuffer::new(s) else {
-        return false;
-    };
-    parser::parse::<Instruction>(&buf).is_ok()
+
+    Instruction::from_str(s)
 }
 
 /// Decides if a given string is a well-formed text-format Wasm function
@@ -48,7 +83,7 @@ pub fn is_well_formed_func(lines: &str) -> bool {
     let Ok(buf) = ParseBuffer::new(&func) else {
         return false;
     };
-    let Ok(mut module) = parser::parse::<Module>(&buf) else {
+    let Ok(mut module) = parser::parse::<wast::core::Module>(&buf) else {
         return false;
     };
     let Ok(bin) = module.encode() else {
@@ -65,24 +100,41 @@ mod tests {
     #[test]
     fn test_is_well_formed_instr() {
         //well-formed instructions
-        assert!(is_well_formed_instr("i32.add"));
-        assert!(is_well_formed_instr("i32.const 5"));
-        //not well-formed "instructions"
-        assert!(!is_well_formed_instr("i32.bogus"));
-        assert!(!is_well_formed_instr("i32.const"));
-        assert!(!is_well_formed_instr("i32.const x"));
-        //not well-formed "instructions": multiple instructions per line, folded instructions
-        assert!(!is_well_formed_instr("i32.const 4 i32.const 5"));
-        assert!(!is_well_formed_instr("(i32.const 4)"));
-        assert!(!is_well_formed_instr(
-            "(i32.add (i32.const 4) (i32.const 5))"
+        assert!(matches!(
+            parse_instr("i32.add").unwrap().as_wast_instruction(),
+            wast::core::Instruction::I32Add
         ));
+        //not well-formed "instructions"
+        assert!(parse_instr("i32.bogus").is_none());
+        assert!(parse_instr("i32.const").is_none());
+        assert!(parse_instr("i32.const x").is_none());
+        //not well-formed "instructions": multiple instructions per line, folded instructions
+        assert!(parse_instr("i32.const 4 i32.const 5").is_none());
+        assert!(parse_instr("(i32.const 4)").is_none());
+        assert!(parse_instr("(i32.add (i32.const 4) (i32.const 5))").is_none());
         //spaces before and after, comments, and empty lines are well-formed
-        assert!(is_well_formed_instr("    i32.const 5"));
-        assert!(is_well_formed_instr("i32.const 5     "));
-        assert!(is_well_formed_instr(";;Hello"));
-        assert!(is_well_formed_instr("i32.const 5   ;;this is a const"));
-        assert!(is_well_formed_instr(""));
+
+        assert!(matches!(
+            parse_instr("    i32.const 5")
+                .unwrap()
+                .as_wast_instruction(),
+            wast::core::Instruction::I32Const(_)
+        ));
+        assert!(matches!(
+            parse_instr("i32.const 5     ")
+                .unwrap()
+                .as_wast_instruction(),
+            wast::core::Instruction::I32Const(_)
+        ));
+        assert!(matches!(
+            parse_instr("i32.const 5   ;;this is a const")
+                .unwrap()
+                .as_wast_instruction(),
+            wast::core::Instruction::I32Const(_)
+        ));
+        //empty line is not well-formed
+        assert!(parse_instr(";;Hello").is_none());
+        assert!(parse_instr("").is_none());
     }
     #[test]
     fn test_is_well_formed_func() {
