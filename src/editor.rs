@@ -75,10 +75,7 @@ impl Editor {
         // Update the position map.
         self.id_map.insert(self.next_id, line_no + 1);
 
-        // Add a new line directly below, using the cosmetic space to keep the line's
-        // dimensional integrity.
         let the_line = self.lines.lines().at_unkeyed(line_no);
-
         let new_text = if start_pos < the_line.read_untracked().text().len()
             && !the_line
                 .read_untracked()
@@ -87,6 +84,9 @@ impl Editor {
         {
             // Cut down the current line at the cursor start idx.
             let after_split = the_line.write().text_mut().split_off(start_pos);
+            if the_line.read_untracked().text().is_empty() {
+                *the_line.write_untracked().text_mut() = String::from(Self::COSMETIC_SPACE);
+            }
             after_split
         } else {
             String::from(Self::COSMETIC_SPACE)
