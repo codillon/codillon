@@ -61,8 +61,6 @@ impl Editor {
     }
 
     fn insert_line(&mut self, line_no: usize, start_pos: usize) {
-        // TODO: Disallow newline if the current line is the last line (and empty).
-
         // Re-map lines that will be affected by this change.
         // For each value greater than line no, add 1 to it.
         // I.e. if line_no is 1, we're creating a new line at idx 2
@@ -87,6 +85,7 @@ impl Editor {
             if the_line.read_untracked().text().is_empty() {
                 *the_line.write_untracked().text_mut() = String::from(Self::COSMETIC_SPACE);
             }
+
             after_split
         } else {
             String::from(Self::COSMETIC_SPACE)
@@ -138,13 +137,6 @@ impl Editor {
                     let the_line = self.lines.lines().at_unkeyed(*line_no);
                     let (start_pos, end_pos) = the_line.write().preprocess_input(ev.clone());
 
-                    // if self.text.starts_with(Self::COSMETIC_SPACE) && self.text.len() > 3 {
-
-                    // if start_pos == the_line.read().text.len()
-                    //     || the_line.read().text.starts_with(Self::COSMETIC_SPACE)
-                    // {
-                    // This scares me because we're still in front of the cosmetic space
-                    //
                     leptos_dom::log!(
                         "Line info at insert line, {} {} {}",
                         start_pos,
