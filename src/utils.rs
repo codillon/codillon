@@ -2,7 +2,6 @@ use ouroboros::self_referencing;
 use wasm_tools::parse_binary_wasm;
 use wast::parser::{self, ParseBuffer};
 
-
 // Wrap wast instruction for future use.
 #[self_referencing]
 pub struct Instruction {
