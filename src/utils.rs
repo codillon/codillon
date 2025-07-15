@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use ouroboros::self_referencing;
 use wasm_tools::parse_binary_wasm;
 use wast::parser::{self, ParseBuffer};
@@ -14,25 +16,26 @@ pub struct Instruction {
     inner_instr: wast::core::Instruction<'this>,
 }
 
-impl Instruction {
-    pub fn from_str(s: &str) -> Option<Instruction> {
-        let Ok(buf) = ParseBuffer::new(&s) else {
-            return None;
-        };
-        if parser::parse::<wast::core::Instruction>(&buf).is_err() {
-            return None;
-        };
+impl std::str::FromStr for Instruction {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let buf = ParseBuffer::new(s).map_err(|err| err.message())?;
+        if let Err(err) = parser::parse::<wast::core::Instruction>(&buf) {
+            return Err(err.message());
+        }
         let result = InstructionBuilder {
             raw_string: s.to_string(),
             inner_buffer_builder: |raw_string| ParseBuffer::new(raw_string).unwrap(),
             inner_instr_builder: |inner_buffer| {
-                parser::parse::<wast::core::Instruction>(&inner_buffer).unwrap()
+                parser::parse::<wast::core::Instruction>(inner_buffer).unwrap()
             },
         }
         .build();
-        Some(result)
+        Ok(result)
     }
+}
 
+impl Instruction {
     pub fn as_wast_instruction(&self) -> &wast::core::Instruction {
         self.borrow_inner_instr()
     }
@@ -60,7 +63,7 @@ pub fn parse_instr(s: &str) -> Option<Instruction> {
         return None;
     }
 
-    Instruction::from_str(s)
+    Instruction::from_str(s).ok()
 }
 
 /// Decides if a given string is a well-formed text-format Wasm function
