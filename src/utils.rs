@@ -74,12 +74,10 @@ pub fn print_operands(wasm_bin: &[u8]) -> Vec<String> {
     let parser = wasmparser::Parser::new(0);
     let mut result = Vec::new();
 
-    for payload in parser.parse_all(&wasm_bin) {
+    for payload in parser.parse_all(wasm_bin) {
         let payload = payload.unwrap();
         let validation_result = validator.payload(&payload).unwrap();
-        if let wasmparser::ValidPayload::Func(func, body) =
-            validation_result
-        {
+        if let wasmparser::ValidPayload::Func(func, body) = validation_result {
             let ops = body.get_operators_reader().unwrap();
             let mut func_validator =
                 func.into_validator(wasmparser::FuncValidatorAllocations::default());
@@ -87,7 +85,6 @@ pub fn print_operands(wasm_bin: &[u8]) -> Vec<String> {
                 let (op, offset) = op.unwrap();
                 let (pop_count, push_count) =
                     op.operator_arity(&func_validator.visitor(offset)).unwrap();
-                println!("Instruction: {:?}, Input: {pop_count}, Output: {push_count}", op);
                 let prev_height = func_validator.operand_stack_height();
                 let inputs = (prev_height - pop_count..prev_height)
                     .filter_map(|i| func_validator.get_operand_type(i as usize).flatten())
@@ -188,15 +185,11 @@ mod tests {
         .into_iter()
         .map(String::from)
         .collect::<Vec<String>>();
-        let lines = "i32.const 1\ni32.const 2\nblock (param i32 i32) (result i32)\ni32.add\nend\ndrop";
+        let lines =
+            "i32.const 1\ni32.const 2\nblock (param i32 i32) (result i32)\ni32.add\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(
-            print_operands(
-                &wasm_bin
-            ),
-            output
-        );
+        assert_eq!(print_operands(&wasm_bin), output);
         //if else with params and results
         let output = vec![
             "Inputs: [] Returns: [i32]",
@@ -213,12 +206,7 @@ mod tests {
         let lines = "i32.const 1\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(
-            print_operands(
-                &wasm_bin
-            ),
-            output
-        );
+        assert_eq!(print_operands(&wasm_bin), output);
         //loop with param and return
         let output = vec![
             "Inputs: [] Returns: [i32]",
@@ -236,12 +224,7 @@ mod tests {
         let lines = "i32.const 10\nloop (param i32) (result i32)\ni32.const 1\ni32.sub\nbr_if 1\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(
-            print_operands(
-                &wasm_bin
-            ),
-            output
-        );
+        assert_eq!(print_operands(&wasm_bin), output);
         //nested block and if
         let output = vec![
             "Inputs: [] Returns: [i32]",
@@ -260,28 +243,15 @@ mod tests {
         let lines = "i32.const 10\nblock (param i32) (result i32)\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(
-            print_operands(
-                &wasm_bin
-            ),
-            output
-        );
+        assert_eq!(print_operands(&wasm_bin), output);
         //empty block
-        let output = vec![
-            "Inputs: [] Returns: []",
-            "Inputs: [] Returns: []",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect::<Vec<String>>();
+        let output = vec!["Inputs: [] Returns: []", "Inputs: [] Returns: []"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>();
         let lines = "block\nend";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(
-            print_operands(
-                &wasm_bin
-            ),
-            output
-        );
+        assert_eq!(print_operands(&wasm_bin), output);
     }
 }
