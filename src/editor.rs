@@ -50,6 +50,8 @@ impl Editor {
         }
     }
 
+    const COSMETIC_SPACE: char = '\u{200B}';
+
     pub fn lines(&self) -> &Store<CodeLines> {
         &self.lines
     }
@@ -58,45 +60,54 @@ impl Editor {
         self.selection
     }
 
-    fn insert_line(&mut self, line_no: usize) {
+    fn insert_line(&mut self, line_no: usize, start_pos: usize) {
         // TODO: Disallow newline if the current line is the last line (and empty).
-
-        // Add a new line directly below, using the cosmetic space to keep the line's
-        // dimensional integrity.
-        let new_line = EditLine::new(self.next_id, String::from('\u{FEFF}'));
-        // Add a new line at the position below the current line number.
-        if line_no == self.lines.read_untracked().lines.len() - 1 {
-            self.lines.update(|code_lines| {
-                code_lines.lines.push(new_line);
-            });
-        } else {
-            self.lines.update(|code_lines| {
-                code_lines.lines.insert(line_no + 1, new_line);
-            });
-        }
 
         // Re-map lines that will be affected by this change.
         // For each value greater than line no, add 1 to it.
         // I.e. if line_no is 1, we're creating a new line at idx 2
         // The map's previous (NNN , 2) now maps to (NNN, 3)
-        self.id_map = self
-            .id_map
-            .iter()
-            .map(|(&id, &index)| {
-                if index > line_no {
-                    (id, index + 1)
-                } else {
-                    (id, index)
-                }
-            })
-            .collect();
-
+        for val in self.id_map.values_mut() {
+            if *val > line_no {
+                *val += 1;
+            }
+        }
         // Update the position map.
         self.id_map.insert(self.next_id, line_no + 1);
+
+        // Add a new line directly below, using the cosmetic space to keep the line's
+        // dimensional integrity.
+        let the_line = self.lines.lines().at_unkeyed(line_no);
+
+        let new_text = if start_pos < the_line.read_untracked().text().len()
+            && !the_line
+                .read_untracked()
+                .text()
+                .starts_with(Self::COSMETIC_SPACE)
+        {
+            // Cut down the current line at the cursor start idx.
+            let after_split = the_line.write().text_mut().split_off(start_pos);
+            after_split
+        } else {
+            String::from(Self::COSMETIC_SPACE)
+        };
+
+        let new_line = EditLine::new(self.next_id, new_text);
+
+        // Add the new line below the current line
+        self.lines.update(|code_lines| {
+            if line_no == code_lines.lines.len() - 1 {
+                code_lines.lines.push(new_line);
+            } else {
+                code_lines.lines.insert(line_no + 1, new_line);
+            }
+        });
+
         // Increment the next line ID
         self.next_id += 1;
 
-        // Move cursor down to the new line
+        leptos_dom::log!("{:?}", self.id_map);
+
         self.selection
             .set(Some(SetSelection::Cursor(line_no + 1, 0)));
     }
@@ -127,12 +138,20 @@ impl Editor {
                     let the_line = self.lines.lines().at_unkeyed(*line_no);
                     let (start_pos, end_pos) = the_line.write().preprocess_input(ev.clone());
 
-                    if start_pos == the_line.read().text().len() {
-                        leptos_dom::log!("end of line");
-                        self.insert_line(*line_no);
-                    } else {
-                        leptos_dom::log!("middle of line")
-                    }
+                    // if self.text.starts_with(Self::COSMETIC_SPACE) && self.text.len() > 3 {
+
+                    // if start_pos == the_line.read().text.len()
+                    //     || the_line.read().text.starts_with(Self::COSMETIC_SPACE)
+                    // {
+                    // This scares me because we're still in front of the cosmetic space
+                    //
+                    leptos_dom::log!(
+                        "Line info at insert line, {} {} {}",
+                        start_pos,
+                        end_pos,
+                        the_line.read().text().len()
+                    );
+                    self.insert_line(*line_no, start_pos);
                 }
                 other => {
                     let line_no = self.id_map.get(&id).expect("can't find line");

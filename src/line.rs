@@ -26,6 +26,11 @@ impl EditLine {
     pub fn text(&self) -> &String {
         &self.text
     }
+
+    pub fn text_mut(&mut self) -> &mut String {
+        &mut self.text
+    }
+
     pub fn div_ref(&self) -> DivRef {
         self.div_ref
     }
@@ -34,7 +39,7 @@ impl EditLine {
         &self.text
     }
 
-    const COSMETIC_SPACE: char = '\u{FEFF}';
+    const COSMETIC_SPACE: char = '\u{200B}';
 
     fn rationalize(&mut self, cursor_pos: &mut usize) {
         // Adjust the line so the cursor still shows up even if the text is empty,
@@ -71,7 +76,11 @@ impl EditLine {
         let mut start_pos = range.start_offset().expect("offset") as usize;
         let mut end_pos = range.end_offset().expect("offset") as usize;
 
-        if self.text.starts_with(Self::COSMETIC_SPACE) {
+        // Remove the cosmetic space on a new line UNLESS we're simply
+        // making another new line.
+        if self.text.starts_with(Self::COSMETIC_SPACE)
+            && ev.input_type().as_str() != "insertParagraph"
+        {
             self.text.clear();
         }
 
