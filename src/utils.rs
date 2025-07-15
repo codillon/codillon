@@ -171,7 +171,9 @@ mod tests {
         assert!(parse_instr("    i32.const 5").unwrap() == CodelineStatus::OtherInstr);
         assert!(parse_instr("i32.const 5     ").unwrap() == CodelineStatus::OtherInstr);
         assert!(parse_instr(";;Hello").unwrap() == CodelineStatus::Empty);
-        assert!(parse_instr("i32.const 5   ;;this is a const").unwrap() == CodelineStatus::OtherInstr);
+        assert!(
+            parse_instr("i32.const 5   ;;this is a const").unwrap() == CodelineStatus::OtherInstr
+        );
         assert!(parse_instr("").unwrap() == CodelineStatus::Empty);
     }
     #[test]
