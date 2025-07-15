@@ -4,7 +4,34 @@ use wasmparser::ValType;
 use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
 
-/// Decides if a given string is a well-formed text-format Wasm instruction
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodelineStatus {
+    If,
+    Block,
+    Loop,
+    Else,
+    End,
+    OtherInstr,
+    Empty,
+}
+
+impl From<Option<Instruction<'_>>> for CodelineStatus {
+    fn from(instr: Option<Instruction<'_>>) -> Self {
+        let Some(instr) = instr else {
+            return CodelineStatus::Empty;
+        };
+        match instr {
+            Instruction::If(_) => CodelineStatus::If,
+            Instruction::Block(_) => CodelineStatus::Block,
+            Instruction::Loop(_) => CodelineStatus::Loop,
+            Instruction::Else(_) => CodelineStatus::Else,
+            Instruction::End(_) => CodelineStatus::End,
+            _ => CodelineStatus::OtherInstr,
+        }
+    }
+}
+
+/// Parse one code line as instruction
 /// (only accepts plain instructions)
 ///
 /// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Instruction
@@ -13,8 +40,9 @@ use wast::parser::{self, ParseBuffer};
 /// s: A string slice representing a Wasm instruction
 ///
 /// # Returns
-/// true: if the instruction is syntactically well-formed; false otherwise
-pub fn is_well_formed_instr(s: &str) -> bool {
+/// Err: Malformed
+/// Ok(CodelineStatus): empty or wellformed instruction
+pub fn parse_instr(s: &str) -> Result<CodelineStatus, String> {
     //get rid of comments and spaces (clippy says not to use nth...)
     let s = s
         .split(";;")
@@ -23,12 +51,14 @@ pub fn is_well_formed_instr(s: &str) -> bool {
         .trim();
     //manually check for empty line
     if s.is_empty() {
-        return true;
+        return Ok(CodelineStatus::Empty);
     }
     let Ok(buf) = ParseBuffer::new(s) else {
-        return false;
+        return Err("Cannot create parse buffer".to_string());
     };
-    parser::parse::<Instruction>(&buf).is_ok()
+    parser::parse::<Instruction>(&buf)
+        .map_err(|err| err.message())
+        .map(|instr| Some(instr).into())
 }
 
 /// Decides if a given string is a well-formed text-format Wasm function
@@ -127,24 +157,22 @@ mod tests {
     #[test]
     fn test_is_well_formed_instr() {
         //well-formed instructions
-        assert!(is_well_formed_instr("i32.add"));
-        assert!(is_well_formed_instr("i32.const 5"));
+        assert!(parse_instr("i32.add").unwrap() == CodelineStatus::OtherInstr);
+        assert!(parse_instr("i32.const 5").unwrap() == CodelineStatus::OtherInstr);
         //not well-formed "instructions"
-        assert!(!is_well_formed_instr("i32.bogus"));
-        assert!(!is_well_formed_instr("i32.const"));
-        assert!(!is_well_formed_instr("i32.const x"));
+        assert!(parse_instr("i32.bogus").is_err());
+        assert!(parse_instr("i32.const").is_err());
+        assert!(parse_instr("i32.const x").is_err());
         //not well-formed "instructions": multiple instructions per line, folded instructions
-        assert!(!is_well_formed_instr("i32.const 4 i32.const 5"));
-        assert!(!is_well_formed_instr("(i32.const 4)"));
-        assert!(!is_well_formed_instr(
-            "(i32.add (i32.const 4) (i32.const 5))"
-        ));
+        assert!(parse_instr("i32.const 4 i32.const 5").is_err());
+        assert!(parse_instr("(i32.const 4)").is_err());
+        assert!(parse_instr("(i32.add (i32.const 4) (i32.const 5))").is_err());
         //spaces before and after, comments, and empty lines are well-formed
-        assert!(is_well_formed_instr("    i32.const 5"));
-        assert!(is_well_formed_instr("i32.const 5     "));
-        assert!(is_well_formed_instr(";;Hello"));
-        assert!(is_well_formed_instr("i32.const 5   ;;this is a const"));
-        assert!(is_well_formed_instr(""));
+        assert!(parse_instr("    i32.const 5").unwrap() == CodelineStatus::OtherInstr);
+        assert!(parse_instr("i32.const 5     ").unwrap() == CodelineStatus::OtherInstr);
+        assert!(parse_instr(";;Hello").unwrap() == CodelineStatus::Empty);
+        assert!(parse_instr("i32.const 5   ;;this is a const").unwrap() == CodelineStatus::OtherInstr);
+        assert!(parse_instr("").unwrap() == CodelineStatus::Empty);
     }
     #[test]
     fn test_is_well_formed_func() {
