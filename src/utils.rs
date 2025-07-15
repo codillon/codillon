@@ -49,9 +49,11 @@ impl Instruction {
 /// s: A string slice representing a Wasm instruction
 ///
 /// # Returns
-/// Some(Instruction): if the line is a wellformed instr
-/// None: if the line is empty or malformed
-pub fn parse_instr(s: &str) -> Option<Instruction> {
+///
+/// Ok(Some(Instruction)): if the line is a wellformed instr
+/// Ok(None): if the line is empty(ok with comment)
+/// Err: if the line is malformed
+pub fn parse_instr(s: &str) -> Result<Option<Instruction>, String> {
     //get rid of comments and spaces (clippy says not to use nth...)
     let s = s
         .split(";;")
@@ -60,10 +62,10 @@ pub fn parse_instr(s: &str) -> Option<Instruction> {
         .trim();
     //manually check for empty line
     if s.is_empty() {
-        return None;
+        return Ok(None);
     }
 
-    Instruction::from_str(s).ok()
+    Instruction::from_str(s).map(Some)
 }
 
 /// Decides if a given string is a well-formed text-format Wasm function
@@ -103,21 +105,25 @@ mod tests {
     fn test_is_well_formed_instr() {
         //well-formed instructions
         assert!(matches!(
-            parse_instr("i32.add").unwrap().as_wast_instruction(),
+            parse_instr("i32.add")
+                .unwrap()
+                .unwrap()
+                .as_wast_instruction(),
             wast::core::Instruction::I32Add
         ));
         //not well-formed "instructions"
-        assert!(parse_instr("i32.bogus").is_none());
-        assert!(parse_instr("i32.const").is_none());
-        assert!(parse_instr("i32.const x").is_none());
+        assert!(parse_instr("i32.bogus").is_err());
+        assert!(parse_instr("i32.const").is_err());
+        assert!(parse_instr("i32.const x").is_err());
         //not well-formed "instructions": multiple instructions per line, folded instructions
-        assert!(parse_instr("i32.const 4 i32.const 5").is_none());
-        assert!(parse_instr("(i32.const 4)").is_none());
-        assert!(parse_instr("(i32.add (i32.const 4) (i32.const 5))").is_none());
+        assert!(parse_instr("i32.const 4 i32.const 5").is_err());
+        assert!(parse_instr("(i32.const 4)").is_err());
+        assert!(parse_instr("(i32.add (i32.const 4) (i32.const 5))").is_err());
         //spaces before and after, comments, and empty lines are well-formed
 
         assert!(matches!(
             parse_instr("    i32.const 5")
+                .unwrap()
                 .unwrap()
                 .as_wast_instruction(),
             wast::core::Instruction::I32Const(_)
@@ -125,18 +131,20 @@ mod tests {
         assert!(matches!(
             parse_instr("i32.const 5     ")
                 .unwrap()
+                .unwrap()
                 .as_wast_instruction(),
             wast::core::Instruction::I32Const(_)
         ));
         assert!(matches!(
             parse_instr("i32.const 5   ;;this is a const")
                 .unwrap()
+                .unwrap()
                 .as_wast_instruction(),
             wast::core::Instruction::I32Const(_)
         ));
         //empty line is not well-formed
-        assert!(parse_instr(";;Hello").is_none());
-        assert!(parse_instr("").is_none());
+        assert!(parse_instr(";;Hello").unwrap().is_none());
+        assert!(parse_instr("").unwrap().is_none());
     }
     #[test]
     fn test_is_well_formed_func() {
