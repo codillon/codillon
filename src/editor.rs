@@ -1,10 +1,8 @@
-use crate::core::{EditLine, SetSelection};
-use crate::view::dom::*;
-use leptos::prelude::*;
-use leptos::*;
-use reactive_stores::Store;
-use reactive_stores::StoreFieldIterator;
+use crate::{line::*, view::*};
+use leptos::{prelude::*, *};
+use reactive_stores::{Store, StoreFieldIterator};
 use std::collections::HashMap;
+use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
 
 // The "Editor" holds a vector of EditLines, as well as bookkeeping information related to
 // creating new lines and finding lines given their unique long-lived ID.
@@ -13,6 +11,14 @@ pub struct Editor {
     id_map: HashMap<usize, usize>,
     lines: Store<CodeLines>,
     selection: RwSignal<Option<SetSelection>>,
+}
+
+// The SetSelection struct describes changes to be made to the browser's global selection.
+// E.g. after typing a letter of text, the cursor should be advanced to follow the new text.
+#[derive(Clone, Copy)]
+pub enum SetSelection {
+    Cursor(usize, usize),    // line index, pos
+    MultiLine(usize, usize), // anchor line number, focus line number
 }
 
 // The individual lines of code.

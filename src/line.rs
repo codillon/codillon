@@ -1,5 +1,6 @@
-use crate::view::dom::*;
-use leptos::*;
+use crate::view::*;
+use leptos::{prelude::*, *};
+use web_sys::{InputEvent, wasm_bindgen::JsCast};
 
 // The `EditLine` reflects the state of an individual line.
 // TODO: WebAssembly syntax checking
