@@ -329,13 +329,16 @@ dependencies = [
 name = "codillon"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "console_error_panic_hook",
  "getrandom 0.2.16",
  "leptos",
  "reactive_stores",
  "wasm-tools",
  "wasmparser",
+ "wasmprinter",
  "wast",
+ "wat",
  "web-sys",
 ]
 
