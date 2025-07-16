@@ -17,7 +17,7 @@ impl EditLine {
         Self {
             id,
             text: start_text,
-            div_ref: NodeRef::new(),
+            div_ref: DivRef::new(),
         }
     }
 
@@ -60,7 +60,7 @@ impl EditLine {
             .get_target_ranges()
             .get(0)
             .clone()
-            .unchecked_into::<web_sys::Range>();
+            .unchecked_into::<DomRange>();
 
         let text_node = self.text_node();
 
