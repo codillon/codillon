@@ -409,7 +409,7 @@ pub fn Editor() -> impl IntoView {
                 >
                     {move || {
                         selection_signal.write();
-                        child.read().as_str().to_string()
+                        child.text()
                     }}
                 </div>
             </For>
@@ -419,7 +419,7 @@ pub fn Editor() -> impl IntoView {
 
 // The `EditLine` reflects the state of an individual line.
 // TODO: WebAssembly syntax checking
-#[derive(Default, Debug)]
+#[derive(Store, Debug, Clone, Default)]
 pub struct EditLine {
     id: usize,
     text: String,
@@ -433,10 +433,6 @@ impl EditLine {
             text: start_text,
             div_ref: NodeRef::new(),
         }
-    }
-
-    fn as_str(&self) -> &str {
-        &self.text
     }
 
     const COSMETIC_SPACE: char = '\u{200B}';
