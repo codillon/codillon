@@ -66,7 +66,7 @@ pub fn Editor() -> impl IntoView {
                     data-codillon-line-id=move || *child.read().id()
                     node_ref=child.read_untracked().div_ref()
                 >
-                 {move || {
+                    {move || {
                         selection_signal.write();
                         child.text()
                     }}

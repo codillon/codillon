@@ -62,9 +62,6 @@ impl Editor {
 
     fn insert_line(&mut self, line_no: usize, start_pos: usize) {
         // Re-map lines that will be affected by this change.
-        // For each value greater than line no, add 1 to it.
-        // I.e. if line_no is 1, we're creating a new line at idx 2
-        // The map's previous (NNN , 2) now maps to (NNN, 3)
         for val in self.id_map.values_mut() {
             if *val > line_no {
                 *val += 1;
@@ -85,7 +82,6 @@ impl Editor {
             if the_line.read_untracked().text().is_empty() {
                 *the_line.write_untracked().text_mut() = String::from(Self::COSMETIC_SPACE);
             }
-
             after_split
         } else {
             String::from(Self::COSMETIC_SPACE)
@@ -102,17 +98,13 @@ impl Editor {
             }
         });
 
-        // Increment the next line ID
         self.next_id += 1;
-
-        leptos_dom::log!("{:?}", self.id_map);
 
         self.selection
             .set(Some(SetSelection::Cursor(line_no + 1, 0)));
     }
 
     // Handle an input to the Editor window, by dispatching to the appropriate EditLine.
-    // TODO: handle insertParagraph and insertLineBreak (add a line)
     // TODO: handle line deletion
     pub fn handle_input(&mut self, ev: InputEvent) {
         ev.prevent_default();
@@ -130,22 +122,13 @@ impl Editor {
         {
             //         If the InputEvent requires changing lines, handle the event at the editor-level
             match ev.input_type().as_str() {
-                "insertParagraph" => {
-                    // Figure out positioning, whether we have a clean line break or not
-                    // update metadata for cursor position (set cursor line happens after rationalizing the line...)
+                "insertParagraph" | "insertLineBreak" => {
                     let line_no = self.id_map.get(&id).expect("can't find line");
                     let the_line = self.lines.lines().at_unkeyed(*line_no);
-                    let (start_pos, end_pos) = the_line.write().preprocess_input(ev.clone());
-
-                    leptos_dom::log!(
-                        "Line info at insert line, {} {} {}",
-                        start_pos,
-                        end_pos,
-                        the_line.read().text().len()
-                    );
+                    let (start_pos, _) = the_line.write().preprocess_input(ev.clone());
                     self.insert_line(*line_no, start_pos);
                 }
-                other => {
+                _ => {
                     let line_no = self.id_map.get(&id).expect("can't find line");
                     let new_cursor_pos = self
                         .lines

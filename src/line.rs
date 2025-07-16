@@ -77,6 +77,7 @@ impl EditLine {
         // making another new line.
         if self.text.starts_with(Self::COSMETIC_SPACE)
             && ev.input_type().as_str() != "insertParagraph"
+            && ev.input_type().as_str() != "insertLineBreak"
         {
             self.text.clear();
         }
