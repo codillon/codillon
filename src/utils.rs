@@ -1,6 +1,6 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use wasm_tools::parse_binary_wasm;
-use wasmparser::ValType;
+use wasmparser::{Parser, ValType};
 use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
 
@@ -40,24 +40,21 @@ impl From<Instruction<'_>> for InstrInfo {
 ///
 /// # Returns
 /// Err: Malformed
-/// Ok(CodelineStatus): empty or wellformed instruction
+/// Ok(None): empty
+/// Ok(Some(InstrInfo)): instruction of given category
 pub fn parse_instr(s: &str) -> Result<Option<InstrInfo>> {
     //get rid of comments and spaces (clippy says not to use nth...)
     let s = s
         .split(";;")
         .next()
-        .expect("Split unexpectedly produced empty iterator")
+        .expect("split produced empty iterator")
         .trim();
-    //manually check for empty line
-    if s.is_empty() {
-        return Ok(None);
-    }
-    let Ok(buf) = ParseBuffer::new(s) else {
-        bail!("Cannot create parse buffer");
-    };
-    parser::parse::<Instruction>(&buf)
-        .map_err(|err| err.into())
-        .map(|instr| Some(instr.into()))
+    Ok(if s.is_empty() {
+        // is there an instruction on this line?
+        None
+    } else {
+        Some(parser::parse::<Instruction>(&ParseBuffer::new(s)?)?.into())
+    })
 }
 
 /// Decides if a given string is a well-formed text-format Wasm function
@@ -74,19 +71,12 @@ pub fn parse_instr(s: &str) -> Result<Option<InstrInfo>> {
 /// # Assumptions
 /// Each instruction is plain
 pub fn is_well_formed_func(lines: &str) -> bool {
-    //wrap as module
-    let func = format!("module (func {lines})");
-    let Ok(buf) = ParseBuffer::new(&func) else {
-        return false;
+    let parse_text = || {
+        let text = format!("module (func {lines})");
+        let binary = parser::parse::<Module>(&ParseBuffer::new(&text)?)?.encode()?;
+        parse_binary_wasm(Parser::new(0), &binary)
     };
-    let Ok(mut module) = parser::parse::<Module>(&buf) else {
-        return false;
-    };
-    let Ok(bin) = module.encode() else {
-        return false;
-    };
-    let parser = wasmparser::Parser::new(0);
-    parse_binary_wasm(parser, &bin).is_ok()
+    parse_text().is_ok()
 }
 
 /// Returns input and output types for each instruction in a binary Wasm module
