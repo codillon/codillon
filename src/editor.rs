@@ -50,8 +50,6 @@ impl Editor {
         }
     }
 
-    const COSMETIC_SPACE: char = '\u{200B}';
-
     pub fn lines(&self) -> &Store<CodeLines> {
         &self.lines
     }
@@ -70,24 +68,14 @@ impl Editor {
         // Update the position map.
         self.id_map.insert(self.next_id, line_no + 1);
 
-        let the_line = self.lines.lines().at_unkeyed(line_no);
-        let new_text = if start_pos < the_line.read_untracked().text().len()
-            && !the_line
-                .read_untracked()
-                .text()
-                .starts_with(Self::COSMETIC_SPACE)
-        {
-            // Cut down the current line at the cursor start idx.
-            let after_split = the_line.write().text_mut().split_off(start_pos);
-            if the_line.read_untracked().text().is_empty() {
-                *the_line.write_untracked().text_mut() = String::from(Self::COSMETIC_SPACE);
-            }
-            after_split
-        } else {
-            String::from(Self::COSMETIC_SPACE)
-        };
+        let remainder = self
+            .lines
+            .lines()
+            .at_unkeyed(line_no)
+            .write()
+            .split_self(start_pos);
 
-        let new_line = EditLine::new(self.next_id, new_text);
+        let new_line = EditLine::new(self.next_id, remainder);
 
         // Add the new line below the current line
         self.lines.update(|code_lines| {

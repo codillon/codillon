@@ -21,6 +21,8 @@ impl EditLine {
         }
     }
 
+    const COSMETIC_SPACE: char = '\u{FEFF}';
+
     pub fn id(&self) -> &usize {
         &self.id
     }
@@ -36,7 +38,9 @@ impl EditLine {
         self.div_ref
     }
 
-    const COSMETIC_SPACE: char = '\u{200B}';
+    pub fn is_logical_text_empty(&self) -> bool {
+        self.text.is_empty() || self.text == String::from(Self::COSMETIC_SPACE)
+    }
 
     fn rationalize(&mut self, cursor_pos: &mut usize) {
         // Adjust the line so the cursor still shows up even if the text is empty,
@@ -51,6 +55,25 @@ impl EditLine {
 
         if self.text.is_empty() {
             self.text.push(Self::COSMETIC_SPACE);
+        }
+    }
+
+    // Splits the current line at POS, returning what is removed (RHS).
+    pub fn split_self(&mut self, pos: usize) -> String {
+        if self.is_logical_text_empty() {
+            return String::from(Self::COSMETIC_SPACE);
+        }
+
+        let remainder = self.text.split_off(pos);
+
+        if self.text.is_empty() {
+            self.text = String::from(Self::COSMETIC_SPACE);
+        }
+
+        if remainder.is_empty() {
+            String::from(Self::COSMETIC_SPACE)
+        } else {
+            remainder
         }
     }
 
@@ -75,7 +98,7 @@ impl EditLine {
 
         // Remove the cosmetic space on a new line UNLESS we're simply
         // making another new line.
-        if self.text.starts_with(Self::COSMETIC_SPACE)
+        if self.is_logical_text_empty()
             && ev.input_type().as_str() != "insertParagraph"
             && ev.input_type().as_str() != "insertLineBreak"
         {
