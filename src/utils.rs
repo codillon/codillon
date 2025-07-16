@@ -1,3 +1,4 @@
+use anyhow::{Result, anyhow};
 use wasm_tools::parse_binary_wasm;
 use wasmparser::ValType;
 use wast::core::{Instruction, Module};
@@ -69,29 +70,28 @@ pub fn is_well_formed_func(lines: &str) -> bool {
 ///
 /// # Assumptions
 /// The function is valid
-pub fn print_operands(wasm_bin: &[u8]) -> Vec<String> {
+pub fn print_operands(wasm_bin: &[u8]) -> Result<Vec<String>> {
     let mut validator = wasmparser::Validator::new();
     let parser = wasmparser::Parser::new(0);
     let mut result = Vec::new();
+    let dummy_offset = 1; // no need to track offsets, but validator has safety checks against 0
 
     for payload in parser.parse_all(wasm_bin) {
-        let payload = payload.unwrap();
-        let validation_result = validator.payload(&payload).unwrap();
-        if let wasmparser::ValidPayload::Func(func, body) = validation_result {
-            let ops = body.get_operators_reader().unwrap();
+        if let wasmparser::ValidPayload::Func(func, body) = validator.payload(&payload?)? {
             let mut func_validator =
                 func.into_validator(wasmparser::FuncValidatorAllocations::default());
-            for op in ops.into_iter_with_offsets() {
-                let (op, offset) = op.unwrap();
-                let (pop_count, push_count) =
-                    op.operator_arity(&func_validator.visitor(offset)).unwrap();
+            for op in body.get_operators_reader()? {
+                let op = op?;
+                let (pop_count, push_count) = op
+                    .operator_arity(&func_validator.visitor(dummy_offset))
+                    .ok_or(anyhow!("could not determine operator arity"))?;
                 let prev_height = func_validator.operand_stack_height();
                 let inputs = (prev_height - pop_count..prev_height)
                     .filter_map(|i| func_validator.get_operand_type(i as usize).flatten())
                     .map(valtype_to_str)
                     .collect::<Vec<_>>()
                     .join(" ");
-                func_validator.op(offset, &op).unwrap();
+                func_validator.op(dummy_offset, &op)?;
                 let new_height = func_validator.operand_stack_height();
                 let outputs = (new_height - push_count..new_height)
                     .filter_map(|i| func_validator.get_operand_type(i as usize).flatten())
@@ -102,10 +102,10 @@ pub fn print_operands(wasm_bin: &[u8]) -> Vec<String> {
             }
         }
     }
-    //remove the entry associated with the end of the function
+    //remove the entry associated with the `end` at end of function body
     result.pop();
 
-    result
+    Ok(result)
 }
 
 fn valtype_to_str(ty: ValType) -> &'static str {
@@ -122,6 +122,7 @@ fn valtype_to_str(ty: ValType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
 
     #[test]
     fn test_is_well_formed_instr() {
@@ -172,7 +173,7 @@ mod tests {
         assert!(!is_well_formed_func("i32.const 1\ni32.adx"));
     }
     #[test]
-    fn test_print_operands() {
+    fn test_print_operands() -> Result<()> {
         //block instruction with params and results
         let output = vec![
             "Inputs: [] Returns: [i32]",
@@ -189,7 +190,7 @@ mod tests {
             "i32.const 1\ni32.const 2\nblock (param i32 i32) (result i32)\ni32.add\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(print_operands(&wasm_bin), output);
+        assert_eq!(print_operands(&wasm_bin)?, output);
         //if else with params and results
         let output = vec![
             "Inputs: [] Returns: [i32]",
@@ -206,7 +207,7 @@ mod tests {
         let lines = "i32.const 1\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(print_operands(&wasm_bin), output);
+        assert_eq!(print_operands(&wasm_bin)?, output);
         //loop with param and return
         let output = vec![
             "Inputs: [] Returns: [i32]",
@@ -224,7 +225,7 @@ mod tests {
         let lines = "i32.const 10\nloop (param i32) (result i32)\ni32.const 1\ni32.sub\nbr_if 1\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(print_operands(&wasm_bin), output);
+        assert_eq!(print_operands(&wasm_bin)?, output);
         //nested block and if
         let output = vec![
             "Inputs: [] Returns: [i32]",
@@ -243,7 +244,7 @@ mod tests {
         let lines = "i32.const 10\nblock (param i32) (result i32)\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(print_operands(&wasm_bin), output);
+        assert_eq!(print_operands(&wasm_bin)?, output);
         //empty block
         let output = vec!["Inputs: [] Returns: []", "Inputs: [] Returns: []"]
             .into_iter()
@@ -252,6 +253,7 @@ mod tests {
         let lines = "block\nend";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        assert_eq!(print_operands(&wasm_bin), output);
+        assert_eq!(print_operands(&wasm_bin)?, output);
+        Ok(())
     }
 }
