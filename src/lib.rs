@@ -135,7 +135,7 @@ impl Editor {
                     );
                     self.insert_line(*line_no, start_pos);
                 }
-                other => {
+                _ => {
                     let line_no = self.id_map.get(&id).expect("can't find line");
                     let new_cursor_pos = self
                         .lines
