@@ -1,10 +1,11 @@
 use crate::view::*;
 use leptos::{prelude::*, *};
+use reactive_stores::Store;
 use web_sys::{InputEvent, wasm_bindgen::JsCast};
 
 // The `EditLine` reflects the state of an individual line.
 // TODO: WebAssembly syntax checking
-#[derive(Default)]
+#[derive(Store, Debug, Clone, Default)]
 pub struct EditLine {
     id: usize,
     text: String,
@@ -33,10 +34,6 @@ impl EditLine {
 
     pub fn div_ref(&self) -> DivRef {
         self.div_ref
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.text
     }
 
     const COSMETIC_SPACE: char = '\u{200B}';

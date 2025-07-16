@@ -1,4 +1,5 @@
 use crate::editor::*;
+use crate::line::EditLineStoreFields;
 use leptos::{prelude::*, *};
 use web_sys::{Element, Node, Range, Selection, wasm_bindgen::JsCast};
 
@@ -65,9 +66,9 @@ pub fn Editor() -> impl IntoView {
                     data-codillon-line-id=move || *child.read().id()
                     node_ref=child.read_untracked().div_ref()
                 >
-                    {move || {
+                 {move || {
                         selection_signal.write();
-                        child.read().as_str().to_string()
+                        child.text()
                     }}
                 </div>
             </For>
