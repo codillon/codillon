@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow};
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 use wasm_tools::parse_binary_wasm;
-use wasmparser::{Parser, ValType};
+use wasmparser::{Operator, Parser, Payload, ValType};
 use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
 
@@ -58,9 +59,14 @@ pub fn parse_instr(s: &str) -> Result<Option<InstrInfo>> {
     })
 }
 
+/// Convert from WebAssembly text format to binary format. Doesn't comprehensively enforce well-formedness.
+pub fn text_to_binary(lines: &str) -> Result<Vec<u8>> {
+    let txt = format!("module (func {lines})");
+    Ok(parser::parse::<Module>(&ParseBuffer::new(&txt)?)?.encode()?)
+}
+
 /// Decides if a given string is a well-formed text-format Wasm function
 ///
-/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Module
 /// Encodes Module to binary Wasm and wasmparser parses binary Wasm
 ///
 /// # Parameters
@@ -72,12 +78,35 @@ pub fn parse_instr(s: &str) -> Result<Option<InstrInfo>> {
 /// # Assumptions
 /// Each instruction is plain
 pub fn is_well_formed_func(lines: &str) -> bool {
-    let parse_text = || {
-        let text = format!("module (func {lines})");
-        let binary = parser::parse::<Module>(&ParseBuffer::new(&text)?)?.encode()?;
-        parse_binary_wasm(Parser::new(0), &binary)
-    };
-    parse_text().is_ok()
+    (|| parse_binary_wasm(Parser::new(0), &text_to_binary(lines)?))().is_ok()
+}
+
+pub struct OkModule<'a> {
+    binary: Arc<Vec<u8>>,
+    functions: Vec<Vec<Operator<'a>>>,
+}
+
+impl<'a> OkModule<'a> {
+    pub fn new(wasm_bin: Vec<u8>) -> Result<Self> {
+        let parser = wasmparser::Parser::new(0);
+        let mut functions = Vec::new();
+
+        for payload in parser.parse_all(&wasm_bin) {
+            if let Payload::CodeSectionEntry(body) = payload? {
+                functions.push(
+                    body.get_operators_reader()?
+                        .into_iter()
+                        .map(|x| Ok(x?))
+                        .collect::<Result<Vec<_>>>()?,
+                );
+            }
+        }
+
+        Ok(Self {
+            binary: Arc::from(wasm_bin),
+            functions: Vec::new(),
+        })
+    }
 }
 
 /// Returns input and output types for each instruction in a binary Wasm module

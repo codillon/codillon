@@ -1,15 +1,16 @@
-use crate::{line::*, view::*};
+use crate::{line::*, utils::*, view::*};
 use leptos::{prelude::*, *};
 use std::collections::{HashMap, HashSet};
 use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
 
 // The "Editor" holds a vector of EditLines, as well as bookkeeping information related to
 // creating new lines and finding lines given their unique long-lived ID.
-pub struct Editor {
+pub struct Editor<'a> {
     next_id: usize,
     id_map: HashMap<usize, usize>,
     lines: RwSignal<Vec<RwSignal<EditLine>>>,
     selection: RwSignal<Option<SetSelection>>,
+    module: OkModule<'a>,
 }
 
 // The SetSelection struct describes changes to be made to the browser's global selection.
@@ -20,13 +21,13 @@ pub enum SetSelection {
     MultiLine(usize, usize), // anchor line number, focus line number
 }
 
-impl Default for Editor {
+impl<'a> Default for Editor<'a> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Editor {
+impl<'a> Editor<'a> {
     pub fn new() -> Self {
         Self {
             next_id: 8,
@@ -37,6 +38,7 @@ impl Editor {
             ]), // demo initial contents
             id_map: HashMap::from([(3, 0), (5, 1), (7, 2)]),
             selection: RwSignal::new(None),
+            module: OkModule::new(Vec::new()).expect("OkModule"),
         }
     }
 
