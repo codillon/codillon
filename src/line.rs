@@ -8,6 +8,9 @@ use web_sys::{InputEvent, wasm_bindgen::JsCast};
 #[derive(Store, Debug, Clone, Default)]
 pub struct EditLine {
     id: usize,
+    // Text invariant:
+    // Empty logical text => physical text is EXACTLY the cosmetic space.
+    // Nonempty logical text => physical text contains NO cosmetic space.
     text: String,
     div_ref: DivRef,
 }
@@ -29,20 +32,18 @@ impl EditLine {
 
     // Physical text represent the line's text EXACTLY,
     // including a possible cosmetic space.
-    pub fn physical_text(&self) -> &String {
+    pub fn text(&self) -> &String {
         &self.text
     }
 
-    pub fn physical_text_mut(&mut self) -> &mut String {
+    pub fn text_mut(&mut self) -> &mut String {
         &mut self.text
     }
 
-    // Logical text represents the observable contents of the line's text,
-    // which excludes the cosmetic space.
-    pub fn logical_text(&self) -> String {
-        let mut logical_text = self.text.clone();
-        logical_text.retain(|c| c != Self::COSMETIC_SPACE);
-        logical_text
+    // To uphold the invariant, the logical text is
+    // empty iff the only contents of the text is the cosmetic space.
+    pub fn is_logical_text_empty(&self) -> bool {
+        self.text == String::from(Self::COSMETIC_SPACE)
     }
 
     pub fn div_ref(&self) -> DivRef {
@@ -57,24 +58,24 @@ impl EditLine {
         self.text.retain(|c| c != Self::COSMETIC_SPACE);
         *cursor_pos = (*cursor_pos).min(self.text.len());
         let no_initial_ws = self.text.trim_start();
-        *cursor_pos =
-            (*cursor_pos).saturating_sub(self.physical_text().len() - no_initial_ws.len());
+        *cursor_pos = (*cursor_pos).saturating_sub(self.text().len() - no_initial_ws.len());
         self.text = no_initial_ws.to_string();
 
-        if self.physical_text().is_empty() {
+        if self.text().is_empty() {
             self.text.push(Self::COSMETIC_SPACE);
         }
     }
 
     // Splits the current line at POS, returning what is removed (RHS).
     pub fn split_self(&mut self, pos: usize) -> String {
-        if self.logical_text().is_empty() {
+        if self.is_logical_text_empty() {
             return String::from(Self::COSMETIC_SPACE);
         }
 
         let remainder = self.text.split_off(pos);
 
-        if self.logical_text().is_empty() {
+        // If we slice the line at position 0, the physical text is empty.
+        if self.text().is_empty() {
             self.text = String::from(Self::COSMETIC_SPACE);
         }
 
@@ -106,15 +107,15 @@ impl EditLine {
 
         // Remove the cosmetic space on a new line UNLESS we're simply
         // making another new line.
-        if self.logical_text().is_empty()
+        if self.is_logical_text_empty()
             && ev.input_type().as_str() != "insertParagraph"
             && ev.input_type().as_str() != "insertLineBreak"
         {
             self.text.clear();
         }
 
-        start_pos = start_pos.min(self.physical_text().len());
-        end_pos = end_pos.min(self.physical_text().len());
+        start_pos = start_pos.min(self.text().len());
+        end_pos = end_pos.min(self.text().len());
 
         if start_pos > end_pos {
             (end_pos, start_pos)
@@ -143,7 +144,7 @@ impl EditLine {
                 }
             }
             "deleteContentForward" => {
-                if start_pos == end_pos && start_pos < self.physical_text().len() {
+                if start_pos == end_pos && start_pos < self.text().len() {
                     self.text.replace_range(start_pos..start_pos + 1, "");
                 } else {
                     self.text.replace_range(start_pos..end_pos, "");
