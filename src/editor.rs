@@ -37,15 +37,15 @@ impl Default for Editor {
 impl Editor {
     pub fn new() -> Self {
         Self {
-            next_id: 3,
+            next_id: 8,
             lines: Store::new(CodeLines {
                 lines: vec![
-                    EditLine::new(0, String::from("Hello, world")),
-                    EditLine::new(1, String::from("Hello, world")),
-                    EditLine::new(2, String::from("Hello, world")),
+                    EditLine::new(3, String::from("Hello, world")),
+                    EditLine::new(5, String::from("Hello, world")),
+                    EditLine::new(7, String::from("Hello, world")),
                 ], // demo initial contents
             }),
-            id_map: HashMap::from([(0, 0), (1, 1), (2, 2)]),
+            id_map: HashMap::from([(3, 0), (5, 1), (7, 2)]),
             selection: RwSignal::new(None),
         }
     }
@@ -334,11 +334,23 @@ impl Editor {
             return false;
         }
 
-        // Verify map values (line numbers) are unique.
+        // Verify map values (line numbers) are unique and within bounds.
+        // Also verify that IDs in map match the line's ID.
         let mut line_numbers = HashSet::new();
         for id in self.id_map.keys() {
             let val = self.id_map[id];
             if !line_numbers.insert(val) || val >= self.lines.lines().read_untracked().len() {
+                return false;
+            }
+            if *id != self.lines.lines().at_unkeyed(val).id().get_untracked() {
+                return false;
+            }
+        }
+
+        // Verify that lines have unique IDs
+        let mut ids = HashSet::new();
+        for line in &self.lines().read_untracked().lines {
+            if !ids.insert(line.id()) {
                 return false;
             }
         }
