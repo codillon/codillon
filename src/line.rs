@@ -75,15 +75,6 @@ impl EditLine {
         let mut start_pos = range.start_offset().expect("offset") as usize;
         let mut end_pos = range.end_offset().expect("offset") as usize;
 
-        // Remove the cosmetic space on a new line UNLESS we're simply
-        // making another new line.
-        if self.get_logical_text().is_empty()
-            && ev.input_type().as_str() != "insertParagraph"
-            && ev.input_type().as_str() != "insertLineBreak"
-        {
-            self.logical_text.clear();
-        }
-
         start_pos = start_pos.min(self.get_logical_text().len());
         end_pos = end_pos.min(self.get_logical_text().len());
 
