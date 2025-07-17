@@ -36,10 +36,6 @@ impl EditLine {
         &self.text
     }
 
-    pub fn text_mut(&mut self) -> &mut String {
-        &mut self.text
-    }
-
     // To uphold the invariant, the logical text is
     // empty iff the only contents of the text is the cosmetic space.
     pub fn is_logical_text_empty(&self) -> bool {
