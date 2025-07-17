@@ -1,7 +1,7 @@
 use crate::{line::*, view::*};
 use leptos::{prelude::*, *};
 use reactive_stores::{Store, StoreFieldIterator};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
 
 // The "Editor" holds a vector of EditLines, as well as bookkeeping information related to
@@ -85,6 +85,9 @@ impl Editor {
                 code_lines.lines.insert(line_no + 1, new_line);
             }
         });
+
+        // Verify the integrity of the id map.
+        debug_assert!(self.id_map_is_valid());
 
         self.next_id += 1;
 
@@ -321,5 +324,48 @@ impl Editor {
         }
 
         self.selection.write_untracked().take();
+    }
+
+    // Verify that the ID map:
+    // Has 1 entry per editor line.
+    // Has entries that map to extant, unique lines.
+    fn id_map_is_valid(&self) -> bool {
+        if self.id_map.len() != self.lines().read_untracked().lines.len() {
+            return false;
+        }
+
+        // Verify map values (line numbers) are unique.
+        let mut line_numbers = HashSet::new();
+        for id in self.id_map.keys() {
+            let val = self.id_map[id];
+            if !line_numbers.insert(val) || val >= self.lines.lines().read_untracked().len() {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::{Ok, Result};
+
+    #[test]
+    fn test_insert_lines() -> Result<()> {
+        let mut editor = Editor::new();
+        // Insert sequential lines.
+        editor.insert_line(0, 0);
+        editor.insert_line(1, 0);
+        editor.insert_line(2, 0);
+
+        // Insert lines in between existing lines
+        editor.insert_line(2, 0);
+        editor.insert_line(1, 0);
+
+        // Insert lines at idx 0
+        editor.insert_line(0, 0);
+        editor.insert_line(0, 0);
+        Ok(())
     }
 }
