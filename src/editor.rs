@@ -195,7 +195,7 @@ impl Editor {
                         .read_untracked()
                         .last()
                         .expect("last line")
-                        .logical_text()
+                        .get_logical_text()
                         .len(),
                 )));
             }
@@ -270,7 +270,7 @@ impl Editor {
 
         // Is the anchor at the very end of a line (for a forward selection),
         // or the very beginning of a line (for a backward selection)?
-        if anchor_idx < focus_idx && anchor_offset == anchor_line.logical_text().len() {
+        if anchor_idx < focus_idx && anchor_offset == anchor_line.get_logical_text().len() {
             anchor_idx += 1;
         } else if focus_idx < anchor_idx && anchor_offset == 0 {
             anchor_idx -= 1;
@@ -305,7 +305,7 @@ impl Editor {
                 let focus_node = focus_line.text_node();
 
                 let anchor_offset = if anchor_idx > focus_idx {
-                    anchor_line.logical_text().len() as u32
+                    anchor_line.get_logical_text().len() as u32
                 } else {
                     0
                 };
@@ -313,7 +313,7 @@ impl Editor {
                 let focus_offset = if anchor_idx > focus_idx {
                     0
                 } else {
-                    focus_line.logical_text().len() as u32
+                    focus_line.get_logical_text().len() as u32
                 };
 
                 get_current_selection()
