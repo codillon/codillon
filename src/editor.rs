@@ -93,12 +93,12 @@ impl Editor {
                 "insertParagraph" | "insertLineBreak" => {
                     let line_no = self.id_map.get(&id).expect("can't find line");
                     let the_line = self.lines.read()[*line_no];
-                    let (start_pos, _) = the_line.write().preprocess_input(ev.clone());
+                    let (start_pos, _) = the_line.write().preprocess_input(&ev);
                     self.insert_line(*line_no, start_pos);
                 }
                 _ => {
                     let line_no = self.id_map.get(&id).expect("can't find line");
-                    let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(ev);
+                    let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
                     self.selection
                         .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
                 }
@@ -110,25 +110,62 @@ impl Editor {
         self.rationalize_selection();
     }
 
-    // Cancel an ArrowDown in the last line (to prevent the cursor from leaving the editor window)
-    pub fn maybe_cancel(&self, ev: KeyboardEvent) {
-        if ev.key() != "ArrowDown" {
-            return;
-        }
-        let selection = get_current_selection();
-        if selection.is_collapsed()
-            && let Some(focus) = selection.focus_node()
-            && let Some(id) = find_id_from_node(&focus)
-            && id
-                == *self
-                    .lines
-                    .read_untracked()
-                    .last()
-                    .expect("last line")
-                    .read()
-                    .id()
-        {
-            ev.prevent_default();
+    // Special-case the handling of some arrow keys:
+    // 1. Cancel an ArrowDown in the last line (to prevent the cursor from leaving the editor window)
+    // 2. Make sure to skip over a cosmetic space in a logically empty line.
+    pub fn handle_arrow(&mut self, ev: KeyboardEvent) {
+        match ev.key().as_str() {
+            "ArrowDown" => {
+                let selection = get_current_selection();
+                if selection.is_collapsed()
+                    && let Some(focus) = selection.focus_node()
+                    && let Some(id) = find_id_from_node(&focus)
+                    && id
+                        == *self
+                            .lines
+                            .read_untracked()
+                            .last()
+                            .expect("last line")
+                            .read()
+                            .id()
+                {
+                    ev.prevent_default();
+                }
+            }
+            "ArrowLeft" => {
+                let selection = get_current_selection();
+                if selection.is_collapsed()
+                    && let Some(focus) = selection.focus_node()
+                    && let Some(id) = find_id_from_node(&focus)
+                    && let idx = self.id_map.get(&id).expect("line from id")
+                    && *idx > 0
+                    && self.lines.read()[*idx].read().logical_text().is_empty()
+                {
+                    ev.prevent_default();
+                    self.selection.set(Some(SetSelection::Cursor(
+                        *idx - 1,
+                        self.lines.read()[*idx - 1]
+                            .read()
+                            .display_text()
+                            .chars()
+                            .count(),
+                    )));
+                }
+            }
+            "ArrowRight" => {
+                let selection = get_current_selection();
+                if selection.is_collapsed()
+                    && let Some(focus) = selection.focus_node()
+                    && let Some(id) = find_id_from_node(&focus)
+                    && let idx = self.id_map.get(&id).expect("line from id")
+                    && *idx < self.lines.read().len()
+                    && self.lines.read()[*idx].read().logical_text().is_empty()
+                {
+                    ev.prevent_default();
+                    self.selection.set(Some(SetSelection::Cursor(*idx + 1, 0)));
+                }
+            }
+            _ => (),
         }
     }
 
@@ -168,7 +205,8 @@ impl Editor {
                         .expect("last line")
                         .read()
                         .display_text()
-                        .len(),
+                        .chars()
+                        .count(),
                 )));
             }
             return;
@@ -242,7 +280,7 @@ impl Editor {
 
         // Is the anchor at the very end of a line (for a forward selection),
         // or the very beginning of a line (for a backward selection)?
-        if anchor_idx < focus_idx && anchor_offset == anchor_line.display_text().len() {
+        if anchor_idx < focus_idx && anchor_offset == anchor_line.display_text().chars().count() {
             anchor_idx += 1;
         } else if focus_idx < anchor_idx && anchor_offset == 0 {
             anchor_idx -= 1;
@@ -271,13 +309,13 @@ impl Editor {
                     .expect("set selection base and extent");
             }
             Some(SetSelection::MultiLine(anchor_idx, focus_idx)) => {
-                let anchor_line = &self.lines.read()[anchor_idx].read();
+                let anchor_line = &self.lines.read_untracked()[anchor_idx].read_untracked();
                 let anchor_node = anchor_line.text_node();
-                let focus_line = &self.lines.read()[focus_idx].read();
+                let focus_line = &self.lines.read_untracked()[focus_idx].read_untracked();
                 let focus_node = focus_line.text_node();
 
                 let anchor_offset = if anchor_idx > focus_idx {
-                    anchor_line.display_text().len() as u32
+                    anchor_line.display_char_count() as u32
                 } else {
                     0
                 };
@@ -285,7 +323,7 @@ impl Editor {
                 let focus_offset = if anchor_idx > focus_idx {
                     0
                 } else {
-                    focus_line.display_text().len() as u32
+                    focus_line.display_char_count() as u32
                 };
 
                 get_current_selection()

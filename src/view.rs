@@ -51,14 +51,14 @@ pub fn Editor() -> impl IntoView {
             class="textentry"
             contenteditable
             spellcheck="false"
-            on:beforeinput=move |ev| { set_editor.write_untracked().handle_input(ev) }
-            on:mousedown=move |_| { set_editor.write_untracked().rationalize_selection() }
+            on:beforeinput=move |ev| { set_editor.write().handle_input(ev) }
+            on:mousedown=move |_| { set_editor.write().rationalize_selection() }
             on:keydown=move |ev| {
-                editor.read_untracked().maybe_cancel(ev);
-                set_editor.write_untracked().rationalize_selection();
+                set_editor.write().handle_arrow(ev);
+                set_editor.write().rationalize_selection();
             }
-            on:mouseup=move |_| { set_editor.write_untracked().rationalize_selection() }
-            on:keyup=move |_| { set_editor.write_untracked().rationalize_selection() }
+            on:mouseup=move |_| { set_editor.write().rationalize_selection() }
+            on:keyup=move |_| { set_editor.write().rationalize_selection() }
         >
             <For each=move || editor.read().lines().get() key=|line| *line.read().id() let(child)>
                 <div
@@ -67,9 +67,6 @@ pub fn Editor() -> impl IntoView {
                 >
                     {move || {
                         selection_signal.write();
-                        leptos_dom::log!(
-                            "rendering {}: {}", child.read_untracked().id(), child.read_untracked().display_text().to_string()
-                        );
                         child.read().display_text().to_string()
                     }}
                 </div>
