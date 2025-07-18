@@ -31,7 +31,7 @@ impl EditLine {
         const COSMETIC_SPACE: &str = "\u{FEFF}";
 
         if self.text.is_empty() {
-            &COSMETIC_SPACE
+            COSMETIC_SPACE
         } else {
             &self.text
         }
@@ -62,7 +62,7 @@ impl EditLine {
         self.text
             .char_indices()
             .nth(char_pos)
-            .expect(&format!("char pos {char_pos}"))
+            .unwrap_or_else(|| panic!("char pos {char_pos}"))
             .0
     }
 

@@ -20,6 +20,12 @@ pub enum SetSelection {
     MultiLine(usize, usize), // anchor line number, focus line number
 }
 
+impl Default for Editor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Editor {
     pub fn new() -> Self {
         Self {
@@ -360,7 +366,7 @@ impl Editor {
         // Verify that lines have unique IDs
         let mut ids = HashSet::new();
         for line in self.lines.get() {
-            if !ids.insert(line.read().id().clone()) {
+            if !ids.insert(*line.read().id()) {
                 return false;
             }
         }
