@@ -9,15 +9,32 @@ pub struct Editor {
     next_id: usize,
     id_map: HashMap<usize, usize>,
     lines: RwSignal<Vec<RwSignal<EditLine>>>,
-    selection: RwSignal<Option<SetSelection>>,
+    set_selection: Option<LogicSelection>, // Be used to update selection if Some
 }
 
-// The SetSelection struct describes changes to be made to the browser's global selection.
+// The LogicSelection struct describes the logic positon of the selection area
 // E.g. after typing a letter of text, the cursor should be advanced to follow the new text.
-#[derive(Clone, Copy)]
-pub enum SetSelection {
-    Cursor(usize, usize),    // line index, pos
-    MultiLine(usize, usize), // anchor line number, focus line number
+#[derive(Debug, Clone, Copy)]
+pub struct LogicSelection {
+    pub anchor: (usize, usize),
+    pub focus: (usize, usize),
+}
+
+impl LogicSelection {
+    pub fn new_cursor(r: usize, c: usize) -> LogicSelection {
+        LogicSelection {
+            anchor: (r, c),
+            focus: (r, c),
+        }
+    }
+
+    pub fn new(anchor: (usize, usize), focus: (usize, usize)) -> LogicSelection {
+        LogicSelection { anchor, focus }
+    }
+
+    pub fn is_collapsed(&self) -> bool {
+        self.anchor == self.focus
+    }
 }
 
 impl Default for Editor {
@@ -31,12 +48,12 @@ impl Editor {
         Self {
             next_id: 8,
             lines: RwSignal::new(vec![
-                RwSignal::new(EditLine::new(3, String::from("Hello, world"))),
-                RwSignal::new(EditLine::new(5, String::from("Hello, world"))),
-                RwSignal::new(EditLine::new(7, String::from("Hello, world"))),
+                RwSignal::new(EditLine::new(3, String::from("i32.const 1"))),
+                RwSignal::new(EditLine::new(5, String::from("i32.const 2"))),
+                RwSignal::new(EditLine::new(7, String::from("i32.add"))),
             ]), // demo initial contents
             id_map: HashMap::from([(3, 0), (5, 1), (7, 2)]),
-            selection: RwSignal::new(None),
+            set_selection: None,
         }
     }
 
@@ -44,8 +61,73 @@ impl Editor {
         self.lines
     }
 
-    pub fn selection(&self) -> RwSignal<Option<SetSelection>> {
-        self.selection
+    pub fn set_selection(&self) -> &Option<LogicSelection> {
+        &self.set_selection
+    }
+
+    pub fn set_selection_mut(&mut self) -> &mut Option<LogicSelection> {
+        &mut self.set_selection
+    }
+
+    // The logic selection is defined as:
+    // if self.set_selection is Some:
+    //     self.set_selection
+    // else:
+    //     area after restricting dom selection into the text editor
+    fn get_current_logic_selection(&self) -> Option<LogicSelection> {
+        if let Some(logic_selection) = self.set_selection() {
+            return Some(*logic_selection);
+        }
+        let dom_selection = get_current_domselection();
+        let anchor = dom_selection.anchor_node()?;
+        let focus = dom_selection.focus_node()?;
+
+        let anchor_id = find_id_from_node(&anchor);
+        let focus_id = find_id_from_node(&focus);
+
+        match (anchor_id, focus_id) {
+            (Some(anchor_id), Some(focus_id)) => {
+                let anchor_idx: usize = *self.id_map.get(&anchor_id).expect("can't find line");
+                let focus_idx: usize = *self.id_map.get(&focus_id).expect("can't find line");
+                Some(LogicSelection::new(
+                    (anchor_idx, dom_selection.anchor_offset() as usize),
+                    (focus_idx, dom_selection.focus_offset() as usize),
+                ))
+            }
+            (Some(anchor_id), None) => {
+                let anchor_idx: usize = *self.id_map.get(&anchor_id).expect("can't find line");
+                Some(LogicSelection::new(
+                    (anchor_idx, dom_selection.anchor_offset() as usize),
+                    (
+                        self.lines().read_untracked().len() - 1,
+                        self.lines()
+                            .read_untracked()
+                            .last()
+                            .expect("Empty lines")
+                            .read_untracked()
+                            .logical_text()
+                            .len(),
+                    ),
+                ))
+            }
+            (None, Some(focus_id)) => {
+                let focus_idx: usize = *self.id_map.get(&focus_id).expect("can't find line");
+                Some(LogicSelection::new(
+                    (
+                        0,
+                        self.lines()
+                            .read_untracked()
+                            .first()
+                            .expect("Empty lines")
+                            .read_untracked()
+                            .logical_text()
+                            .len(),
+                    ),
+                    (focus_idx, dom_selection.focus_offset() as usize),
+                ))
+            }
+            (None, None) => None,
+        }
     }
 
     fn insert_line(&mut self, line_no: usize, start_pos: usize) {
@@ -74,8 +156,7 @@ impl Editor {
 
         self.next_id += 1;
 
-        self.selection
-            .set(Some(SetSelection::Cursor(line_no + 1, 0)));
+        *self.set_selection_mut() = Some(LogicSelection::new_cursor(line_no + 1, 0));
     }
 
     // Handle an input to the Editor window, by dispatching to the appropriate EditLine.
@@ -105,8 +186,7 @@ impl Editor {
                 _ => {
                     let line_no = self.id_map.get(&id).expect("can't find line");
                     let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
-                    self.selection
-                        .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+                    *self.set_selection_mut() = Some(LogicSelection::new_cursor(*line_no, new_cursor_pos));
                 }
             }
         } else {
@@ -122,224 +202,78 @@ impl Editor {
     pub fn handle_arrow(&mut self, ev: KeyboardEvent) {
         match ev.key().as_str() {
             "ArrowDown" => {
-                let selection = get_current_selection();
-                if selection.is_collapsed()
-                    && let Some(focus) = selection.focus_node()
-                    && let Some(id) = find_id_from_node(&focus)
-                    && id
-                        == *self
-                            .lines
-                            .read_untracked()
-                            .last()
-                            .expect("last line")
-                            .read()
-                            .id()
+                if let Some(selection) = self.get_current_logic_selection()
+                    && selection.is_collapsed()
+                    && selection.focus.0 == self.lines.read_untracked().len() - 1
                 {
                     ev.prevent_default();
                 }
             }
             "ArrowLeft" => {
-                let selection = get_current_selection();
-                if selection.is_collapsed()
-                    && let Some(focus) = selection.focus_node()
-                    && let Some(id) = find_id_from_node(&focus)
-                    && let idx = self.id_map.get(&id).expect("line from id")
-                    && *idx > 0
-                    && self.lines.read()[*idx].read().logical_text().is_empty()
+                if let Some(selection) = self.get_current_logic_selection()
+                    && selection.is_collapsed()
+                    && self.lines.read_untracked()[selection.focus.0]
+                        .read_untracked()
+                        .logical_text()
+                        .is_empty()
                 {
                     ev.prevent_default();
-                    self.selection.set(Some(SetSelection::Cursor(
-                        *idx - 1,
-                        self.lines.read()[*idx - 1]
-                            .read()
+                    *self.set_selection_mut() = Some(LogicSelection::new_cursor(
+                        selection.focus.0 - 1,
+                        self.lines.read_untracked()[selection.focus.0 - 1]
+                            .read_untracked()
                             .display_text()
                             .chars()
                             .count(),
-                    )));
+                    ));
                 }
             }
             "ArrowRight" => {
-                let selection = get_current_selection();
-                if selection.is_collapsed()
-                    && let Some(focus) = selection.focus_node()
-                    && let Some(id) = find_id_from_node(&focus)
-                    && let idx = self.id_map.get(&id).expect("line from id")
-                    && *idx < self.lines.read().len() - 1
-                    && self.lines.read()[*idx].read().logical_text().is_empty()
+                if let Some(selection) = self.get_current_logic_selection()
+                    && selection.is_collapsed()
+                    && selection.focus.0 < self.lines.read_untracked().len() - 1
+                    && self.lines.read_untracked()[selection.focus.0]
+                        .read_untracked()
+                        .logical_text()
+                        .is_empty()
                 {
                     ev.prevent_default();
-                    self.selection.set(Some(SetSelection::Cursor(*idx + 1, 0)));
+                    *self.set_selection_mut() = 
+                        Some(LogicSelection::new_cursor(selection.focus.0 + 1, 0));
                 }
             }
             _ => (),
         }
     }
 
-    // "Rationalize" the selection to (1) make multi-line selections include the entire lines, and
-    // (2) correct situations where the selection starts or ends outside the editor area.
+    // "Rationalize" the selection to:
+    // (1) correct situations where the selection starts or ends outside the editor area.
     pub fn rationalize_selection(&mut self) {
-        let selection = get_current_selection();
-        let Some(anchor) = selection.anchor_node() else {
-            return;
-        };
-        let focus = selection.focus_node().expect("focus");
-
-        let anchor_id = find_id_from_node(&anchor);
-        let focus_id = find_id_from_node(&focus);
-
-        match (anchor_id, focus_id) {
-            (Some(anchor_id), Some(focus_id)) => {
-                let anchor_offset = selection.anchor_offset() as usize;
-                self.handle_in_bounds_selection(anchor_id, anchor_offset, focus_id);
-            }
-            _ => self.handle_out_of_bounds_selection(&selection),
-        }
-    }
-
-    // If the selection includes areas outside the editor window, rationalize it
-    // to fit inside the window.
-    fn handle_out_of_bounds_selection(&mut self, selection: &DomSelection) {
-        if selection.is_collapsed() {
-            if selection.focus_offset() == 0 {
-                self.selection.set(Some(SetSelection::Cursor(0, 0)));
-            } else {
-                self.selection.set(Some(SetSelection::Cursor(
-                    self.lines.read_untracked().len() - 1,
-                    self.lines
-                        .read()
-                        .last()
-                        .expect("last line")
-                        .read()
-                        .display_text()
-                        .chars()
-                        .count(),
-                )));
-            }
-            return;
-        }
-
-        let anchor_id = find_id_from_node(&selection.anchor_node().expect("anchor"));
-        let focus_id = find_id_from_node(&selection.focus_node().expect("focus"));
-
-        match (anchor_id, focus_id) {
-            (Some(anchor_id), None) => {
-                let anchor_offset = selection.anchor_offset() as usize;
-                self.handle_in_bounds_selection(
-                    anchor_id,
-                    anchor_offset,
-                    *self
-                        .lines
-                        .read_untracked()
-                        .last()
-                        .expect("last line")
-                        .read()
-                        .id(),
-                );
-            }
-            (None, Some(focus_id)) => {
-                self.handle_in_bounds_selection(
-                    *self
-                        .lines
-                        .read_untracked()
-                        .first()
-                        .expect("first line")
-                        .read()
-                        .id(),
-                    0,
-                    focus_id,
-                );
-            }
-            (None, None) => {
-                if selection.anchor_offset() > selection.focus_offset() {
-                    self.selection.set(Some(SetSelection::MultiLine(
-                        self.lines.read_untracked().len() - 1,
-                        0,
-                    )));
-                } else {
-                    self.selection.set(Some(SetSelection::MultiLine(
-                        0,
-                        self.lines.read_untracked().len() - 1,
-                    )));
-                }
-            }
-            _ => {
-                unreachable!();
-            }
-        }
-    }
-
-    // If the selection is fully in-bounds, rationalize it by expanding multi-line selections
-    // to include the entire lines in question.
-    fn handle_in_bounds_selection(
-        &mut self,
-        anchor_id: usize,
-        anchor_offset: usize,
-        focus_id: usize,
-    ) {
-        if anchor_id == focus_id {
-            return; // single-line selection, no action needed
-        }
-        // Apparent multiline selection, but is this really a single-line or n-1 line selection?
-        let mut anchor_idx: usize = *self.id_map.get(&anchor_id).expect("can't find line");
-        let focus_idx: usize = *self.id_map.get(&focus_id).expect("can't find line");
-        let anchor_line = &self.lines.read()[anchor_idx].read();
-
-        // Is the anchor at the very end of a line (for a forward selection),
-        // or the very beginning of a line (for a backward selection)?
-        if anchor_idx < focus_idx && anchor_offset == anchor_line.display_text().chars().count() {
-            anchor_idx += 1;
-        } else if focus_idx < anchor_idx && anchor_offset == 0 {
-            anchor_idx -= 1;
-        }
-
-        if anchor_idx == focus_idx {
-            // It was really a single-line selection that overlapped
-            // the end-of-previous or beginning-of-next line. Do nothing.
-        } else {
-            // It's a real multi-line selection. Expand to the full lines on next tick.
-            self.selection
-                .set(Some(SetSelection::MultiLine(anchor_idx, focus_idx)));
-        }
+        *self.set_selection_mut() = self.get_current_logic_selection();
     }
 
     // Execute a SetSelection to transfer Codillion's idea of the current selection / cursor position
     // to the browser. We want Leptos to run this (and update the selection) *after* updating
     // line contents, which will warp the cursor back to the beginning of the line.
-    pub fn update_selection(&self) {
-        match self.selection.get_untracked() {
-            Some(SetSelection::Cursor(line_no, pos)) => {
-                let the_line = &self.lines.read_untracked()[line_no].read_untracked();
-                let text_node = the_line.text_node();
-                get_current_selection()
-                    .set_base_and_extent(&text_node, pos as u32, &text_node, pos as u32)
-                    .expect("set selection base and extent");
-            }
-            Some(SetSelection::MultiLine(anchor_idx, focus_idx)) => {
-                let anchor_line = &self.lines.read_untracked()[anchor_idx].read_untracked();
-                let anchor_node = anchor_line.text_node();
-                let focus_line = &self.lines.read_untracked()[focus_idx].read_untracked();
-                let focus_node = focus_line.text_node();
+    pub fn update_selection(&mut self) {
+        let Some(logic_selection) = self.set_selection() else {
+            return;
+        };
+        let anchor_line = &self.lines().read_untracked()[logic_selection.anchor.0].read_untracked();
+        let anchor_node = anchor_line.text_node();
+        let focus_line = &self.lines().read_untracked()[logic_selection.focus.0].read_untracked();
+        let focus_node = focus_line.text_node();
 
-                let anchor_offset = if anchor_idx > focus_idx {
-                    anchor_line.display_char_count() as u32
-                } else {
-                    0
-                };
+        get_current_domselection()
+            .set_base_and_extent(
+                &anchor_node,
+                logic_selection.anchor.1 as u32,
+                &focus_node,
+                logic_selection.focus.1 as u32,
+            )
+            .expect("set multiline selection");
 
-                let focus_offset = if anchor_idx > focus_idx {
-                    0
-                } else {
-                    focus_line.display_char_count() as u32
-                };
-
-                get_current_selection()
-                    .set_base_and_extent(&anchor_node, anchor_offset, &focus_node, focus_offset)
-                    .expect("set multiline selection");
-            }
-            None => (),
-        }
-
-        self.selection.write_untracked().take();
+        self.set_selection_mut().take();
     }
 
     // Verify that the ID map:

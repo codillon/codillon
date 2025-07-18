@@ -7,7 +7,7 @@ pub type DomNode = Node;
 pub type DomRange = Range;
 pub type DomSelection = Selection;
 
-pub fn get_current_selection() -> DomSelection {
+pub fn get_current_domselection() -> DomSelection {
     web_sys::window()
         .expect("window not found")
         .get_selection()
@@ -39,9 +39,9 @@ pub fn Editor() -> impl IntoView {
     let (editor, set_editor) = signal(Editor::new());
 
     // If the selection or cursor changes, update it *after* updating the text.
-    let selection_signal = editor.read_untracked().selection();
+    let rerender_signal = RwSignal::new(());
     Effect::watch(
-        move || selection_signal.get(),
+        move || rerender_signal.get(),
         move |_, _, _| set_editor.write_untracked().update_selection(),
         false,
     );
@@ -64,9 +64,16 @@ pub fn Editor() -> impl IntoView {
                 <div
                     data-codillon-line-id=move || *child.read().id()
                     node_ref=child.read().div_ref()
+                    class=move || if child.read().instr().is_err() { "grey" } else { "" }
+                    // on:mousedown=move |ev| {
+                    //     if child.read().instr().is_ok() {
+                    //         ev.prevent_default();
+                    //         ev.stop_propagation();
+                    //     }
+                    // }
                 >
                     {move || {
-                        selection_signal.write();
+                        rerender_signal.write();
                         child.read().display_text().to_string()
                     }}
                 </div>
