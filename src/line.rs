@@ -1,17 +1,12 @@
 use crate::view::*;
-use leptos::{prelude::*, *};
-use reactive_stores::Store;
+use leptos::prelude::*;
 use web_sys::{InputEvent, wasm_bindgen::JsCast};
 
 // The `EditLine` reflects the state of an individual line.
 // TODO: WebAssembly syntax checking
-#[derive(Store, Debug, Clone, Default)]
 pub struct EditLine {
     id: usize,
-    // Text invariant:
-    // Empty logical text => physical text is EXACTLY the cosmetic space.
-    // Nonempty logical text => physical text contains NO cosmetic space.
-    logical_text: String,
+    text: String,
     div_ref: DivRef,
 }
 
@@ -19,7 +14,7 @@ impl EditLine {
     pub fn new(id: usize, start_text: String) -> Self {
         Self {
             id,
-            logical_text: start_text,
+            text: start_text,
             div_ref: DivRef::new(),
         }
     }
@@ -28,8 +23,14 @@ impl EditLine {
         &self.id
     }
 
-    pub fn get_logical_text(&self) -> &str {
-        &self.logical_text
+    pub fn display_text(&self) -> &str {
+        const COSMETIC_SPACE: &str = "\u{FEFF}";
+
+        if self.text.is_empty() {
+            &COSMETIC_SPACE
+        } else {
+            &self.text
+        }
     }
 
     pub fn div_ref(&self) -> DivRef {
@@ -38,22 +39,8 @@ impl EditLine {
 
     // Splits the current line at POS, returning what is removed (RHS).
     pub fn split_self(&mut self, pos: usize) -> String {
-        if self.get_logical_text().is_empty() {
-            return String::from("");
-        }
-
-        let remainder = self.logical_text.split_off(pos);
-
-        // If we slice the line at position 0, the physical text is empty.
-        if self.get_logical_text().is_empty() {
-            self.logical_text = String::from("");
-        }
-
-        if remainder.is_empty() {
-            String::from("")
-        } else {
-            remainder
-        }
+        // TODO: compute byte index correctly (given cursor pos as char index)
+        self.text.split_off(pos)
     }
 
     // Handle leading spaces and return the selection range.
@@ -75,8 +62,8 @@ impl EditLine {
         let mut start_pos = range.start_offset().expect("offset") as usize;
         let mut end_pos = range.end_offset().expect("offset") as usize;
 
-        start_pos = start_pos.min(self.get_logical_text().len());
-        end_pos = end_pos.min(self.get_logical_text().len());
+        start_pos = start_pos.min(self.text.len());
+        end_pos = end_pos.min(self.text.len());
 
         if start_pos > end_pos {
             (end_pos, start_pos)
@@ -93,28 +80,25 @@ impl EditLine {
         match ev.input_type().as_str() {
             "insertText" => {
                 let new_text = &ev.data().unwrap_or_default();
-                self.logical_text
-                    .replace_range(start_pos..end_pos, new_text);
+                self.text.replace_range(start_pos..end_pos, new_text);
                 cursor_pos = start_pos + new_text.len();
             }
             "deleteContentBackward" => {
                 if start_pos == end_pos && start_pos > 0 {
-                    self.logical_text
-                        .replace_range(start_pos - 1..start_pos, "");
+                    self.text.replace_range(start_pos - 1..start_pos, "");
                     cursor_pos = start_pos - 1;
                 } else {
-                    self.logical_text.replace_range(start_pos..end_pos, "");
+                    self.text.replace_range(start_pos..end_pos, "");
                 }
             }
             "deleteContentForward" => {
-                if start_pos == end_pos && start_pos < self.get_logical_text().len() {
-                    self.logical_text
-                        .replace_range(start_pos..start_pos + 1, "");
+                if start_pos == end_pos && start_pos < self.text.len() {
+                    self.text.replace_range(start_pos..start_pos + 1, "");
                 } else {
-                    self.logical_text.replace_range(start_pos..end_pos, "");
+                    self.text.replace_range(start_pos..end_pos, "");
                 }
             }
-            other => leptos_dom::log!("unhandled: {other}"),
+            other => leptos::leptos_dom::log!("unhandled: {other}"),
         }
         cursor_pos
     }
