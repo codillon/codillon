@@ -1,5 +1,4 @@
 use crate::editor::*;
-use crate::line::EditLineStoreFields;
 use leptos::{prelude::*, *};
 use web_sys::{Element, Node, Range, Selection, wasm_bindgen::JsCast};
 
@@ -37,8 +36,6 @@ pub fn find_id_from_node(orig_node: &Node) -> Option<usize> {
 // (each in their own div).
 #[component]
 pub fn Editor() -> impl IntoView {
-    const COSMETIC_SPACE: char = '\u{FEFF}';
-
     let (editor, set_editor) = signal(Editor::new());
 
     // If the selection or cursor changes, update it *after* updating the text.
@@ -54,27 +51,23 @@ pub fn Editor() -> impl IntoView {
             class="textentry"
             contenteditable
             spellcheck="false"
-            on:beforeinput=move |ev| { set_editor.write_untracked().handle_input(ev) }
-            on:mousedown=move |_| { set_editor.write_untracked().rationalize_selection() }
+            on:beforeinput=move |ev| { set_editor.write().handle_input(ev) }
+            on:mousedown=move |_| { set_editor.write().rationalize_selection() }
             on:keydown=move |ev| {
-                editor.read_untracked().maybe_cancel(ev);
-                set_editor.write_untracked().rationalize_selection();
+                set_editor.write().handle_arrow(ev);
+                set_editor.write().rationalize_selection();
             }
-            on:mouseup=move |_| { set_editor.write_untracked().rationalize_selection() }
-            on:keyup=move |_| { set_editor.write_untracked().rationalize_selection() }
+            on:mouseup=move |_| { set_editor.write().rationalize_selection() }
+            on:keyup=move |_| { set_editor.write().rationalize_selection() }
         >
-            <For each=move || editor.read().lines().lines() key=|line| *line.read().id() let(child)>
+            <For each=move || editor.read().lines().get() key=|line| *line.read().id() let(child)>
                 <div
                     data-codillon-line-id=move || *child.read().id()
-                    node_ref=child.read_untracked().div_ref()
+                    node_ref=child.read().div_ref()
                 >
                     {move || {
                         selection_signal.write();
-                        if child.logical_text().get().is_empty() {
-                            String::from(COSMETIC_SPACE)
-                        } else {
-                            child.logical_text().get()
-                        }
+                        child.read().display_text().to_string()
                     }}
                 </div>
             </For>

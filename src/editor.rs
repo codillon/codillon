@@ -1,6 +1,5 @@
 use crate::{line::*, view::*};
 use leptos::{prelude::*, *};
-use reactive_stores::{Store, StoreFieldIterator};
 use std::collections::{HashMap, HashSet};
 use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
 
@@ -9,7 +8,7 @@ use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
 pub struct Editor {
     next_id: usize,
     id_map: HashMap<usize, usize>,
-    lines: Store<CodeLines>,
+    lines: RwSignal<Vec<RwSignal<EditLine>>>,
     selection: RwSignal<Option<SetSelection>>,
 }
 
@@ -19,13 +18,6 @@ pub struct Editor {
 pub enum SetSelection {
     Cursor(usize, usize),    // line index, pos
     MultiLine(usize, usize), // anchor line number, focus line number
-}
-
-// The individual lines of code.
-#[derive(Store)]
-pub struct CodeLines {
-    #[store(key: usize = |line| *line.id())]
-    lines: Vec<EditLine>,
 }
 
 impl Default for Editor {
@@ -38,20 +30,18 @@ impl Editor {
     pub fn new() -> Self {
         Self {
             next_id: 8,
-            lines: Store::new(CodeLines {
-                lines: vec![
-                    EditLine::new(3, String::from("Hello, world")),
-                    EditLine::new(5, String::from("Hello, world")),
-                    EditLine::new(7, String::from("Hello, world")),
-                ], // demo initial contents
-            }),
+            lines: RwSignal::new(vec![
+                RwSignal::new(EditLine::new(3, String::from("Hello, world"))),
+                RwSignal::new(EditLine::new(5, String::from("Hello, world"))),
+                RwSignal::new(EditLine::new(7, String::from("Hello, world"))),
+            ]), // demo initial contents
             id_map: HashMap::from([(3, 0), (5, 1), (7, 2)]),
             selection: RwSignal::new(None),
         }
     }
 
-    pub fn lines(&self) -> &Store<CodeLines> {
-        &self.lines
+    pub fn lines(&self) -> RwSignal<Vec<RwSignal<EditLine>>> {
+        self.lines
     }
 
     pub fn selection(&self) -> RwSignal<Option<SetSelection>> {
@@ -68,23 +58,16 @@ impl Editor {
         // Update the position map.
         self.id_map.insert(self.next_id, line_no + 1);
 
-        let remainder = self
-            .lines
-            .lines()
-            .at_unkeyed(line_no)
-            .write()
-            .split_self(start_pos);
+        let remainder = self.lines.write()[line_no].write().split_self(start_pos);
 
-        let new_line = EditLine::new(self.next_id, remainder);
+        let new_line = RwSignal::new(EditLine::new(self.next_id, remainder));
 
         // Add the new line below the current line
-        self.lines.update(|code_lines| {
-            if line_no == code_lines.lines.len() - 1 {
-                code_lines.lines.push(new_line);
-            } else {
-                code_lines.lines.insert(line_no + 1, new_line);
-            }
-        });
+        if line_no == self.lines.read().len() - 1 {
+            self.lines.write().push(new_line);
+        } else {
+            self.lines.write().insert(line_no + 1, new_line);
+        }
 
         // Verify the integrity of the id map.
         debug_assert!(self.id_map_is_valid());
@@ -111,22 +94,17 @@ impl Editor {
         if start_id == end_id
             && let Some(id) = start_id
         {
-            //         If the InputEvent requires changing lines, handle the event at the editor-level
+            // If the InputEvent requires changing lines, handle the event at the editor-level
             match ev.input_type().as_str() {
                 "insertParagraph" | "insertLineBreak" => {
                     let line_no = self.id_map.get(&id).expect("can't find line");
-                    let the_line = self.lines.lines().at_unkeyed(*line_no);
-                    let (start_pos, _) = the_line.write().preprocess_input(ev.clone());
+                    let the_line = self.lines.read()[*line_no];
+                    let (start_pos, _) = the_line.write().preprocess_input(&ev);
                     self.insert_line(*line_no, start_pos);
                 }
                 _ => {
                     let line_no = self.id_map.get(&id).expect("can't find line");
-                    let new_cursor_pos = self
-                        .lines
-                        .lines()
-                        .at_unkeyed(*line_no)
-                        .write()
-                        .handle_input(ev);
+                    let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
                     self.selection
                         .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
                 }
@@ -138,25 +116,62 @@ impl Editor {
         self.rationalize_selection();
     }
 
-    // Cancel an ArrowDown in the last line (to prevent the cursor from leaving the editor window)
-    pub fn maybe_cancel(&self, ev: KeyboardEvent) {
-        if ev.key() != "ArrowDown" {
-            return;
-        }
-        let selection = get_current_selection();
-        if selection.is_collapsed()
-            && let Some(focus) = selection.focus_node()
-            && let Some(id) = find_id_from_node(&focus)
-            && id
-                == *self
-                    .lines
-                    .lines()
-                    .read_untracked()
-                    .last()
-                    .expect("last line")
-                    .id()
-        {
-            ev.prevent_default();
+    // Special-case the handling of some arrow keys:
+    // 1. Cancel an ArrowDown in the last line (to prevent the cursor from leaving the editor window)
+    // 2. Make sure to skip over a cosmetic space in a logically empty line.
+    pub fn handle_arrow(&mut self, ev: KeyboardEvent) {
+        match ev.key().as_str() {
+            "ArrowDown" => {
+                let selection = get_current_selection();
+                if selection.is_collapsed()
+                    && let Some(focus) = selection.focus_node()
+                    && let Some(id) = find_id_from_node(&focus)
+                    && id
+                        == *self
+                            .lines
+                            .read_untracked()
+                            .last()
+                            .expect("last line")
+                            .read()
+                            .id()
+                {
+                    ev.prevent_default();
+                }
+            }
+            "ArrowLeft" => {
+                let selection = get_current_selection();
+                if selection.is_collapsed()
+                    && let Some(focus) = selection.focus_node()
+                    && let Some(id) = find_id_from_node(&focus)
+                    && let idx = self.id_map.get(&id).expect("line from id")
+                    && *idx > 0
+                    && self.lines.read()[*idx].read().logical_text().is_empty()
+                {
+                    ev.prevent_default();
+                    self.selection.set(Some(SetSelection::Cursor(
+                        *idx - 1,
+                        self.lines.read()[*idx - 1]
+                            .read()
+                            .display_text()
+                            .chars()
+                            .count(),
+                    )));
+                }
+            }
+            "ArrowRight" => {
+                let selection = get_current_selection();
+                if selection.is_collapsed()
+                    && let Some(focus) = selection.focus_node()
+                    && let Some(id) = find_id_from_node(&focus)
+                    && let idx = self.id_map.get(&id).expect("line from id")
+                    && *idx < self.lines.read().len()
+                    && self.lines.read()[*idx].read().logical_text().is_empty()
+                {
+                    ev.prevent_default();
+                    self.selection.set(Some(SetSelection::Cursor(*idx + 1, 0)));
+                }
+            }
+            _ => (),
         }
     }
 
@@ -189,14 +204,15 @@ impl Editor {
                 self.selection.set(Some(SetSelection::Cursor(0, 0)));
             } else {
                 self.selection.set(Some(SetSelection::Cursor(
-                    self.lines.lines().read_untracked().len() - 1,
+                    self.lines.read_untracked().len() - 1,
                     self.lines
-                        .lines()
-                        .read_untracked()
+                        .read()
                         .last()
                         .expect("last line")
-                        .get_logical_text()
-                        .len(),
+                        .read()
+                        .display_text()
+                        .chars()
+                        .count(),
                 )));
             }
             return;
@@ -213,10 +229,10 @@ impl Editor {
                     anchor_offset,
                     *self
                         .lines
-                        .lines()
                         .read_untracked()
                         .last()
                         .expect("last line")
+                        .read()
                         .id(),
                 );
             }
@@ -224,10 +240,10 @@ impl Editor {
                 self.handle_in_bounds_selection(
                     *self
                         .lines
-                        .lines()
                         .read_untracked()
                         .first()
                         .expect("first line")
+                        .read()
                         .id(),
                     0,
                     focus_id,
@@ -236,13 +252,13 @@ impl Editor {
             (None, None) => {
                 if selection.anchor_offset() > selection.focus_offset() {
                     self.selection.set(Some(SetSelection::MultiLine(
-                        self.lines.lines().read_untracked().len() - 1,
+                        self.lines.read_untracked().len() - 1,
                         0,
                     )));
                 } else {
                     self.selection.set(Some(SetSelection::MultiLine(
                         0,
-                        self.lines.lines().read_untracked().len() - 1,
+                        self.lines.read_untracked().len() - 1,
                     )));
                 }
             }
@@ -266,11 +282,11 @@ impl Editor {
         // Apparent multiline selection, but is this really a single-line or n-1 line selection?
         let mut anchor_idx: usize = *self.id_map.get(&anchor_id).expect("can't find line");
         let focus_idx: usize = *self.id_map.get(&focus_id).expect("can't find line");
-        let anchor_line = &self.lines.lines().read_untracked()[anchor_idx];
+        let anchor_line = &self.lines.read()[anchor_idx].read();
 
         // Is the anchor at the very end of a line (for a forward selection),
         // or the very beginning of a line (for a backward selection)?
-        if anchor_idx < focus_idx && anchor_offset == anchor_line.get_logical_text().len() {
+        if anchor_idx < focus_idx && anchor_offset == anchor_line.display_text().chars().count() {
             anchor_idx += 1;
         } else if focus_idx < anchor_idx && anchor_offset == 0 {
             anchor_idx -= 1;
@@ -292,20 +308,20 @@ impl Editor {
     pub fn update_selection(&self) {
         match self.selection.get_untracked() {
             Some(SetSelection::Cursor(line_no, pos)) => {
-                let the_line = &self.lines.lines().read_untracked()[line_no];
+                let the_line = &self.lines.read_untracked()[line_no].read_untracked();
                 let text_node = the_line.text_node();
                 get_current_selection()
                     .set_base_and_extent(&text_node, pos as u32, &text_node, pos as u32)
                     .expect("set selection base and extent");
             }
             Some(SetSelection::MultiLine(anchor_idx, focus_idx)) => {
-                let anchor_line = &self.lines.lines().read_untracked()[anchor_idx];
+                let anchor_line = &self.lines.read_untracked()[anchor_idx].read_untracked();
                 let anchor_node = anchor_line.text_node();
-                let focus_line = &self.lines.lines().read_untracked()[focus_idx];
+                let focus_line = &self.lines.read_untracked()[focus_idx].read_untracked();
                 let focus_node = focus_line.text_node();
 
                 let anchor_offset = if anchor_idx > focus_idx {
-                    anchor_line.get_logical_text().len() as u32
+                    anchor_line.display_char_count() as u32
                 } else {
                     0
                 };
@@ -313,7 +329,7 @@ impl Editor {
                 let focus_offset = if anchor_idx > focus_idx {
                     0
                 } else {
-                    focus_line.get_logical_text().len() as u32
+                    focus_line.display_char_count() as u32
                 };
 
                 get_current_selection()
@@ -330,7 +346,7 @@ impl Editor {
     // Has 1 entry per editor line.
     // Has entries that map to extant, unique lines.
     fn id_map_is_valid(&self) -> bool {
-        if self.id_map.len() != self.lines().read_untracked().lines.len() {
+        if self.id_map.len() != self.lines.read_untracked().len() {
             return false;
         }
 
@@ -339,18 +355,18 @@ impl Editor {
         let mut line_numbers = HashSet::new();
         for id in self.id_map.keys() {
             let val = self.id_map[id];
-            if !line_numbers.insert(val) || val >= self.lines.lines().read_untracked().len() {
+            if !line_numbers.insert(val) || val >= self.lines.read_untracked().len() {
                 return false;
             }
-            if *id != self.lines.lines().at_unkeyed(val).id().get_untracked() {
+            if id != self.lines.read_untracked()[val].read_untracked().id() {
                 return false;
             }
         }
 
         // Verify that lines have unique IDs
         let mut ids = HashSet::new();
-        for line in &self.lines().read_untracked().lines {
-            if !ids.insert(line.id()) {
+        for line in self.lines.get() {
+            if !ids.insert(*line.read().id()) {
                 return false;
             }
         }
