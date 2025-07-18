@@ -164,7 +164,7 @@ impl Editor {
                     && let Some(focus) = selection.focus_node()
                     && let Some(id) = find_id_from_node(&focus)
                     && let idx = self.id_map.get(&id).expect("line from id")
-                    && *idx < self.lines.read().len()
+                    && *idx < self.lines.read().len() - 1
                     && self.lines.read()[*idx].read().logical_text().is_empty()
                 {
                     ev.prevent_default();
