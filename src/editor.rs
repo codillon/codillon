@@ -1,13 +1,13 @@
 use crate::{line::*, view::*};
 use leptos::{prelude::*, *};
 use reactive_stores::{Store, StoreFieldIterator};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
 
 // The "Editor" holds a vector of EditLines, as well as bookkeeping information related to
 // creating new lines and finding lines given their unique long-lived ID.
 pub struct Editor {
-    //    next_id: usize, // TODO: will be used when insertParagraph creates a new line
+    next_id: usize,
     id_map: HashMap<usize, usize>,
     lines: Store<CodeLines>,
     selection: RwSignal<Option<SetSelection>>,
@@ -37,9 +37,13 @@ impl Default for Editor {
 impl Editor {
     pub fn new() -> Self {
         Self {
-            //            next_id: 6,
+            next_id: 8,
             lines: Store::new(CodeLines {
-                lines: vec![EditLine::new(3), EditLine::new(5), EditLine::new(7)], // demo initial contents
+                lines: vec![
+                    EditLine::new(3, String::from("Hello, world")),
+                    EditLine::new(5, String::from("Hello, world")),
+                    EditLine::new(7, String::from("Hello, world")),
+                ], // demo initial contents
             }),
             id_map: HashMap::from([(3, 0), (5, 1), (7, 2)]),
             selection: RwSignal::new(None),
@@ -54,8 +58,44 @@ impl Editor {
         self.selection
     }
 
+    fn insert_line(&mut self, line_no: usize, start_pos: usize) {
+        // Re-map lines that will be affected by this change.
+        for val in self.id_map.values_mut() {
+            if *val > line_no {
+                *val += 1;
+            }
+        }
+        // Update the position map.
+        self.id_map.insert(self.next_id, line_no + 1);
+
+        let remainder = self
+            .lines
+            .lines()
+            .at_unkeyed(line_no)
+            .write()
+            .split_self(start_pos);
+
+        let new_line = EditLine::new(self.next_id, remainder);
+
+        // Add the new line below the current line
+        self.lines.update(|code_lines| {
+            if line_no == code_lines.lines.len() - 1 {
+                code_lines.lines.push(new_line);
+            } else {
+                code_lines.lines.insert(line_no + 1, new_line);
+            }
+        });
+
+        // Verify the integrity of the id map.
+        debug_assert!(self.id_map_is_valid());
+
+        self.next_id += 1;
+
+        self.selection
+            .set(Some(SetSelection::Cursor(line_no + 1, 0)));
+    }
+
     // Handle an input to the Editor window, by dispatching to the appropriate EditLine.
-    // TODO: handle insertParagraph and insertLineBreak (add a line)
     // TODO: handle line deletion
     pub fn handle_input(&mut self, ev: InputEvent) {
         ev.prevent_default();
@@ -71,15 +111,26 @@ impl Editor {
         if start_id == end_id
             && let Some(id) = start_id
         {
-            let line_no = self.id_map.get(&id).expect("can't find line");
-            let new_cursor_pos = self
-                .lines
-                .lines()
-                .at_unkeyed(*line_no)
-                .write()
-                .handle_input(ev);
-            self.selection
-                .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+            //         If the InputEvent requires changing lines, handle the event at the editor-level
+            match ev.input_type().as_str() {
+                "insertParagraph" | "insertLineBreak" => {
+                    let line_no = self.id_map.get(&id).expect("can't find line");
+                    let the_line = self.lines.lines().at_unkeyed(*line_no);
+                    let (start_pos, _) = the_line.write().preprocess_input(ev.clone());
+                    self.insert_line(*line_no, start_pos);
+                }
+                _ => {
+                    let line_no = self.id_map.get(&id).expect("can't find line");
+                    let new_cursor_pos = self
+                        .lines
+                        .lines()
+                        .at_unkeyed(*line_no)
+                        .write()
+                        .handle_input(ev);
+                    self.selection
+                        .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+                }
+            }
         } else {
             leptos_dom::log!("unhandled: multiline select input");
         }
@@ -144,7 +195,7 @@ impl Editor {
                         .read_untracked()
                         .last()
                         .expect("last line")
-                        .text()
+                        .get_logical_text()
                         .len(),
                 )));
             }
@@ -219,7 +270,7 @@ impl Editor {
 
         // Is the anchor at the very end of a line (for a forward selection),
         // or the very beginning of a line (for a backward selection)?
-        if anchor_idx < focus_idx && anchor_offset == anchor_line.text().len() {
+        if anchor_idx < focus_idx && anchor_offset == anchor_line.get_logical_text().len() {
             anchor_idx += 1;
         } else if focus_idx < anchor_idx && anchor_offset == 0 {
             anchor_idx -= 1;
@@ -254,7 +305,7 @@ impl Editor {
                 let focus_node = focus_line.text_node();
 
                 let anchor_offset = if anchor_idx > focus_idx {
-                    anchor_line.text().len() as u32
+                    anchor_line.get_logical_text().len() as u32
                 } else {
                     0
                 };
@@ -262,7 +313,7 @@ impl Editor {
                 let focus_offset = if anchor_idx > focus_idx {
                     0
                 } else {
-                    focus_line.text().len() as u32
+                    focus_line.get_logical_text().len() as u32
                 };
 
                 get_current_selection()
@@ -273,5 +324,60 @@ impl Editor {
         }
 
         self.selection.write_untracked().take();
+    }
+
+    // Verify that the ID map:
+    // Has 1 entry per editor line.
+    // Has entries that map to extant, unique lines.
+    fn id_map_is_valid(&self) -> bool {
+        if self.id_map.len() != self.lines().read_untracked().lines.len() {
+            return false;
+        }
+
+        // Verify map values (line numbers) are unique and within bounds.
+        // Also verify that IDs in map match the line's ID.
+        let mut line_numbers = HashSet::new();
+        for id in self.id_map.keys() {
+            let val = self.id_map[id];
+            if !line_numbers.insert(val) || val >= self.lines.lines().read_untracked().len() {
+                return false;
+            }
+            if *id != self.lines.lines().at_unkeyed(val).id().get_untracked() {
+                return false;
+            }
+        }
+
+        // Verify that lines have unique IDs
+        let mut ids = HashSet::new();
+        for line in &self.lines().read_untracked().lines {
+            if !ids.insert(line.id()) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::{Ok, Result};
+
+    #[test]
+    fn test_insert_lines() -> Result<()> {
+        let mut editor = Editor::new();
+        // Insert sequential lines.
+        editor.insert_line(0, 0);
+        editor.insert_line(1, 0);
+        editor.insert_line(2, 0);
+
+        // Insert lines in between existing lines
+        editor.insert_line(2, 0);
+        editor.insert_line(1, 0);
+
+        // Insert lines at idx 0
+        editor.insert_line(0, 0);
+        editor.insert_line(0, 0);
+        Ok(())
     }
 }

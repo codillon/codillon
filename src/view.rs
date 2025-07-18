@@ -1,4 +1,5 @@
 use crate::editor::*;
+use crate::line::EditLineStoreFields;
 use leptos::{prelude::*, *};
 use web_sys::{Element, Node, Range, Selection, wasm_bindgen::JsCast};
 
@@ -36,6 +37,8 @@ pub fn find_id_from_node(orig_node: &Node) -> Option<usize> {
 // (each in their own div).
 #[component]
 pub fn Editor() -> impl IntoView {
+    const COSMETIC_SPACE: char = '\u{FEFF}';
+
     let (editor, set_editor) = signal(Editor::new());
 
     // If the selection or cursor changes, update it *after* updating the text.
@@ -67,7 +70,11 @@ pub fn Editor() -> impl IntoView {
                 >
                     {move || {
                         selection_signal.write();
-                        child.read().as_str().to_string()
+                        if child.logical_text().get().is_empty() {
+                            String::from(COSMETIC_SPACE)
+                        } else {
+                            child.logical_text().get()
+                        }
                     }}
                 </div>
             </For>

@@ -1,21 +1,25 @@
 use crate::view::*;
 use leptos::{prelude::*, *};
+use reactive_stores::Store;
 use web_sys::{InputEvent, wasm_bindgen::JsCast};
 
 // The `EditLine` reflects the state of an individual line.
 // TODO: WebAssembly syntax checking
-#[derive(Default)]
+#[derive(Store, Debug, Clone, Default)]
 pub struct EditLine {
     id: usize,
-    text: String,
+    // Text invariant:
+    // Empty logical text => physical text is EXACTLY the cosmetic space.
+    // Nonempty logical text => physical text contains NO cosmetic space.
+    logical_text: String,
     div_ref: DivRef,
 }
 
 impl EditLine {
-    pub fn new(id: usize) -> Self {
+    pub fn new(id: usize, start_text: String) -> Self {
         Self {
             id,
-            text: String::from("Hello, world"),
+            logical_text: start_text,
             div_ref: DivRef::new(),
         }
     }
@@ -23,37 +27,37 @@ impl EditLine {
     pub fn id(&self) -> &usize {
         &self.id
     }
-    pub fn text(&self) -> &String {
-        &self.text
+
+    pub fn get_logical_text(&self) -> &str {
+        &self.logical_text
     }
+
     pub fn div_ref(&self) -> DivRef {
         self.div_ref
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.text
-    }
+    // Splits the current line at POS, returning what is removed (RHS).
+    pub fn split_self(&mut self, pos: usize) -> String {
+        if self.get_logical_text().is_empty() {
+            return String::from("");
+        }
 
-    const COSMETIC_SPACE: char = '\u{FEFF}';
+        let remainder = self.logical_text.split_off(pos);
 
-    fn rationalize(&mut self, cursor_pos: &mut usize) {
-        // Adjust the line so the cursor still shows up even if the text is empty,
-        // by replacing empty strings with a zero-width space character and removing it
-        // later -- adjusting cursor position to match.
+        // If we slice the line at position 0, the physical text is empty.
+        if self.get_logical_text().is_empty() {
+            self.logical_text = String::from("");
+        }
 
-        self.text.retain(|c| c != Self::COSMETIC_SPACE);
-        *cursor_pos = (*cursor_pos).min(self.text.len());
-        let no_initial_ws = self.text.trim_start();
-        *cursor_pos = (*cursor_pos).saturating_sub(self.text.len() - no_initial_ws.len());
-        self.text = no_initial_ws.to_string();
-
-        if self.text.is_empty() {
-            self.text.push(Self::COSMETIC_SPACE);
+        if remainder.is_empty() {
+            String::from("")
+        } else {
+            remainder
         }
     }
 
-    // Handle insert and delete events for this line.
-    pub fn handle_input(&mut self, ev: InputEvent) -> usize {
+    // Handle leading spaces and return the selection range.
+    pub fn preprocess_input(&mut self, ev: InputEvent) -> (usize, usize) {
         let range = ev
             .get_target_ranges()
             .get(0)
@@ -71,44 +75,47 @@ impl EditLine {
         let mut start_pos = range.start_offset().expect("offset") as usize;
         let mut end_pos = range.end_offset().expect("offset") as usize;
 
-        if self.text.starts_with(Self::COSMETIC_SPACE) {
-            self.text.clear();
-        }
-
-        start_pos = start_pos.min(self.text.len());
-        end_pos = end_pos.min(self.text.len());
+        start_pos = start_pos.min(self.get_logical_text().len());
+        end_pos = end_pos.min(self.get_logical_text().len());
 
         if start_pos > end_pos {
-            (start_pos, end_pos) = (end_pos, start_pos);
+            (end_pos, start_pos)
+        } else {
+            (start_pos, end_pos)
         }
+    }
 
+    // Handle insert and delete events for this line.
+    pub fn handle_input(&mut self, ev: InputEvent) -> usize {
+        let (start_pos, end_pos) = self.preprocess_input(ev.clone());
         let mut cursor_pos = start_pos;
 
         match ev.input_type().as_str() {
             "insertText" => {
                 let new_text = &ev.data().unwrap_or_default();
-                self.text.replace_range(start_pos..end_pos, new_text);
+                self.logical_text
+                    .replace_range(start_pos..end_pos, new_text);
                 cursor_pos = start_pos + new_text.len();
             }
             "deleteContentBackward" => {
                 if start_pos == end_pos && start_pos > 0 {
-                    self.text.replace_range(start_pos - 1..start_pos, "");
+                    self.logical_text
+                        .replace_range(start_pos - 1..start_pos, "");
                     cursor_pos = start_pos - 1;
                 } else {
-                    self.text.replace_range(start_pos..end_pos, "");
+                    self.logical_text.replace_range(start_pos..end_pos, "");
                 }
             }
             "deleteContentForward" => {
-                if start_pos == end_pos && start_pos < self.text.len() {
-                    self.text.replace_range(start_pos..start_pos + 1, "");
+                if start_pos == end_pos && start_pos < self.get_logical_text().len() {
+                    self.logical_text
+                        .replace_range(start_pos..start_pos + 1, "");
                 } else {
-                    self.text.replace_range(start_pos..end_pos, "");
+                    self.logical_text.replace_range(start_pos..end_pos, "");
                 }
             }
             other => leptos_dom::log!("unhandled: {other}"),
         }
-
-        self.rationalize(&mut cursor_pos);
         cursor_pos
     }
 
