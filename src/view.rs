@@ -65,12 +65,14 @@ pub fn Editor() -> impl IntoView {
                     data-codillon-line-id=move || *child.read().id()
                     node_ref=child.read().div_ref()
                     class=move || if child.read().instr().is_err() { "grey" } else { "" }
-                    // on:mousedown=move |ev| {
-                    //     if child.read().instr().is_ok() {
-                    //         ev.prevent_default();
-                    //         ev.stop_propagation();
-                    //     }
-                    // }
+                    on:mousedown=move |ev| {
+                        if let Some(malformed_line_id) = editor.read_untracked().malformed_line_id()
+                        && *child.read_untracked().id() != malformed_line_id
+                         {
+                            ev.prevent_default();
+                            ev.stop_propagation();
+                        }
+                    }
                 >
                     {move || {
                         rerender_signal.write();

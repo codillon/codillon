@@ -69,6 +69,19 @@ impl Editor {
         &mut self.set_selection
     }
 
+    pub fn malformed_line_id(&self) -> Option<usize>
+    {
+        for line in self.lines().read().iter()
+        {
+            if line.read().instr().is_err()
+            {
+                return Some(*line.read().id());
+            }
+        }
+        
+        None
+    }
+
     // The logic selection is defined as:
     // if self.set_selection is Some:
     //     self.set_selection
