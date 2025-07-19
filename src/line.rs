@@ -66,8 +66,9 @@ impl EditLine {
             .0
     }
 
-    // Handle leading spaces and return the selection range.
-    pub fn preprocess_input(&mut self, ev: &InputEvent) -> (usize, usize) {
+    // Gets the indices of the current inline selection.
+    // Panics if the selection spans multiple lines.
+    pub fn get_inline_range(&mut self, ev: &InputEvent) -> (usize, usize) {
         let range = ev
             .get_target_ranges()
             .get(0)
@@ -76,6 +77,7 @@ impl EditLine {
 
         let text_node = self.text_node();
 
+        // TODO: Reevaluate why we might need this.
         if range.start_container().expect("container") != text_node
             || range.end_container().expect("container") != text_node
         {
@@ -97,7 +99,7 @@ impl EditLine {
 
     // Handle insert and delete events for this line.
     pub fn handle_input(&mut self, ev: &InputEvent) -> usize {
-        let (start_pos, end_pos) = self.preprocess_input(ev);
+        let (start_pos, end_pos) = self.get_inline_range(ev);
         let mut cursor_pos = start_pos;
 
         match ev.input_type().as_str() {

@@ -78,6 +78,19 @@ impl Editor {
             .set(Some(SetSelection::Cursor(line_no + 1, 0)));
     }
 
+    // deletes content on lines in the inclusive range (start_id -> end_id]
+    // Only deletes content on the start line.
+    // Places the cursor on the start of the new (empty) line from start_id
+    // start and end must be different.
+
+    // How do we reconcile this with forwards and backwards delete of a single line
+    fn delete_selected_lines(&mut self, start_id: &usize, end_id: &usize) {
+        debug_assert!(*start_id != *end_id);
+    }
+
+    // Handles fwd or backwards single line delete (meaning we're at the end / beginning of a line)
+    fn delete_single_line() {}
+
     // Handle an input to the Editor window, by dispatching to the appropriate EditLine.
     // TODO: handle line deletion
     pub fn handle_input(&mut self, ev: InputEvent) {
@@ -91,27 +104,122 @@ impl Editor {
         let start_id = find_id_from_node(&target_range.start_container().expect("container"));
         let end_id = find_id_from_node(&target_range.end_container().expect("container"));
 
-        if start_id == end_id
-            && let Some(id) = start_id
+        leptos_dom::log!("startID: {}, endID: {}", start_id.unwrap(), end_id.unwrap());
+        leptos_dom::log!("is collapsed: {}", get_current_selection().is_collapsed());
+
+        if let Some(start_id) = start_id
+            && let Some(end_id) = end_id
         {
-            // If the InputEvent requires changing lines, handle the event at the editor-level
+            // Match inputs first, then care about whether it's multiline or not.
+            let is_collapsed = get_current_selection().is_collapsed();
+
+            // First check if there's an active selection that spans different lines
+            if start_id != end_id && !is_collapsed {
+                // Delete all lines associated with the selections and re-run the op
+                // When re-rationalizing, you need to make sure you set the cursor such that
+                // the input range is on the same line!
+                self.delete_selected_lines(&start_id, &end_id);
+                // Let the event continue? I guess we just let it continue? Unless it's a delete.
+            }
+            // If the ranges are different but there's no selection, we can just go on with normal matching
+
+            // Current bug: you can't call preprocess if the ranges aren't the same.
+            // This only happens on deletes, so you can be a bit flexible here.
+
             match ev.input_type().as_str() {
                 "insertParagraph" | "insertLineBreak" => {
-                    let line_no = self.id_map.get(&id).expect("can't find line");
+                    let line_no = self.id_map.get(&start_id).expect("can't find line");
                     let the_line = self.lines.read()[*line_no];
-                    let (start_pos, _) = the_line.write().preprocess_input(&ev);
+                    let (start_pos, _) = the_line.write().get_inline_range(&ev);
                     self.insert_line(*line_no, start_pos);
                 }
+                "deleteContentBackward" => {
+                    let line_no = self.id_map.get(&start_id).expect("can't find line");
+                    if is_collapsed {
+                        leptos_dom::log!("executing normal delete");
+                        // Let default delete behavior pass if we're deleting a single-line selection.
+                        let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
+
+                        // Normal delete doesn't work because preprocess input is cooked. Makes sense.
+
+                        self.selection
+                            .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+                        self.rationalize_selection();
+                        return;
+                    }
+                    let the_line = self.lines.read()[*line_no];
+                    // Why are you calling bogus preprocess here?
+                    // Because teh ranges aren't the same!. We actually know they are, so cope.
+                    let (pos, _) = the_line.write().get_inline_range(&ev);
+                    //leptos_dom::log!("startPos: {}, endPos: {}", start_pos, end_pos);
+                    // Nice, start pos and endpos appear not to GAF WRT the cosmetic space.
+                    if pos == 0 && *line_no > 0 {
+                        // Delete current line, combine content with previous line (if there is a previous line)
+                        leptos_dom::log!(
+                            "This is the case where we would execute deleteContentBackwards line"
+                        )
+                    }
+                }
+                "deleteContentForward" => {
+                    let line_no = self.id_map.get(&start_id).expect("can't find line");
+                    if is_collapsed {
+                        // Let default delete behavior pass if we're deleting a single-line selection.
+                        let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
+                        self.selection
+                            .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+                        self.rationalize_selection();
+                        return;
+                    }
+                    let the_line = self.lines.read()[*line_no];
+                    let (pos, _) = the_line.write().get_inline_range(&ev);
+                    //leptos_dom::log!("startPos: {}, endPos: {}", start_pos, end_pos);
+                    // Nice, start pos and endpos appear not to GAF WRT the cosmetic space.
+                    // Error on reading the line or smt.
+                    // oh subtract
+                    if (the_line.read().logical_text().is_empty()
+                        || pos == the_line.read().logical_text().chars().count() - 1)
+                        && *line_no < self.lines.read().len() - 1
+                    {
+                        // Delete the line below us, if there is one
+                        leptos_dom::log!(
+                            "This is the case where we would execute deleteContentForward line"
+                        )
+                    }
+                }
                 _ => {
-                    let line_no = self.id_map.get(&id).expect("can't find line");
+                    let line_no = self.id_map.get(&start_id).expect("can't find line");
                     let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
                     self.selection
                         .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
                 }
             }
-        } else {
-            leptos_dom::log!("unhandled: multiline select input");
         }
+
+        // if start_id == end_id
+        //     && let Some(id) = start_id
+        // {
+        //     // If the InputEvent requires changing lines, handle the event at the editor-level
+        //     match ev.input_type().as_str() {
+        //         "insertParagraph" | "insertLineBreak" => {
+        //             let line_no = self.id_map.get(&id).expect("can't find line");
+        //             let the_line = self.lines.read()[*line_no];
+        //             let (start_pos, _) = the_line.write().preprocess_input(&ev);
+        //             self.insert_line(*line_no, start_pos);
+        //         }
+        //         "deleteContentBackward" | "deleteContentForward" => {
+        //             // Cursor won't tell you whether you're at the end of the line (or at the start)
+        //         }
+        //         _ => {
+        //             let line_no = self.id_map.get(&id).expect("can't find line");
+        //             let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
+        //             self.selection
+        //                 .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+        //         }
+        //     }
+        // } else {
+        //     // It could be a normal delete, or it could be an operator on multiline.
+        //     // You need to figure out whether it's collapsed or not. Not collapsed -> delete content too (unless it's just between lines)
+        // }
 
         self.rationalize_selection();
     }
