@@ -39,9 +39,8 @@ pub fn Editor() -> impl IntoView {
     let (editor, set_editor) = signal(Editor::new());
 
     // If the selection or cursor changes, update it *after* updating the text.
-    let selection_signal = *editor.read_untracked().set_selection();
     Effect::watch(
-        move || selection_signal.get(),
+        move || editor.read_untracked().set_selection().track(),
         move |_, _, _| set_editor.write_untracked().update_selection(),
         false,
     );
@@ -53,13 +52,18 @@ pub fn Editor() -> impl IntoView {
             spellcheck="false"
             on:beforeinput=move |ev| { set_editor.write().handle_input(ev) }
             on:mousedown=move |_| {
-                set_editor.write().rationalize_selection() }
+                set_editor.write().rationalize_selection();
+            }
             on:keydown=move |ev| {
                 set_editor.write().handle_arrow(ev);
                 set_editor.write().rationalize_selection();
             }
-            on:mouseup=move |_| { set_editor.write().rationalize_selection() }
-            on:keyup=move |_| { set_editor.write().rationalize_selection() }
+            on:mouseup=move |_| {
+                set_editor.write().rationalize_selection();
+            }
+            on:keyup=move |_| {
+                set_editor.write().rationalize_selection();
+            }
         >
             <For each=move || editor.read().lines().get() key=|line| *line.read().id() let(child)>
                 <div
@@ -68,15 +72,24 @@ pub fn Editor() -> impl IntoView {
                     class=move || if child.read().instr().is_err() { "grey" } else { "" }
                     on:mousedown=move |ev| {
                         if let Some(malformed_line_id) = editor.read_untracked().malformed_line_id()
-                        && *child.read_untracked().id() != malformed_line_id
-                         {
+                            && *child.read_untracked().id() != malformed_line_id
+                        {
+                            let enforcement_area = editor.read_untracked().get_enforcement_area();
+                            editor
+                                .read_untracked()
+                                .set_selection()
+                                .set(
+                                    Some(
+                                        LogicSelection::new(enforcement_area.0, enforcement_area.1),
+                                    ),
+                                );
                             ev.prevent_default();
                             ev.stop_propagation();
                         }
                     }
                 >
                     {move || {
-                        selection_signal.write();
+                        editor.read_untracked().set_selection().write();
                         child.read().display_text().to_string()
                     }}
                 </div>

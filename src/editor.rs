@@ -35,6 +35,41 @@ impl LogicSelection {
     pub fn is_collapsed(&self) -> bool {
         self.anchor == self.focus
     }
+
+    pub fn to_rationalized_multiline(&self, editor: &Editor) -> LogicSelection {
+        let mut new_selection = *self;
+        if self.anchor.0 == self.focus.0 {
+            return new_selection;
+        }
+        let (down_curosr, up_cursor) = if self.focus.0 > self.anchor.0 {
+            (&mut new_selection.focus, &mut new_selection.anchor)
+        } else {
+            (&mut new_selection.anchor, &mut new_selection.focus)
+        };
+
+        down_curosr.1 = editor.lines.get_untracked()[down_curosr.0]
+            .read_untracked()
+            .display_char_count();
+        up_cursor.1 = 0;
+
+        new_selection
+    }
+
+    pub fn apply_enforcement_area(
+        &self,
+        enforcement_area: ((usize, usize), (usize, usize)),
+    ) -> LogicSelection {
+        let mut new_selection = *self;
+        new_selection.focus = new_selection
+            .focus
+            .min(enforcement_area.1)
+            .max(enforcement_area.0);
+        new_selection.anchor = new_selection
+            .anchor
+            .min(enforcement_area.1)
+            .max(enforcement_area.0);
+        new_selection
+    }
 }
 
 impl Default for Editor {
@@ -65,14 +100,19 @@ impl Editor {
         &self.set_selection
     }
 
-    pub fn malformed_line_id(&self) -> Option<usize> {
-        for line in self.lines().read().iter() {
+    pub fn malformed_line_no(&self) -> Option<usize> {
+        for (idx, line) in self.lines().read().iter().enumerate() {
             if line.read().instr().is_err() {
-                return Some(*line.read().id());
+                return Some(idx);
             }
         }
 
         None
+    }
+
+    pub fn malformed_line_id(&self) -> Option<usize> {
+        self.malformed_line_no()
+            .map(|line_no| *self.lines.read()[line_no].read().id())
     }
 
     // The logic selection is defined as:
@@ -204,16 +244,37 @@ impl Editor {
         self.rationalize_selection();
     }
 
+    /// (1) Inside code area
+    /// (2) According to enforcement rule
+    /// ### Returns
+    /// The begin position and ending position of the area.
+    pub fn get_enforcement_area(&self) -> ((usize, usize), (usize, usize)) {
+        if let Some(idx) = self.malformed_line_no() {
+            (
+                (idx, 0),
+                (idx, self.lines().read()[idx].read().display_char_count()),
+            )
+        } else {
+            (
+                (0, 0),
+                (
+                    self.lines().read().len() - 1,
+                    self.lines
+                        .read()
+                        .last()
+                        .expect("Empty Lines")
+                        .read()
+                        .display_char_count(),
+                ),
+            )
+        }
+    }
+
     // Special-case the handling of some arrow keys:
     // 1. Cancel an ArrowDown in the last line (to prevent the cursor from leaving the editor window)
     // 2. Make sure to skip over a cosmetic space in a logically empty line.
     // 3. Frozen according to our enforcement rule
     pub fn handle_arrow(&mut self, ev: KeyboardEvent) {
-        leptos::logging::log!(
-            "Handle {} {:?}",
-            ev.key().as_str(),
-            self.get_current_logic_selection()
-        );
         match ev.key().as_str() {
             "ArrowUp" => {
                 if let Some(selection) = self.get_current_logic_selection()
@@ -296,10 +357,16 @@ impl Editor {
         }
     }
 
-    // "Rationalize" the selection to:
-    // (1) correct situations where the selection starts or ends outside the editor area.
+    // "Rationalize" the selection to (1) make multi-line selections include the entire lines, and
+    // (2) correct situations where the selection starts or ends outside the editor area.
+    // (3) restrict to enforcement area
     pub fn rationalize_selection(&mut self) {
-        self.set_selection().set(self.get_current_logic_selection());
+        self.set_selection()
+            .set(self.get_current_logic_selection().map(|selection| {
+                selection
+                    .to_rationalized_multiline(self)
+                    .apply_enforcement_area(self.get_enforcement_area())
+            }));
     }
 
     // Execute a SetSelection to transfer Codillion's idea of the current selection / cursor position
