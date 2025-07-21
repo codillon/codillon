@@ -49,6 +49,14 @@ impl EditLine {
         self.div_ref
     }
 
+    pub fn clear_line(&mut self) {
+        self.text.clear();
+    }
+
+    pub fn append_text(&mut self, new_text: String) {
+        self.text += &new_text;
+    }
+
     // Splits the current line at POS, returning what is removed (RHS).
     pub fn split_self(&mut self, pos: usize) -> String {
         self.text.split_off(self.char_to_byte(pos))
@@ -101,9 +109,10 @@ impl EditLine {
             .clone()
             .unchecked_into::<DomRange>();
 
+        let selected_line_id = get_current_selection().get_range_at(0).unwrap();
+
         let text_node = self.text_node();
 
-        // TODO: Reevaluate why we might need this.
         if range.start_container().expect("container") != text_node
             || range.end_container().expect("container") != text_node
         {
