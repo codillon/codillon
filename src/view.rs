@@ -52,8 +52,11 @@ pub fn Editor() -> impl IntoView {
             contenteditable
             spellcheck="false"
             on:beforeinput=move |ev| { set_editor.write().handle_input(ev) }
-            on:mousedown=move |_| { set_editor.write().rationalize_selection() }
+            on:mousedown=move |_| { 
+                set_editor.write().set_selection_mut().take();
+                set_editor.write().rationalize_selection() }
             on:keydown=move |ev| {
+                set_editor.write().set_selection_mut().take();
                 set_editor.write().handle_arrow(ev);
                 set_editor.write().rationalize_selection();
             }

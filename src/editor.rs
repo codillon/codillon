@@ -87,7 +87,7 @@ impl Editor {
     //     self.set_selection
     // else:
     //     area after restricting dom selection into the text editor
-    fn get_current_logic_selection(&self) -> Option<LogicSelection> {
+    pub fn get_current_logic_selection(&self) -> Option<LogicSelection> {
         if let Some(logic_selection) = self.set_selection() {
             return Some(*logic_selection);
         }
@@ -213,13 +213,21 @@ impl Editor {
     // 1. Cancel an ArrowDown in the last line (to prevent the cursor from leaving the editor window)
     // 2. Make sure to skip over a cosmetic space in a logically empty line.
     pub fn handle_arrow(&mut self, ev: KeyboardEvent) {
+        leptos::logging::log!("Handle {} {:?}", ev.key().as_str(), self.get_current_logic_selection());
         match ev.key().as_str() {
             "ArrowDown" => {
                 if let Some(selection) = self.get_current_logic_selection()
                     && selection.is_collapsed()
-                    && selection.focus.0 == self.lines.read_untracked().len() - 1
                 {
-                    ev.prevent_default();
+                    if selection.focus.0 == self.lines.read_untracked().len() - 1
+                    {
+                        ev.prevent_default();
+                    }
+                    if let Some(malformed_line_id) = self.malformed_line_id()
+                    && malformed_line_id == *self.lines().read_untracked()[selection.focus.0].read_untracked().id()
+                    {
+                        ev.prevent_default();
+                    }
                 }
             }
             "ArrowLeft" => {
@@ -230,15 +238,7 @@ impl Editor {
                         .logical_text()
                         .is_empty()
                 {
-                    ev.prevent_default();
-                    *self.set_selection_mut() = Some(LogicSelection::new_cursor(
-                        selection.focus.0 - 1,
-                        self.lines.read_untracked()[selection.focus.0 - 1]
-                            .read_untracked()
-                            .display_text()
-                            .chars()
-                            .count(),
-                    ));
+
                 }
             }
             "ArrowRight" => {
@@ -250,6 +250,7 @@ impl Editor {
                         .logical_text()
                         .is_empty()
                 {
+                    leptos::logging::log!("Triggered");
                     ev.prevent_default();
                     *self.set_selection_mut() = 
                         Some(LogicSelection::new_cursor(selection.focus.0 + 1, 0));
@@ -285,8 +286,6 @@ impl Editor {
                 logic_selection.focus.1 as u32,
             )
             .expect("set multiline selection");
-
-        self.set_selection_mut().take();
     }
 
     // Verify that the ID map:
