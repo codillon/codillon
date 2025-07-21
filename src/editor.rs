@@ -32,7 +32,7 @@ impl LogicSelection {
         LogicSelection { anchor, focus }
     }
 
-    pub fn is_collapsed(&self) -> bool {
+    pub fn is_cursor(&self) -> bool {
         self.anchor == self.focus
     }
 
@@ -278,7 +278,6 @@ impl Editor {
         match ev.key().as_str() {
             "ArrowUp" => {
                 if let Some(selection) = self.get_current_logic_selection()
-                    && selection.is_collapsed()
                     && let Some(malformed_line_id) = self.malformed_line_id()
                     && malformed_line_id
                         == *self.lines().read_untracked()[selection.focus.0]
@@ -290,9 +289,7 @@ impl Editor {
             }
 
             "ArrowDown" => {
-                if let Some(selection) = self.get_current_logic_selection()
-                    && selection.is_collapsed()
-                {
+                if let Some(selection) = self.get_current_logic_selection() {
                     if let Some(malformed_line_id) = self.malformed_line_id()
                         && malformed_line_id
                             == *self.lines().read_untracked()[selection.focus.0]
@@ -307,7 +304,7 @@ impl Editor {
             }
             "ArrowLeft" => {
                 if let Some(selection) = self.get_current_logic_selection()
-                    && selection.is_collapsed()
+                    && selection.is_cursor()
                 {
                     if selection.focus.1 == 0
                         && let Some(malformed_line_id) = self.malformed_line_id()
@@ -335,7 +332,7 @@ impl Editor {
             }
             "ArrowRight" => {
                 if let Some(selection) = self.get_current_logic_selection()
-                    && selection.is_collapsed()
+                    && selection.is_cursor()
                 {
                     let focus_line =
                         self.lines.read_untracked()[selection.focus.0].read_untracked();
