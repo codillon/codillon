@@ -1,5 +1,5 @@
-use crate::{line::*, view::*};
-use leptos::{prelude::*, *};
+use crate::{line::*, view::*, utils};
+use leptos::{html::P, prelude::*, *};
 use std::collections::{HashMap, HashSet};
 use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
 
@@ -10,6 +10,7 @@ pub struct Editor {
     id_map: HashMap<usize, usize>,
     lines: RwSignal<Vec<RwSignal<EditLine>>>,
     selection: RwSignal<Option<SetSelection>>,
+    parsed: Vec<(Result<Option<utils::InstrInfo>, Error>, Option<wasmparser::Operator>)>,
 }
 
 // The SetSelection struct describes changes to be made to the browser's global selection.
@@ -37,6 +38,7 @@ impl Editor {
             ]), // demo initial contents
             id_map: HashMap::from([(3, 0), (5, 1), (7, 2)]),
             selection: RwSignal::new(None),
+            parsed: Vec::new(),
         }
     }
 
@@ -46,6 +48,51 @@ impl Editor {
 
     pub fn selection(&self) -> RwSignal<Option<SetSelection>> {
         self.selection
+    }
+
+    pub fn update_parsed(&mut self) {
+        let lines: Vec<&str> = self.lines.get_untracked().into_iter().map(|line_signal| line_signal.read().logical_text()).collect();
+        let instr_infos: Vec<_> = lines.iter().map(|line| utils:: parse_instr(line)).collect();
+        let mut aligned_ops: Vec<Option<wasmparser::Operator>> = Vec::new();
+        if !instr_infos.iter().any(|instr_info| instr_info.is_err()) {
+            let wasm_bin_result = utils::str_to_wasmbin(&lines.join("\n"));
+            if !wasm_bin_result.is_err(){
+                let wasm_bin = wasm_bin_result.unwrap();
+                let ops = utils::wasmbin_to_operators(&wasm_bin);
+                if !ops.is_err() {
+                    let mut ops_iter = ops.unwrap().into_iter();
+                    for line in lines {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() || trimmed.starts_with(";;") {
+                            aligned_ops.push(None);
+                        } else {
+                            aligned_ops.push(ops_iter.next());
+                        }
+                    }
+                    self.parsed = (0..lines.len()).map(|i| {
+                        let instr_info = instr_infos.get(i).unwrap();
+                        let op = aligned_ops.get(i).unwrap().unwrap();
+                        (instr_info, op)
+                    }).collect();
+                } else {
+                    self.parsed = (0..lines.len()).map(|i| {
+                        let instr_info = instr_infos.get(i).unwrap();
+                        (instr_info, None)
+                    }).collect();
+                }
+            } else {
+                self.parsed = (0..lines.len()).map(|i| {
+                    let instr_info = instr_infos.get(i).unwrap();
+                    (instr_info, None)
+                }).collect();
+            }
+        } else {
+            self.parsed = (0..lines.len()).map(|i| {
+                let instr_info = instr_infos.get(i).unwrap();
+                (instr_info, None)
+            }).collect();
+        }
+        leptos::logging::log!("{:?}", self.parsed);
     }
 
     fn insert_line(&mut self, line_no: usize, start_pos: usize) {
@@ -113,6 +160,7 @@ impl Editor {
             leptos_dom::log!("unhandled: multiline select input");
         }
 
+        self.update_parsed();
         self.rationalize_selection();
     }
 

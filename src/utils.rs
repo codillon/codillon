@@ -80,6 +80,30 @@ pub fn is_well_formed_func(lines: &str) -> bool {
     parse_text().is_ok()
 }
 
+pub fn str_to_wasmbin(lines: &str) -> Result<Vec<u8>> {
+    let func = format!("(module (func\n{lines}\n))");
+    let wasm_bin = wat::parse_str(func)?;
+    Ok(wasm_bin)
+}
+
+pub fn wasmbin_to_operators(wasm_bin: &[u8]) -> Result<Vec<wasmparser::Operator>> {
+    let mut validator = wasmparser::Validator::new();
+    let parser = wasmparser::Parser::new(0);
+
+    let mut ops = Vec::new();
+
+    for payload in parser.parse_all(&wasm_bin) {
+        if let wasmparser::ValidPayload::Func(_, body) = validator.payload(&payload?)? {
+            for op in body.get_operators_reader()? {
+                let op = op?;
+                ops.push(op);
+            }
+        }
+    }
+
+    Ok(ops)
+}
+
 /// Returns input and output types for each instruction in a binary Wasm module
 ///
 /// # Parameters
@@ -443,10 +467,13 @@ mod tests {
             .into_iter()
             .map(String::from)
             .collect::<Vec<String>>();
-        let lines = "block\nend";
+        //let lines = "block\nend";
+        let lines = ";;hello\nblock\nend";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         assert_eq!(print_operands(&wasm_bin)?, output);
         Ok(())
     }
 }
+
+
