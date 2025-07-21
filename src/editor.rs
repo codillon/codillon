@@ -104,11 +104,18 @@ impl Editor {
         let start_id = find_id_from_node(&target_range.start_container().expect("container"));
         let end_id = find_id_from_node(&target_range.end_container().expect("container"));
 
+        let selected_line_id = if let Some(selection_node) = get_current_selection().focus_node() {
+            find_id_from_node(&selection_node)
+        } else {
+            None
+        };
+
         leptos_dom::log!("startID: {}, endID: {}", start_id.unwrap(), end_id.unwrap());
         leptos_dom::log!("is collapsed: {}", get_current_selection().is_collapsed());
 
         if let Some(start_id) = start_id
             && let Some(end_id) = end_id
+            && let Some(line_id) = selected_line_id
         {
             // Match inputs first, then care about whether it's multiline or not.
             let is_collapsed = get_current_selection().is_collapsed();
@@ -128,56 +135,86 @@ impl Editor {
 
             match ev.input_type().as_str() {
                 "insertParagraph" | "insertLineBreak" => {
+                    // Line no can't come from the start event bruh
+                    // When we straddle a boundary shit gets tuff
+                    // There could be two line numbers
                     let line_no = self.id_map.get(&start_id).expect("can't find line");
                     let the_line = self.lines.read()[*line_no];
                     let (start_pos, _) = the_line.write().get_inline_range(&ev);
                     self.insert_line(*line_no, start_pos);
                 }
                 "deleteContentBackward" => {
+                    // Why does setting the cursor here work?
+                    // Oh it works when the line IDs are the same
                     let line_no = self.id_map.get(&start_id).expect("can't find line");
-                    if is_collapsed {
-                        leptos_dom::log!("executing normal delete");
-                        // Let default delete behavior pass if we're deleting a single-line selection.
-                        let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
 
-                        // Normal delete doesn't work because preprocess input is cooked. Makes sense.
-
-                        self.selection
-                            .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
-                        self.rationalize_selection();
-                        return;
-                    }
                     let the_line = self.lines.read()[*line_no];
-                    // Why are you calling bogus preprocess here?
-                    // Because teh ranges aren't the same!. We actually know they are, so cope.
-                    let (pos, _) = the_line.write().get_inline_range(&ev);
+                    // End range is always correct. Either the range is always our line,
+                    // or we're looking at the line before us.
+                    let pos = the_line.write().get_inline_range_end(&ev);
                     //leptos_dom::log!("startPos: {}, endPos: {}", start_pos, end_pos);
                     // Nice, start pos and endpos appear not to GAF WRT the cosmetic space.
+
+                    leptos_dom::log!(
+                        "pos {}  lineno {} logicalsize {}",
+                        pos,
+                        *line_no,
+                        the_line.read().logical_text().len()
+                    );
+                    // Pos = 0 ignores the cosmetic space
                     if pos == 0 && *line_no > 0 {
                         // Delete current line, combine content with previous line (if there is a previous line)
                         leptos_dom::log!(
                             "This is the case where we would execute deleteContentBackwards line"
                         )
                     }
-                }
-                "deleteContentForward" => {
-                    let line_no = self.id_map.get(&start_id).expect("can't find line");
+
+                    // let line_no_start = self.id_map.get(&start_id).expect("can't find line");
+                    // let line_no_end = self.id_map.get(&start_id).expect("can't find line");
+
                     if is_collapsed {
+                        leptos_dom::log!("executing normal delete");
                         // Let default delete behavior pass if we're deleting a single-line selection.
                         let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
+
+                        // Normal delete doesn't work because preprocess input is cooked. Makes sense.
+                        // That stinks. We need to gaslight the normal delete
+
                         self.selection
                             .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
                         self.rationalize_selection();
                         return;
+                    } else {
+                        leptos_dom::log!("normal browser behavior");
                     }
+                    // This line number isn't necessarily correct.
+                    // We know the ranges aren't the same in this case (can't be a selection)
+                    // So we need to know which line is the right one
+                    // We should ge the line number here from the selection and not from the input event.
+                    // It could be either depending which is insane.
+                }
+                "deleteContentForward" => {
+                    let line_no = self.id_map.get(&line_id).expect("can't find line");
+
                     let the_line = self.lines.read()[*line_no];
-                    let (pos, _) = the_line.write().get_inline_range(&ev);
+                    // Start is right here because if we're at the end of the line we're looking at the next thing.
+                    // And if we're at the start of the line, then this is irrelevant
+                    // Note that pos ignores the cosmetic space
+                    let pos = the_line.write().get_inline_range_start(&ev);
                     //leptos_dom::log!("startPos: {}, endPos: {}", start_pos, end_pos);
                     // Nice, start pos and endpos appear not to GAF WRT the cosmetic space.
                     // Error on reading the line or smt.
                     // oh subtract
+
+                    leptos_dom::log!(
+                        "pos {}  lineno {} logicalsize {}",
+                        pos,
+                        *line_no,
+                        the_line.read().logical_text().len()
+                    );
+
                     if (the_line.read().logical_text().is_empty()
-                        || pos == the_line.read().logical_text().chars().count() - 1)
+                        || pos == the_line.read().logical_text().chars().count())
                         && *line_no < self.lines.read().len() - 1
                     {
                         // Delete the line below us, if there is one
@@ -185,6 +222,16 @@ impl Editor {
                             "This is the case where we would execute deleteContentForward line"
                         )
                     }
+
+                    if is_collapsed && start_id == end_id {
+                        // Let default delete behavior pass if we're deleting a single-line selection.
+                        let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
+                        self.selection
+                            .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+                        self.rationalize_selection();
+                        return;
+                    }
+                    // You don't care about position, you only care if the logical text is empty
                 }
                 _ => {
                     let line_no = self.id_map.get(&start_id).expect("can't find line");

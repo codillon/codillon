@@ -66,6 +66,32 @@ impl EditLine {
             .0
     }
 
+    // These functions should only be used if you know
+    // that the input event straddles two ranges and you
+    // know that one is correct for your case. See the
+    // Editor's handle_input delete cases.
+    pub fn get_inline_range_start(&mut self, ev: &InputEvent) -> usize {
+        let range = ev
+            .get_target_ranges()
+            .get(0)
+            .clone()
+            .unchecked_into::<DomRange>();
+
+        let start_char_pos = range.start_offset().expect("offset") as usize;
+        self.char_to_byte(start_char_pos)
+    }
+
+    pub fn get_inline_range_end(&mut self, ev: &InputEvent) -> usize {
+        let range = ev
+            .get_target_ranges()
+            .get(0)
+            .clone()
+            .unchecked_into::<DomRange>();
+
+        let end_char_pos = range.end_offset().expect("offset") as usize;
+        self.char_to_byte(end_char_pos)
+    }
+
     // Gets the indices of the current inline selection.
     // Panics if the selection spans multiple lines.
     pub fn get_inline_range(&mut self, ev: &InputEvent) -> (usize, usize) {
