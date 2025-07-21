@@ -39,9 +39,9 @@ pub fn Editor() -> impl IntoView {
     let (editor, set_editor) = signal(Editor::new());
 
     // If the selection or cursor changes, update it *after* updating the text.
-    let rerender_signal = RwSignal::new(());
+    let selection_signal = *editor.read_untracked().set_selection();
     Effect::watch(
-        move || rerender_signal.get(),
+        move || selection_signal.get(),
         move |_, _, _| set_editor.write_untracked().update_selection(),
         false,
     );
@@ -52,11 +52,9 @@ pub fn Editor() -> impl IntoView {
             contenteditable
             spellcheck="false"
             on:beforeinput=move |ev| { set_editor.write().handle_input(ev) }
-            on:mousedown=move |_| { 
-                set_editor.write().set_selection_mut().take();
+            on:mousedown=move |_| {
                 set_editor.write().rationalize_selection() }
             on:keydown=move |ev| {
-                set_editor.write().set_selection_mut().take();
                 set_editor.write().handle_arrow(ev);
                 set_editor.write().rationalize_selection();
             }
@@ -78,7 +76,7 @@ pub fn Editor() -> impl IntoView {
                     }
                 >
                     {move || {
-                        rerender_signal.write();
+                        selection_signal.write();
                         child.read().display_text().to_string()
                     }}
                 </div>

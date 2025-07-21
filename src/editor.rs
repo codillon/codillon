@@ -9,7 +9,7 @@ pub struct Editor {
     next_id: usize,
     id_map: HashMap<usize, usize>,
     lines: RwSignal<Vec<RwSignal<EditLine>>>,
-    set_selection: Option<LogicSelection>, // Be used to update selection if Some
+    set_selection: RwSignal<Option<LogicSelection>>, // Be used to update selection if Some
 }
 
 // The LogicSelection struct describes the logic positon of the selection area
@@ -53,7 +53,7 @@ impl Editor {
                 RwSignal::new(EditLine::new(7, String::from("i32.add"))),
             ]), // demo initial contents
             id_map: HashMap::from([(3, 0), (5, 1), (7, 2)]),
-            set_selection: None,
+            set_selection: RwSignal::new(None),
         }
     }
 
@@ -61,24 +61,17 @@ impl Editor {
         self.lines
     }
 
-    pub fn set_selection(&self) -> &Option<LogicSelection> {
+    pub fn set_selection(&self) -> &RwSignal<Option<LogicSelection>> {
         &self.set_selection
     }
 
-    pub fn set_selection_mut(&mut self) -> &mut Option<LogicSelection> {
-        &mut self.set_selection
-    }
-
-    pub fn malformed_line_id(&self) -> Option<usize>
-    {
-        for line in self.lines().read().iter()
-        {
-            if line.read().instr().is_err()
-            {
+    pub fn malformed_line_id(&self) -> Option<usize> {
+        for line in self.lines().read().iter() {
+            if line.read().instr().is_err() {
                 return Some(*line.read().id());
             }
         }
-        
+
         None
     }
 
@@ -88,8 +81,8 @@ impl Editor {
     // else:
     //     area after restricting dom selection into the text editor
     pub fn get_current_logic_selection(&self) -> Option<LogicSelection> {
-        if let Some(logic_selection) = self.set_selection() {
-            return Some(*logic_selection);
+        if let Some(logic_selection) = self.set_selection().get() {
+            return Some(logic_selection);
         }
         let dom_selection = get_current_domselection();
         let anchor = dom_selection.anchor_node()?;
@@ -169,7 +162,8 @@ impl Editor {
 
         self.next_id += 1;
 
-        *self.set_selection_mut() = Some(LogicSelection::new_cursor(line_no + 1, 0));
+        self.set_selection()
+            .set(Some(LogicSelection::new_cursor(line_no + 1, 0)));
     }
 
     // Handle an input to the Editor window, by dispatching to the appropriate EditLine.
@@ -199,7 +193,8 @@ impl Editor {
                 _ => {
                     let line_no = self.id_map.get(&id).expect("can't find line");
                     let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
-                    *self.set_selection_mut() = Some(LogicSelection::new_cursor(*line_no, new_cursor_pos));
+                    self.set_selection()
+                        .set(Some(LogicSelection::new_cursor(*line_no, new_cursor_pos)));
                 }
             }
         } else {
@@ -212,20 +207,39 @@ impl Editor {
     // Special-case the handling of some arrow keys:
     // 1. Cancel an ArrowDown in the last line (to prevent the cursor from leaving the editor window)
     // 2. Make sure to skip over a cosmetic space in a logically empty line.
+    // 3. Frozen according to our enforcement rule
     pub fn handle_arrow(&mut self, ev: KeyboardEvent) {
-        leptos::logging::log!("Handle {} {:?}", ev.key().as_str(), self.get_current_logic_selection());
+        leptos::logging::log!(
+            "Handle {} {:?}",
+            ev.key().as_str(),
+            self.get_current_logic_selection()
+        );
         match ev.key().as_str() {
+            "ArrowUp" => {
+                if let Some(selection) = self.get_current_logic_selection()
+                    && selection.is_collapsed()
+                    && let Some(malformed_line_id) = self.malformed_line_id()
+                    && malformed_line_id
+                        == *self.lines().read_untracked()[selection.focus.0]
+                            .read_untracked()
+                            .id()
+                {
+                    ev.prevent_default();
+                }
+            }
+
             "ArrowDown" => {
                 if let Some(selection) = self.get_current_logic_selection()
                     && selection.is_collapsed()
                 {
-                    if selection.focus.0 == self.lines.read_untracked().len() - 1
+                    if let Some(malformed_line_id) = self.malformed_line_id()
+                        && malformed_line_id
+                            == *self.lines().read_untracked()[selection.focus.0]
+                                .read_untracked()
+                                .id()
                     {
                         ev.prevent_default();
-                    }
-                    if let Some(malformed_line_id) = self.malformed_line_id()
-                    && malformed_line_id == *self.lines().read_untracked()[selection.focus.0].read_untracked().id()
-                    {
+                    } else if selection.focus.0 == self.lines.read_untracked().len() - 1 {
                         ev.prevent_default();
                     }
                 }
@@ -233,27 +247,49 @@ impl Editor {
             "ArrowLeft" => {
                 if let Some(selection) = self.get_current_logic_selection()
                     && selection.is_collapsed()
-                    && self.lines.read_untracked()[selection.focus.0]
-                        .read_untracked()
-                        .logical_text()
-                        .is_empty()
                 {
-
+                    if selection.focus.1 == 0
+                        && let Some(malformed_line_id) = self.malformed_line_id()
+                        && malformed_line_id
+                            == *self.lines().read_untracked()[selection.focus.0]
+                                .read_untracked()
+                                .id()
+                    {
+                        ev.prevent_default();
+                    } else if selection.focus.0 > 0
+                        && self.lines.read_untracked()[selection.focus.0]
+                            .read_untracked()
+                            .logical_text()
+                            .is_empty()
+                    {
+                        ev.prevent_default();
+                        self.set_selection().set(Some(LogicSelection::new_cursor(
+                            selection.focus.0 - 1,
+                            self.lines.read()[selection.focus.0 - 1]
+                                .read()
+                                .display_char_count(),
+                        )));
+                    }
                 }
             }
             "ArrowRight" => {
                 if let Some(selection) = self.get_current_logic_selection()
                     && selection.is_collapsed()
-                    && selection.focus.0 < self.lines.read_untracked().len() - 1
-                    && self.lines.read_untracked()[selection.focus.0]
-                        .read_untracked()
-                        .logical_text()
-                        .is_empty()
                 {
-                    leptos::logging::log!("Triggered");
-                    ev.prevent_default();
-                    *self.set_selection_mut() = 
-                        Some(LogicSelection::new_cursor(selection.focus.0 + 1, 0));
+                    let focus_line =
+                        self.lines.read_untracked()[selection.focus.0].read_untracked();
+                    if selection.focus.1 == focus_line.display_char_count()
+                        && let Some(malformed_line_id) = self.malformed_line_id()
+                        && malformed_line_id == *focus_line.id()
+                    {
+                        ev.prevent_default();
+                    } else if selection.focus.0 < self.lines.read_untracked().len() - 1
+                        && focus_line.logical_text().is_empty()
+                    {
+                        ev.prevent_default();
+                        self.set_selection
+                            .set(Some(LogicSelection::new_cursor(selection.focus.0 + 1, 0)));
+                    }
                 }
             }
             _ => (),
@@ -263,14 +299,14 @@ impl Editor {
     // "Rationalize" the selection to:
     // (1) correct situations where the selection starts or ends outside the editor area.
     pub fn rationalize_selection(&mut self) {
-        *self.set_selection_mut() = self.get_current_logic_selection();
+        self.set_selection().set(self.get_current_logic_selection());
     }
 
     // Execute a SetSelection to transfer Codillion's idea of the current selection / cursor position
     // to the browser. We want Leptos to run this (and update the selection) *after* updating
     // line contents, which will warp the cursor back to the beginning of the line.
     pub fn update_selection(&mut self) {
-        let Some(logic_selection) = self.set_selection() else {
+        let Some(logic_selection) = self.set_selection().get_untracked() else {
             return;
         };
         let anchor_line = &self.lines().read_untracked()[logic_selection.anchor.0].read_untracked();
@@ -286,6 +322,8 @@ impl Editor {
                 logic_selection.focus.1 as u32,
             )
             .expect("set multiline selection");
+
+        self.set_selection().write_untracked().take();
     }
 
     // Verify that the ID map:
