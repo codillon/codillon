@@ -1,21 +1,56 @@
-use crate::view::*;
+use std::ops::{Deref, DerefMut};
+
+use crate::{
+    utils::{InstrInfo, parse_instr},
+    view::*,
+};
+use anyhow::{Ok, Result};
 use leptos::prelude::*;
 use web_sys::{InputEvent, wasm_bindgen::JsCast};
 
 // The `EditLine` reflects the state of an individual line.
 // TODO: WebAssembly syntax checking
+#[derive(Debug)]
 pub struct EditLine {
     id: usize,
-    text: String,
+    // Text invariant:
+    // Empty logical text => physical text is EXACTLY the cosmetic space.
+    // Nonempty logical text => physical text contains NO cosmetic space.
+    logical_text: String,
     div_ref: DivRef,
+    instr: Result<Option<InstrInfo>>,
+}
+
+pub struct TextGuard<'a> {
+    inner: &'a mut EditLine,
+}
+
+impl Deref for TextGuard<'_> {
+    type Target = String;
+    fn deref(&self) -> &Self::Target {
+        &self.inner.logical_text
+    }
+}
+
+impl DerefMut for TextGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner.logical_text
+    }
+}
+
+impl Drop for TextGuard<'_> {
+    fn drop(&mut self) {
+        self.inner.update_instr();
+    }
 }
 
 impl EditLine {
     pub fn new(id: usize, start_text: String) -> Self {
         Self {
             id,
-            text: start_text,
+            logical_text: start_text,
             div_ref: DivRef::new(),
+            instr: Ok(None),
         }
     }
 
@@ -24,25 +59,29 @@ impl EditLine {
     }
 
     pub fn logical_text(&self) -> &str {
-        &self.text
+        &self.logical_text
     }
 
     pub fn display_text(&self) -> &str {
         const COSMETIC_SPACE: &str = "\u{FEFF}";
 
-        if self.text.is_empty() {
+        if self.logical_text().is_empty() {
             COSMETIC_SPACE
         } else {
-            &self.text
+            self.logical_text()
         }
     }
 
     pub fn char_count(&self) -> usize {
-        self.text.chars().count() // TODO: memoize
+        self.logical_text().chars().count() // TODO: memoize
     }
 
     pub fn display_char_count(&self) -> usize {
         self.display_text().chars().count() // TODO: memoize
+    }
+
+    pub fn logic_text_mut(&mut self) -> TextGuard {
+        TextGuard { inner: self }
     }
 
     pub fn div_ref(&self) -> DivRef {
@@ -51,15 +90,24 @@ impl EditLine {
 
     // Splits the current line at POS, returning what is removed (RHS).
     pub fn split_self(&mut self, pos: usize) -> String {
-        self.text.split_off(self.char_to_byte(pos))
+        let byte_pos = self.char_to_byte(pos);
+        self.logic_text_mut().split_off(byte_pos)
+    }
+
+    pub fn instr(&self) -> &Result<Option<InstrInfo>> {
+        &self.instr
+    }
+
+    fn update_instr(&mut self) {
+        self.instr = parse_instr(self.logical_text());
     }
 
     fn char_to_byte(&self, char_pos: usize) -> usize {
         if char_pos >= self.char_count() {
-            return self.text.len();
+            return self.logical_text().len();
         }
 
-        self.text
+        self.logical_text()
             .char_indices()
             .nth(char_pos)
             .unwrap_or_else(|| panic!("char pos {char_pos}"))
@@ -103,22 +151,25 @@ impl EditLine {
         match ev.input_type().as_str() {
             "insertText" => {
                 let new_text = &ev.data().unwrap_or_default();
-                self.text.replace_range(start_pos..end_pos, new_text);
+                self.logic_text_mut()
+                    .replace_range(start_pos..end_pos, new_text);
                 cursor_pos = start_pos + new_text.chars().count();
             }
             "deleteContentBackward" => {
                 if start_pos == end_pos && start_pos > 0 {
-                    self.text.replace_range(start_pos - 1..start_pos, "");
+                    self.logic_text_mut()
+                        .replace_range(start_pos - 1..start_pos, "");
                     cursor_pos = start_pos - 1;
                 } else {
-                    self.text.replace_range(start_pos..end_pos, "");
+                    self.logic_text_mut().replace_range(start_pos..end_pos, "");
                 }
             }
             "deleteContentForward" => {
-                if start_pos == end_pos && start_pos < self.text.chars().count() {
-                    self.text.replace_range(start_pos..start_pos + 1, "");
+                if start_pos == end_pos && start_pos < self.logical_text().chars().count() {
+                    self.logic_text_mut()
+                        .replace_range(start_pos..start_pos + 1, "");
                 } else {
-                    self.text.replace_range(start_pos..end_pos, "");
+                    self.logic_text_mut().replace_range(start_pos..end_pos, "");
                 }
             }
             other => leptos::leptos_dom::log!("unhandled: {other}"),
