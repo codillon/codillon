@@ -1,7 +1,8 @@
 use crate::{line::*, view::*};
 use leptos::{prelude::*, *};
+use std::cmp;
 use std::collections::{HashMap, HashSet};
-use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
+use web_sys::{InputEvent, KeyboardEvent};
 
 // The "Editor" holds a vector of EditLines, as well as bookkeeping information related to
 // creating new lines and finding lines given their unique long-lived ID.
@@ -197,31 +198,35 @@ impl Editor {
     pub fn handle_input(&mut self, ev: InputEvent) {
         ev.prevent_default();
 
-        let target_range = ev
-            .get_target_ranges()
-            .get(0)
-            .clone()
-            .unchecked_into::<web_sys::Range>();
-        let start_id = find_id_from_node(&target_range.start_container().expect("container"));
-        let end_id = find_id_from_node(&target_range.end_container().expect("container"));
+        let selection = get_current_selection();
+        let Some(anchor) = selection.anchor_node() else {
+            return;
+        };
+        let focus = selection.focus_node().expect("focus");
+
+        let anchor_id = find_id_from_node(&anchor);
+        let focus_id = find_id_from_node(&focus);
 
         // When the InputEvent is a deletion on a line boundary, it *sometimes* contains
         // the ID of the line that is the target of the operation (as either the start or end ID).
         // The cosmetic space prevents this behavior from being reliable, so we can get a reliable
         // read of the current line from the current selection.
-        let selected_line_id = if let Some(selection_node) = get_current_selection().focus_node() {
+        let selected_line_id = if let Some(selection_node) = selection.focus_node() {
             find_id_from_node(&selection_node)
         } else {
             None
         };
 
-        if let Some(start_id) = start_id
-            && let Some(end_id) = end_id
+        if let Some(anchor_id) = anchor_id
+            && let Some(focus_id) = focus_id
             && let Some(line_id) = selected_line_id
         {
+            let start_line_id = cmp::min(anchor_id, focus_id);
+            let end_line_id = cmp::max(anchor_id, focus_id);
+
             let is_collapsed = get_current_selection().is_collapsed();
-            let start_line_no: &usize = self.id_map.get(&start_id).expect("can't find line");
-            let end_line_no: &usize = self.id_map.get(&end_id).expect("can't find line");
+            let start_line_no: &usize = self.id_map.get(&start_line_id).expect("can't find line");
+            let end_line_no: &usize = self.id_map.get(&end_line_id).expect("can't find line");
 
             // First check if there's an active selection that spans different lines.
             if start_line_no != end_line_no && !is_collapsed {
@@ -233,10 +238,10 @@ impl Editor {
 
             match ev.input_type().as_str() {
                 "insertParagraph" | "insertLineBreak" => {
-                    let line_no: &usize = self.id_map.get(&start_id).expect("can't find line");
+                    let line_no: &usize = self.id_map.get(&start_line_id).expect("can't find line");
                     let the_line = self.lines.read()[*line_no];
-                    let (start_pos, _) = the_line.write().get_inline_range(&ev);
-                    self.insert_line(*line_no, start_pos);
+                    let pos = the_line.write().get_inline_range_start(&ev);
+                    self.insert_line(*line_no, pos);
                 }
                 "deleteContentBackward" => {
                     let line_no = self.id_map.get(&line_id).expect("can't find line");
@@ -270,7 +275,7 @@ impl Editor {
                     }
                 }
                 _ => {
-                    let line_no = self.id_map.get(&start_id).expect("can't find line");
+                    let line_no = self.id_map.get(&start_line_id).expect("can't find line");
                     let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
                     self.selection
                         .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
