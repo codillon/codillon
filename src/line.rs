@@ -74,8 +74,8 @@ impl EditLine {
             .0
     }
 
-    // These functions should only be used if you know
-    // that the input event straddles two ranges and you
+    // These functions should only be used when
+    // the input event straddles two ranges and you
     // know that one is correct for your case. See the
     // Editor's handle_input delete cases.
     pub fn get_inline_range_start(&mut self, ev: &InputEvent) -> usize {

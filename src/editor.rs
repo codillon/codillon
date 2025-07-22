@@ -225,7 +225,8 @@ impl Editor {
 
             // First check if there's an active selection that spans different lines.
             if start_line_no != end_line_no && !is_collapsed {
-                // Delete all lines associated with the selections and re-run the op.
+                // Delete all lines associated with the selections.
+                // TODO: Re-run the desired operation.
                 self.delete_selected_lines(*start_line_no, *end_line_no);
                 return;
             }
@@ -239,8 +240,8 @@ impl Editor {
                 }
                 "deleteContentBackward" => {
                     let line_no = self.id_map.get(&line_id).expect("can't find line");
-
                     let the_line = self.lines.read()[*line_no];
+
                     let pos = the_line.write().get_inline_range_end(&ev);
                     // Pos = 0 ignores the cosmetic space
                     if pos == 0 && *line_no > 0 {
