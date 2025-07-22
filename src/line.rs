@@ -49,6 +49,14 @@ impl EditLine {
         self.div_ref
     }
 
+    pub fn clear_line(&mut self) {
+        self.text.clear();
+    }
+
+    pub fn append_text(&mut self, new_text: String) {
+        self.text += &new_text;
+    }
+
     // Splits the current line at POS, returning what is removed (RHS).
     pub fn split_self(&mut self, pos: usize) -> String {
         self.text.split_off(self.char_to_byte(pos))
@@ -66,8 +74,35 @@ impl EditLine {
             .0
     }
 
-    // Handle leading spaces and return the selection range.
-    pub fn preprocess_input(&mut self, ev: &InputEvent) -> (usize, usize) {
+    // These functions should only be used when
+    // the input event straddles two ranges and you
+    // know that one is correct for your case. See the
+    // Editor's handle_input delete cases.
+    pub fn get_inline_range_start(&mut self, ev: &InputEvent) -> usize {
+        let range = ev
+            .get_target_ranges()
+            .get(0)
+            .clone()
+            .unchecked_into::<DomRange>();
+
+        let start_char_pos = range.start_offset().expect("offset") as usize;
+        self.char_to_byte(start_char_pos)
+    }
+
+    pub fn get_inline_range_end(&mut self, ev: &InputEvent) -> usize {
+        let range = ev
+            .get_target_ranges()
+            .get(0)
+            .clone()
+            .unchecked_into::<DomRange>();
+
+        let end_char_pos = range.end_offset().expect("offset") as usize;
+        self.char_to_byte(end_char_pos)
+    }
+
+    // Gets the indices of the current inline selection.
+    // Panics if the selection spans multiple lines.
+    pub fn get_inline_range(&mut self, ev: &InputEvent) -> (usize, usize) {
         let range = ev
             .get_target_ranges()
             .get(0)
@@ -97,7 +132,7 @@ impl EditLine {
 
     // Handle insert and delete events for this line.
     pub fn handle_input(&mut self, ev: &InputEvent) -> usize {
-        let (start_pos, end_pos) = self.preprocess_input(ev);
+        let (start_pos, end_pos) = self.get_inline_range(ev);
         let mut cursor_pos = start_pos;
 
         match ev.input_type().as_str() {

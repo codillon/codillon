@@ -1,7 +1,8 @@
 use crate::{line::*, view::*};
 use leptos::{prelude::*, *};
+use std::cmp;
 use std::collections::{HashMap, HashSet};
-use web_sys::{InputEvent, KeyboardEvent, wasm_bindgen::JsCast};
+use web_sys::{InputEvent, KeyboardEvent};
 
 // The "Editor" holds a vector of EditLines, as well as bookkeeping information related to
 // creating new lines and finding lines given their unique long-lived ID.
@@ -78,39 +79,208 @@ impl Editor {
             .set(Some(SetSelection::Cursor(line_no + 1, 0)));
     }
 
+    // Deletes lines on the range (start_id -> end_id]
+    // The cursor will remain on the line denoted by start_id
+    // at position 0 (with text cleared).
+    fn delete_selected_lines(&mut self, start_line: usize, end_line: usize) {
+        debug_assert!(start_line < end_line);
+
+        // Find all ID's to delete.
+        let mut ids_to_remove: HashSet<usize> = HashSet::new();
+        for k in self.id_map.keys() {
+            let current_line = self.id_map[k];
+            if current_line > start_line && current_line <= end_line {
+                ids_to_remove.insert(*k);
+            }
+        }
+
+        // Re-map lines that will be affected by this change.
+        for val in self.id_map.values_mut() {
+            if *val > end_line {
+                *val -= end_line - start_line;
+            }
+        }
+
+        for id in ids_to_remove {
+            self.id_map.remove(&id);
+        }
+
+        for _ in 0..end_line - start_line {
+            self.lines.write().remove(start_line + 1);
+        }
+
+        // Verify the integrity of the id map.
+        debug_assert!(self.id_map_is_valid());
+
+        // Clear current text.
+        self.lines().write()[start_line].write().clear_line();
+
+        self.selection
+            .set(Some(SetSelection::Cursor(start_line, 0)));
+    }
+
+    // Deletes the current line, moving any orphaned text to the previous line.
+    // Can only be called if there is a previous line.
+    fn delete_line_backward(&mut self, current_line_id: usize) {
+        let current_line_no = self.id_map[&current_line_id];
+        debug_assert!(current_line_no > 0);
+        let the_current_line = self.lines().read()[current_line_no].read();
+        let current_line_text = the_current_line.logical_text();
+        let previous_line_text_len = self.lines().read()[current_line_no - 1]
+            .read()
+            .logical_text()
+            .len();
+        self.id_map.remove(&current_line_id);
+
+        // Re-map lines that will be affected by this change.
+        for val in self.id_map.values_mut() {
+            if *val > current_line_no {
+                *val -= 1;
+            }
+        }
+
+        self.lines.write().remove(current_line_no);
+        debug_assert!(self.id_map_is_valid());
+
+        self.lines().write()[current_line_no - 1]
+            .write()
+            .append_text(current_line_text.to_string());
+
+        self.selection.set(Some(SetSelection::Cursor(
+            current_line_no - 1,
+            previous_line_text_len,
+        )));
+    }
+
+    // Deletes the next line, appending any orphaned text to the current line.
+    // Can only be called if there is a next line.
+    fn delete_line_forward(&mut self, current_line_id: usize) {
+        let current_line_no = self.id_map[&current_line_id];
+        debug_assert!(current_line_no < self.lines().read().len() - 1);
+        let the_next_line = self.lines().read()[current_line_no + 1].read();
+        let next_line_text = the_next_line.logical_text();
+        let current_line_text_len = self.lines().read()[current_line_no]
+            .read()
+            .logical_text()
+            .len();
+        let previous_line_entry = self
+            .id_map
+            .iter()
+            .find(|entry| *entry.1 == current_line_no + 1);
+
+        if let Some(entry) = previous_line_entry {
+            let id = *entry.0;
+            let line_no = *entry.1;
+            self.id_map.remove(&id);
+
+            // Re-map lines that will be affected by this change.
+            for val in self.id_map.values_mut() {
+                if *val > current_line_no + 1 {
+                    *val -= 1;
+                }
+            }
+
+            self.lines.write().remove(line_no);
+            debug_assert!(self.id_map_is_valid());
+
+            self.lines().write()[current_line_no]
+                .write()
+                .append_text(next_line_text.to_string());
+
+            self.selection.set(Some(SetSelection::Cursor(
+                current_line_no,
+                current_line_text_len,
+            )));
+        }
+    }
+
     // Handle an input to the Editor window, by dispatching to the appropriate EditLine.
-    // TODO: handle line deletion
     pub fn handle_input(&mut self, ev: InputEvent) {
         ev.prevent_default();
 
-        let target_range = ev
-            .get_target_ranges()
-            .get(0)
-            .clone()
-            .unchecked_into::<web_sys::Range>();
-        let start_id = find_id_from_node(&target_range.start_container().expect("container"));
-        let end_id = find_id_from_node(&target_range.end_container().expect("container"));
+        let selection = get_current_selection();
+        let Some(anchor) = selection.anchor_node() else {
+            return;
+        };
+        let focus = selection.focus_node().expect("focus");
 
-        if start_id == end_id
-            && let Some(id) = start_id
+        let anchor_id = find_id_from_node(&anchor);
+        let focus_id = find_id_from_node(&focus);
+
+        // When the InputEvent is a deletion on a line boundary, it *sometimes* contains
+        // the ID of the line that is the target of the operation (as either the start or end ID).
+        // The cosmetic space prevents this behavior from being reliable, so we can get a reliable
+        // read of the current line from the current selection.
+        let selected_line_id = if let Some(selection_node) = selection.focus_node() {
+            find_id_from_node(&selection_node)
+        } else {
+            None
+        };
+
+        if let Some(anchor_id) = anchor_id
+            && let Some(focus_id) = focus_id
+            && let Some(line_id) = selected_line_id
         {
-            // If the InputEvent requires changing lines, handle the event at the editor-level
+            let start_line_id = cmp::min(anchor_id, focus_id);
+            let end_line_id = cmp::max(anchor_id, focus_id);
+
+            let is_collapsed = get_current_selection().is_collapsed();
+            let start_line_no: &usize = self.id_map.get(&start_line_id).expect("can't find line");
+            let end_line_no: &usize = self.id_map.get(&end_line_id).expect("can't find line");
+
+            // First check if there's an active selection that spans different lines.
+            if start_line_no != end_line_no && !is_collapsed {
+                // Delete all lines associated with the selections.
+                // TODO: Re-run the desired operation.
+                self.delete_selected_lines(*start_line_no, *end_line_no);
+                return;
+            }
+
             match ev.input_type().as_str() {
                 "insertParagraph" | "insertLineBreak" => {
-                    let line_no = self.id_map.get(&id).expect("can't find line");
+                    let line_no: &usize = self.id_map.get(&start_line_id).expect("can't find line");
                     let the_line = self.lines.read()[*line_no];
-                    let (start_pos, _) = the_line.write().preprocess_input(&ev);
-                    self.insert_line(*line_no, start_pos);
+                    let pos = the_line.write().get_inline_range_start(&ev);
+                    self.insert_line(*line_no, pos);
+                }
+                "deleteContentBackward" => {
+                    let line_no = self.id_map.get(&line_id).expect("can't find line");
+                    let the_line = self.lines.read()[*line_no];
+
+                    let pos = the_line.write().get_inline_range_end(&ev);
+                    // Pos = 0 ignores the cosmetic space
+                    if pos == 0 && *line_no > 0 {
+                        self.delete_line_backward(line_id);
+                    } else {
+                        // Let default delete behavior pass if we're deleting a single-line selection.
+                        let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
+                        self.selection
+                            .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+                    }
+                }
+                "deleteContentForward" => {
+                    let line_no = self.id_map.get(&line_id).expect("can't find line");
+                    let the_line = self.lines.read()[*line_no];
+                    let pos = the_line.write().get_inline_range_start(&ev);
+
+                    if (the_line.read().logical_text().is_empty()
+                        || pos == the_line.read().logical_text().chars().count())
+                        && *line_no < self.lines.read().len() - 1
+                    {
+                        self.delete_line_forward(line_id);
+                    } else {
+                        let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
+                        self.selection
+                            .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
+                    }
                 }
                 _ => {
-                    let line_no = self.id_map.get(&id).expect("can't find line");
+                    let line_no = self.id_map.get(&start_line_id).expect("can't find line");
                     let new_cursor_pos = self.lines.write()[*line_no].write().handle_input(&ev);
                     self.selection
                         .set(Some(SetSelection::Cursor(*line_no, new_cursor_pos)));
                 }
             }
-        } else {
-            leptos_dom::log!("unhandled: multiline select input");
         }
 
         self.rationalize_selection();
@@ -352,7 +522,7 @@ impl Editor {
 
         // Verify map values (line numbers) are unique and within bounds.
         // Also verify that IDs in map match the line's ID.
-        let mut line_numbers = HashSet::new();
+        let mut line_numbers: HashSet<usize> = HashSet::new();
         for id in self.id_map.keys() {
             let val = self.id_map[id];
             if !line_numbers.insert(val) || val >= self.lines.read_untracked().len() {
@@ -381,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_insert_lines() -> Result<()> {
-        let mut editor = Editor::new();
+        let mut editor: Editor = Editor::new();
         // Insert sequential lines.
         editor.insert_line(0, 0);
         editor.insert_line(1, 0);
@@ -394,6 +564,66 @@ mod tests {
         // Insert lines at idx 0
         editor.insert_line(0, 0);
         editor.insert_line(0, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_selected_lines() -> Result<()> {
+        let mut editor: Editor = Editor::new();
+        // Try deleting the existing lines.
+        editor.delete_selected_lines(0, 2);
+
+        // Delete last line only.
+        editor.insert_line(0, 0);
+        editor.insert_line(0, 0);
+        editor.insert_line(0, 0);
+        editor.insert_line(0, 0);
+        editor.delete_selected_lines(3, 4);
+
+        assert_eq!(editor.lines().read().len(), 4);
+
+        // Delete remaining lines.
+        editor.delete_selected_lines(0, 3);
+        assert_eq!(editor.lines().read().len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_forward() -> Result<()> {
+        // NB that the noargs constructor creates 3 populated lines
+        // with next_id = 8.
+        let mut editor: Editor = Editor::new();
+
+        // Delete the latter two lines.
+        editor.delete_line_forward(3);
+        editor.delete_line_forward(3);
+        assert_eq!(editor.lines().read().len(), 1);
+
+        // Add a line and then delete it.
+        editor.insert_line(0, 0);
+        editor.delete_line_forward(3);
+        assert_eq!(editor.lines().read().len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delete_backward() -> Result<()> {
+        // NB that the noargs constructor creates 3 populated lines
+        // with next_id = 8.
+        let mut editor: Editor = Editor::new();
+
+        // Delete the latter two lines.
+        editor.delete_line_backward(7);
+        editor.delete_line_backward(5);
+        assert_eq!(editor.lines().read().len(), 1);
+
+        // Add a line and then delete it.
+        editor.insert_line(0, 0);
+        editor.delete_line_backward(8);
+        assert_eq!(editor.lines().read().len(), 1);
+
         Ok(())
     }
 }
