@@ -227,11 +227,7 @@ impl Editor {
             if start_line_no != end_line_no && !is_collapsed {
                 // Delete all lines associated with the selections and re-run the op.
                 self.delete_selected_lines(*start_line_no, *end_line_no);
-                if ev.input_type().as_str() == "deleteContentBackward"
-                    || ev.input_type().as_str() == "deleteContentForward"
-                {
-                    return;
-                }
+                return;
             }
 
             match ev.input_type().as_str() {

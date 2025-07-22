@@ -109,8 +109,6 @@ impl EditLine {
             .clone()
             .unchecked_into::<DomRange>();
 
-        let selected_line_id = get_current_selection().get_range_at(0).unwrap();
-
         let text_node = self.text_node();
 
         if range.start_container().expect("container") != text_node
