@@ -61,9 +61,9 @@ impl Default for _Editor {
 
 impl Editor {
     pub fn initialize(&self) {
-        self.0.borrow_mut().insert_line(0, Some("Hello world!"));
-        self.0.borrow_mut().insert_line(1, Some("Hello world!"));
-        self.0.borrow_mut().insert_line(2, Some("Hello world!"));
+        self.0.borrow_mut().insert_line(0, "Hello world!");
+        self.0.borrow_mut().insert_line(1, "Hello world!");
+        self.0.borrow_mut().insert_line(2, "Hello world!");
         self.initialize_listener();
     }
 
@@ -84,7 +84,7 @@ impl Editor {
     }
 }
 impl _Editor {
-    fn insert_line(&mut self, index: usize, text: Option<&str>) {
+    fn insert_line(&mut self, index: usize, text: &str) {
         let id = self.get_next_id();
         let mut new_line = EditLine::new(id, &self.document);
         self.id_map.values_mut().for_each(|idx| {
@@ -94,13 +94,17 @@ impl _Editor {
         });
         self.id_map.insert(id, index);
         let new_line_node = new_line.node().clone();
-        if let Some(text) = text {
-            *new_line.text_mut() = text.to_string();
-        }
+        *new_line.text_mut() = text.to_string();
         self.lines.insert(index, new_line);
-        self.node
-            .append_child(&new_line_node)
-            .expect("Append to editor failed");
+        if self.lines.len() == index + 1 {
+            self.node
+                .append_child(&new_line_node)
+                .expect("Append to editor failed");
+        } else {
+            self.node
+                .insert_before(&new_line_node, Some(self.lines[index + 1].node()))
+                .expect("Insert line to editor failed");
+        }
     }
 
     fn get_dom_selection(&self) -> web_sys::Selection {
@@ -264,6 +268,20 @@ impl _Editor {
                         area.start.0,
                         area.start.1,
                     )));
+                } else {
+                    unhandled_log();
+                }
+            }
+            "insertParagraph" | "insertLineBreak" => {
+                if let Some(selection) = self.get_logic_seletion()
+                    && selection.anchor.0 == selection.focus.0
+                {
+                    let area = selection.to_area();
+                    let first_part = self.lines[area.start.0].text()[..area.start.1].to_string();
+                    let second_part = self.lines[area.start.0].text()[area.end.1..].to_string();
+                    *self.lines[area.start.0].text_mut() = first_part;
+                    self.insert_line(area.start.0 + 1, &second_part);
+                    self.set_dom_selection(Some(LogicSelection::new_cursor(area.start.0 + 1, 0)));
                 } else {
                     unhandled_log();
                 }
