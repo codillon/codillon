@@ -1,7 +1,5 @@
 use crate::line::EditLine;
 use std::cell::RefCell;
-use std::collections::btree_map::Range;
-use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::{cell::Cell, collections::HashMap};
 use wasm_bindgen::prelude::*;
@@ -15,6 +13,7 @@ struct _Editor {
     window: Window,
     document: Document,
     node: HtmlDivElement,
+    /*------------------------------------------------------------*/
     id_map: HashMap<usize, usize>,
     lines: Vec<EditLine>,
     /// Should Only be used in `fn get_next_id(&self) -> usize`
@@ -62,9 +61,9 @@ impl Default for _Editor {
 
 impl Editor {
     pub fn initialize(&self) {
-        self.0.borrow_mut().push_line();
-        self.0.borrow_mut().push_line();
-        self.0.borrow_mut().push_line();
+        self.0.borrow_mut().insert_line(0, Some("Hello world!"));
+        self.0.borrow_mut().insert_line(1, Some("Hello world!"));
+        self.0.borrow_mut().insert_line(2, Some("Hello world!"));
         self.initialize_listener();
     }
 
@@ -85,13 +84,20 @@ impl Editor {
     }
 }
 impl _Editor {
-    fn push_line(&mut self) {
+    fn insert_line(&mut self, index: usize, text: Option<&str>) {
         let id = self.get_next_id();
         let mut new_line = EditLine::new(id, &self.document);
-        self.id_map.insert(id, self.lines.len());
+        self.id_map.values_mut().for_each(|idx| {
+            if *idx >= index {
+                *idx += 1;
+            }
+        });
+        self.id_map.insert(id, index);
         let new_line_node = new_line.node().clone();
-        *new_line.text_mut() = "Hello World!".to_string();
-        self.lines.push(new_line);
+        if let Some(text) = text {
+            *new_line.text_mut() = text.to_string();
+        }
+        self.lines.insert(index, new_line);
         self.node
             .append_child(&new_line_node)
             .expect("Append to editor failed");
