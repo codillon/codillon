@@ -9,9 +9,11 @@ wasmparser = "0.235.0"
 wast = "235.0.0"
 wat = "1.235.0"
 getrandom = { version = "0.2", features = ["js"] }
-web-sys = { version = "0.3.77", features = ["Selection", "Window", "Range", "console"] }
+web-sys = { version = "0.3.77", features = ["Selection", "Window", "Range", "console", "HtmlElement", "Document", "Node", "Text"
+, "HtmlDivElement", "InputEvent"] }
 console_error_panic_hook = "0.1.7"
 anyhow = "1.0.98"
+wasm-bindgen = "0.2.100"
 
 
 [package.metadata.leptos]
