@@ -3,10 +3,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::{cell::Cell, collections::HashMap};
 use wasm_bindgen::prelude::*;
-use web_sys::{Document, Element, HtmlDivElement, InputEvent, Node, Window};
+use web_sys::{Document, Element, HtmlDivElement, InputEvent, KeyboardEvent, Node, Window};
 
 /// _Editor is used to:
-/// 1. Make the DOM and Logical Model synchornized(Do this usually by logical model drived DOM modification)
+/// 1. Make the DOM and Logical Model synchornized(by logical-model-driven DOM modification)
 /// 2. Impose our wellformness enforcement rule by using functions in `utils.rs` at the logical model level
 #[derive(Debug)]
 struct _Editor {
@@ -45,7 +45,6 @@ impl Default for _Editor {
         editor_node.set_attribute("spellcheck", "false").unwrap();
         let body = document.body().expect("Cannot access teh body");
         body.append_child(&editor_node).unwrap();
-        web_sys::console::log_1(&"Editor Created".into());
         let editor = _Editor {
             window,
             document,
@@ -54,7 +53,6 @@ impl Default for _Editor {
             lines: Vec::new(),
             next_id: Cell::new(0),
         };
-
         editor
     }
 }
@@ -69,18 +67,31 @@ impl Editor {
 
     fn initialize_listener(&self) {
         let editor_rc = self.0.clone();
-        let closure = Closure::wrap(Box::new(move |ev: InputEvent| {
-            ev.prevent_default();
+        let handle_input_closure = Closure::wrap(Box::new(move |ev: InputEvent| {
             editor_rc.borrow_mut().handle_input(ev);
+        }) as Box<dyn FnMut(_)>);
+
+        let editor_rc = self.0.clone();
+        let handle_keydown_closure = Closure::wrap(Box::new(move |ev: KeyboardEvent| {
+            editor_rc.borrow_mut().handle_keydown(ev);
         }) as Box<dyn FnMut(_)>);
 
         self.0
             .borrow()
             .node
-            .add_event_listener_with_callback("beforeinput", closure.as_ref().dyn_ref().unwrap())
+            .add_event_listener_with_callback(
+                "beforeinput",
+                handle_input_closure.as_ref().dyn_ref().unwrap(),
+            )
             .unwrap();
 
-        closure.forget();
+        self.0
+            .borrow()
+            .node
+            .set_onkeydown(Some(handle_keydown_closure.as_ref().unchecked_ref()));
+
+        handle_input_closure.forget();
+        handle_keydown_closure.forget();
     }
 }
 impl _Editor {
@@ -194,6 +205,8 @@ impl _Editor {
     }
 
     pub fn handle_input(&mut self, ev: InputEvent) {
+        ev.prevent_default();
+
         let unhandled_log = || {
             web_sys::console::log_1(
                 &format!(
@@ -297,6 +310,40 @@ impl _Editor {
         let id = self.next_id.get();
         self.next_id.replace(id + 1);
         id
+    }
+
+    fn handle_keydown(&self, ev: KeyboardEvent) {
+        web_sys::console::log_1(&format!("Keydown {}", ev.key()).into());
+        match ev.key().as_str() {
+            "ArrowLeft" => {
+
+                if let Some(selection) = self.get_logic_seletion()
+                    && selection.is_cursor()
+                    && selection.focus.0 > 0
+                    && self.lines[selection.focus.0].text().is_empty()
+                {
+                    ev.prevent_default();
+                    self.set_dom_selection(Some(LogicSelection::new_cursor(
+                        selection.focus.0 - 1,
+                        self.lines[selection.focus.0 - 1].text().chars().count(),
+                    )));
+                };
+            }
+            "ArrowRight" => {
+                if let Some(selection) = self.get_logic_seletion()
+                    && selection.is_cursor()
+                    && selection.focus.0 + 1 < self.lines.len()
+                    && self.lines[selection.focus.0].text().is_empty()
+                {
+                    ev.prevent_default();
+                    self.set_dom_selection(Some(LogicSelection::new_cursor(
+                        selection.focus.0 + 1,
+                        0,
+                    )));
+                };
+            }
+            _ => (),
+        }
     }
 
     fn set_dom_selection(&self, logic_selection: Option<LogicSelection>) {
