@@ -1,5 +1,7 @@
 use crate::line::EditLine;
 use std::cell::RefCell;
+use std::collections::btree_map::Range;
+use std::ops::RangeInclusive;
 use std::rc::Rc;
 use std::{cell::Cell, collections::HashMap};
 use wasm_bindgen::prelude::*;
@@ -61,6 +63,8 @@ impl Default for _Editor {
 impl Editor {
     pub fn initialize(&self) {
         self.0.borrow_mut().push_line();
+        self.0.borrow_mut().push_line();
+        self.0.borrow_mut().push_line();
         self.initialize_listener();
     }
 
@@ -83,9 +87,10 @@ impl Editor {
 impl _Editor {
     fn push_line(&mut self) {
         let id = self.get_next_id();
-        let new_line = EditLine::new(id, &self.document);
+        let mut new_line = EditLine::new(id, &self.document);
         self.id_map.insert(id, self.lines.len());
         let new_line_node = new_line.node().clone();
+        *new_line.text_mut() = "Hello World!".to_string();
         self.lines.push(new_line);
         self.node
             .append_child(&new_line_node)
@@ -196,22 +201,68 @@ impl _Editor {
                 if let Some(mut selection) = self.get_logic_seletion()
                     && selection.anchor.0 == selection.focus.0
                 {
+                    let area = selection.to_area();
                     let new_text = &ev.data().unwrap_or_default();
-                    let mut text_mut = self.lines[selection.focus.0].text_mut();
-                    let min_pos = std::cmp::min(selection.anchor.1, selection.focus.1);
-                    let (start_pos, end_pos) = (
-                        min_pos,
-                        std::cmp::max(selection.anchor.1, selection.focus.1),
+                    self.lines[selection.focus.0]
+                        .text_mut()
+                        .replace_range(area.start.1..area.end.1, new_text);
+                    selection = LogicSelection::new_cursor(
+                        area.start.0,
+                        area.start.1 + new_text.chars().count(),
                     );
-                    text_mut.replace_range(start_pos..end_pos, new_text);
-                    selection.anchor.1 = min_pos + new_text.chars().count();
-                    selection.focus.1 = min_pos + new_text.chars().count();
-                    drop(text_mut);
                     self.set_dom_selection(Some(selection));
                 } else {
                     unhandled_log();
                 }
             }
+            "deleteContentBackward" => {
+                if let Some(mut selection) = self.get_logic_seletion()
+                    && selection.anchor.0 == selection.focus.0
+                {
+                    let area = selection.to_area();
+                    if selection.is_cursor() && selection.focus.1 > 0 {
+                        self.lines[selection.focus.0]
+                            .text_mut()
+                            .replace_range(area.start.1 - 1..area.end.1, "");
+                        selection = LogicSelection::new_cursor(area.start.0, area.start.1 - 1);
+                    } else if !selection.is_cursor() {
+                        self.lines[selection.focus.0]
+                            .text_mut()
+                            .replace_range(area.start.1..area.end.1, "");
+                        selection = LogicSelection::new_cursor(area.start.0, area.start.1);
+                    }
+
+                    self.set_dom_selection(Some(selection));
+                } else {
+                    unhandled_log();
+                }
+            }
+            "deleteContentForward" => {
+                if let Some(selection) = self.get_logic_seletion()
+                    && selection.anchor.0 == selection.focus.0
+                {
+                    let area = selection.to_area();
+                    if selection.is_cursor()
+                        && selection.focus.1 < self.lines[selection.focus.0].text().chars().count()
+                    {
+                        self.lines[selection.focus.0]
+                            .text_mut()
+                            .replace_range(area.start.1..area.end.1 + 1, "");
+                    } else if !selection.is_cursor() {
+                        self.lines[selection.focus.0]
+                            .text_mut()
+                            .replace_range(area.start.1..area.end.1, "");
+                    }
+
+                    self.set_dom_selection(Some(LogicSelection::new_cursor(
+                        area.start.0,
+                        area.start.1,
+                    )));
+                } else {
+                    unhandled_log();
+                }
+            }
+
             _ => {
                 unhandled_log();
             }
@@ -260,6 +311,10 @@ impl LogicSelection {
 
     pub fn is_cursor(&self) -> bool {
         self.anchor == self.focus
+    }
+
+    pub fn to_area(&self) -> std::ops::Range<(usize, usize)> {
+        std::cmp::min(self.anchor, self.focus)..std::cmp::max(self.anchor, self.focus)
     }
 }
 
