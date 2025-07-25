@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::{cell::Cell, collections::HashMap};
 use wasm_bindgen::prelude::*;
-use web_sys::{Element, HtmlDivElement, InputEvent, KeyboardEvent, Node};
+use web_sys::{HtmlDivElement, InputEvent, KeyboardEvent};
 
 /// _Editor is used to:
 /// 1. Make the DOM and Logical Model synchornized(by logical-model-driven DOM modification)
@@ -19,7 +19,7 @@ struct _Editor {
     next_id: Cell<usize>,
 }
 
-/// Wrap `_Editor` because some of handlers need move the `Editor` into their block
+/// Wrap `_Editor` because some of handlers need to move the `Editor` into their block
 #[derive(Debug)]
 pub struct Editor(Rc<RefCell<_Editor>>);
 
@@ -40,26 +40,34 @@ impl Default for _Editor {
             .set_attribute("contenteditable", "true")
             .unwrap();
         editor_node.set_attribute("spellcheck", "false").unwrap();
-        let editor = _Editor {
+        _Editor {
             node: editor_node,
             id_map: HashMap::new(),
             lines: Vec::new(),
             next_id: Cell::new(0),
-        };
-        editor
+        }
     }
 }
 
 impl Editor {
-    pub fn mount(&self)
-    {
-        document().body().unwrap().append_child(self.0.borrow().node_ref().as_ref()).expect("Load");
+    pub fn mount(&self) {
+        document()
+            .body()
+            .expect("Body")
+            .append_child(self.0.borrow().node_ref().as_ref())
+            .expect("Mount Editor");
     }
 
     pub fn initialize(&self) {
-        self.0.borrow_mut().insert_line(0, "Hello world! Frist Line");
-        self.0.borrow_mut().insert_line(1, "Hello world! Thrid Line");
-        self.0.borrow_mut().insert_line(1, "Hello world! Second Line");
+        self.0
+            .borrow_mut()
+            .insert_line(0, "Hello world! Frist Line");
+        self.0
+            .borrow_mut()
+            .insert_line(1, "Hello world! Thrid Line");
+        self.0
+            .borrow_mut()
+            .insert_line(1, "Hello world! Second Line");
         self.initialize_listener();
     }
 
@@ -119,8 +127,8 @@ impl _Editor {
         let anchor = dom_selection.anchor_node()?;
         let focus = dom_selection.focus_node()?;
 
-        let anchor_id = find_id_from_node(&anchor);
-        let focus_id = find_id_from_node(&focus);
+        let anchor_id = EditLine::find_id_from_node(&anchor);
+        let focus_id = EditLine::find_id_from_node(&focus);
 
         match (anchor_id, focus_id) {
             (Some(anchor_id), Some(focus_id)) => {
@@ -367,6 +375,8 @@ impl _Editor {
     }
 }
 
+/// LogicSelection is the selection area in logical model's view.
+/// Usually it is dom selection restricted to editable area.
 #[derive(Debug, Clone, Copy)]
 struct LogicSelection {
     pub anchor: (usize, usize), // #Ln, #Col
@@ -389,24 +399,7 @@ impl LogicSelection {
         self.anchor == self.focus
     }
 
-    pub fn to_area(&self) -> std::ops::Range<(usize, usize)> {
+    pub fn to_area(self) -> std::ops::Range<(usize, usize)> {
         std::cmp::min(self.anchor, self.focus)..std::cmp::max(self.anchor, self.focus)
-    }
-}
-
-// Given an HTML Node, finds the Codillion-assigned unique ID of the EditLine.
-// These are stored in HTML attributes of the line-by-line Div elements.
-pub fn find_id_from_node(orig_node: &Node) -> Option<usize> {
-    let mut node = orig_node.clone();
-    loop {
-        if let Ok(elem) = node.clone().dyn_into::<Element>()
-            && let Some(id_str) = elem.get_attribute(EditLine::ID_ATTRIBUTE)
-        {
-            return id_str.parse::<usize>().ok();
-        }
-        match node.parent_node() {
-            Some(n) => node = n,
-            None => return None,
-        }
     }
 }

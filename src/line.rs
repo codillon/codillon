@@ -1,10 +1,9 @@
 use crate::common::*;
 use wasm_bindgen::JsCast;
-use web_sys::{HtmlDivElement, Node};
+use web_sys::{Element, HtmlDivElement, Node};
 
 #[derive(Debug)]
 pub struct EditLine {
-    id: usize,
     node: HtmlDivElement,
     text: String,
 }
@@ -44,16 +43,11 @@ impl EditLine {
             .set_attribute(Self::ID_ATTRIBUTE, &id.to_string())
             .unwrap();
         let editline = EditLine {
-            id,
             node: div_ref,
             text: String::new(),
         };
         editline.update_dom();
         editline
-    }
-
-    pub fn id(&self) -> &usize {
-        &self.id
     }
 
     pub fn text(&self) -> &String {
@@ -64,7 +58,25 @@ impl EditLine {
         &mut self.text
     }
 
+    /// Be used by selection. To be disposed later.
     pub fn text_node(&self) -> Node {
         self.node_ref().as_ref().first_child().expect("Textnode")
+    }
+
+    // Given an HTML Node, finds the Codillion-assigned unique ID of the EditLine.
+    // These are stored in HTML attributes of the line-by-line Div elements.
+    pub fn find_id_from_node(orig_node: &Node) -> Option<usize> {
+        let mut node = orig_node.clone();
+        loop {
+            if let Ok(elem) = node.clone().dyn_into::<Element>()
+                && let Some(id_str) = elem.get_attribute(EditLine::ID_ATTRIBUTE)
+            {
+                return id_str.parse::<usize>().ok();
+            }
+            match node.parent_node() {
+                Some(n) => node = n,
+                None => return None,
+            }
+        }
     }
 }

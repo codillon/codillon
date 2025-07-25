@@ -6,5 +6,4 @@ pub fn start() {
     let editor = editor::editor();
     editor.initialize();
     editor.mount();
-
 }

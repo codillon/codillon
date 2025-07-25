@@ -1,6 +1,7 @@
 use std::ops::{Deref, DerefMut};
-
 use web_sys::{self, Document, window};
+
+/// As a wraper for `Element` in web_sys
 pub trait Component {
     fn node_ref(&self) -> impl AsRef<web_sys::Element>;
 
@@ -23,6 +24,7 @@ pub trait Component {
     }
 }
 
+/// As a mut reference guard for compenent, will update the dom when the mut ref is being dropped
 #[derive(Debug)]
 pub struct ComponentGuard<'a, T: Component> {
     inner: &'a mut T,
@@ -37,13 +39,13 @@ impl<'a, T: Component> ComponentGuard<'a, T> {
 impl<'a, T: Component> Deref for ComponentGuard<'a, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
-        &self.inner
+        self.inner
     }
 }
 
 impl<'a, T: Component> DerefMut for ComponentGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+        self.inner
     }
 }
 
@@ -58,6 +60,7 @@ pub struct ComponentHolder<T: Component> {
     inner: T,
 }
 
+/// This holder forces outer code to use ComponentGuard
 impl<T: Component> ComponentHolder<T> {
     pub fn new(component: T) -> Self {
         ComponentHolder { inner: component }

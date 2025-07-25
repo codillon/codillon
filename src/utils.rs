@@ -43,6 +43,7 @@ impl From<Instruction<'_>> for InstrInfo {
 /// Err: Malformed
 /// Ok(None): empty
 /// Ok(Some(InstrInfo)): instruction of given category
+#[allow(dead_code)]
 pub fn parse_instr(s: &str) -> Result<Option<InstrInfo>> {
     //get rid of comments and spaces (clippy says not to use nth...)
     let s = s
@@ -71,6 +72,7 @@ pub fn parse_instr(s: &str) -> Result<Option<InstrInfo>> {
 ///
 /// # Assumptions
 /// Each instruction is plain
+#[allow(dead_code)]
 pub fn is_well_formed_func(lines: &str) -> bool {
     let parse_text = || {
         let text = format!("module (func {lines})");
@@ -90,6 +92,7 @@ pub fn is_well_formed_func(lines: &str) -> bool {
 ///
 /// # Assumptions
 /// The function is valid
+#[allow(dead_code)]
 pub fn print_operands(wasm_bin: &[u8]) -> Result<Vec<String>> {
     let mut validator = wasmparser::Validator::new();
     let parser = wasmparser::Parser::new(0);
@@ -142,12 +145,14 @@ fn valtype_to_str(ty: ValType) -> &'static str {
 /// Represents a frame entry (like "block end" pair, etc.), with range recorded.
 /// The range is inclusive, containing both start instr number and end instr number.
 /// The start number begins at 0.
+#[allow(dead_code)]
 pub type Frame = RangeInclusive<usize>;
 
 /// Fix frames by deactivated unmatched instrs and append **end** after the last instruction
 ///
 /// ### Returns
 /// A tuple of a vector containing the deactivated indices, and the number of **end** appended at the end.
+#[allow(dead_code)]
 pub fn fix_frames(instrs: &[Option<InstrInfo>]) -> (Vec<usize>, usize) {
     let mut deactivated = Vec::new();
     // Use stacks as memory of frame begining borders.
@@ -187,6 +192,7 @@ pub fn fix_frames(instrs: &[Option<InstrInfo>]) -> (Vec<usize>, usize) {
 ///
 /// ### Panics
 /// When the input has unmatched frames
+#[allow(dead_code)]
 pub fn match_frames(instrs: &[Option<InstrInfo>]) -> Vec<Frame> {
     let mut frames = Vec::new();
     // Use stacks as memory of frame begining borders.
