@@ -6,8 +6,8 @@ use web_sys::{self, Document, window};
 /// Coding RULE:
 /// 1. **Always** use ComponentHolder to hold Component.
 /// 2. If two components have ancestor-descendant relationship in DOM tree, then they
-/// **should have the same ancestor-descendant relationship** in rust struct hierarchy to avoid memory leak.
-/// 
+///    **should have the same ancestor-descendant relationship** in rust struct hierarchy to avoid memory leak.
+///
 /// **WHY**: call `drop_dom`` will effectively remove this node and all of the descendants from the DOM.
 /// But the memory will not be released if there is a node_ref alive. Use a `ComponentHolder` to make
 /// the node_ref unique and be dropped at the same time with rust object, and we need to follow second
