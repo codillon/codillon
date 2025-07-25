@@ -23,12 +23,6 @@ impl Component for EditLine {
     }
 }
 
-impl Drop for EditLine {
-    fn drop(&mut self) {
-        self.drop_dom();
-    }
-}
-
 impl EditLine {
     pub const ID_ATTRIBUTE: &str = "data-codillon-line-id";
     pub const COSMETIC_SPACE: &str = "\u{FEFF}";

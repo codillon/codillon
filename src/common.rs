@@ -83,6 +83,12 @@ impl<T: Component> From<T> for ComponentHolder<T> {
     }
 }
 
+impl<T: Component> Drop for ComponentHolder<T> {
+    fn drop(&mut self) {
+        self.as_ref().drop_dom();
+    }
+}
+
 pub fn document() -> Document {
     window().unwrap().document().unwrap()
 }
