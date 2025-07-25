@@ -51,7 +51,7 @@ impl Default for _Editor {
 }
 
 impl Editor {
-    pub fn load(&self)
+    pub fn mount(&self)
     {
         document().body().unwrap().append_child(self.0.borrow().node_ref().as_ref()).expect("Load");
     }
