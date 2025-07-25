@@ -1,4 +1,9 @@
-pub mod editor;
-pub mod line;
-pub mod utils;
-pub mod view;
+mod common;
+mod editor;
+mod line;
+mod utils;
+pub fn start() {
+    let editor = editor::editor();
+    editor.initialize();
+    editor.mount();
+}
