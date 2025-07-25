@@ -1,21 +1,20 @@
+use crate::common::*;
 use crate::line::EditLine;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::{cell::Cell, collections::HashMap};
 use wasm_bindgen::prelude::*;
-use web_sys::{Document, Element, HtmlDivElement, InputEvent, KeyboardEvent, Node, Window};
+use web_sys::{Element, HtmlDivElement, InputEvent, KeyboardEvent, Node};
 
 /// _Editor is used to:
 /// 1. Make the DOM and Logical Model synchornized(by logical-model-driven DOM modification)
 /// 2. Impose our wellformness enforcement rule by using functions in `utils.rs` at the logical model level
 #[derive(Debug)]
 struct _Editor {
-    window: Window,
-    document: Document,
     node: HtmlDivElement,
     /*------------------------------------------------------------*/
     id_map: HashMap<usize, usize>,
-    lines: Vec<EditLine>,
+    lines: Vec<ComponentHolder<EditLine>>,
     /// Should Only be used in `fn get_next_id(&self) -> usize`
     next_id: Cell<usize>,
 }
@@ -25,14 +24,12 @@ struct _Editor {
 pub struct Editor(Rc<RefCell<_Editor>>);
 
 pub fn editor() -> Editor {
-    Editor(Rc::new(RefCell::new(_Editor::default())))
+    Editor(Rc::default())
 }
 
 impl Default for _Editor {
     fn default() -> Self {
-        let window = web_sys::window().expect("Cannot access the window");
-        let document = window.document().expect("Cannot access the document");
-        let editor_node = document
+        let editor_node = document()
             .create_element("div")
             .unwrap()
             .dyn_into::<HtmlDivElement>()
@@ -43,11 +40,7 @@ impl Default for _Editor {
             .set_attribute("contenteditable", "true")
             .unwrap();
         editor_node.set_attribute("spellcheck", "false").unwrap();
-        let body = document.body().expect("Cannot access teh body");
-        body.append_child(&editor_node).unwrap();
         let editor = _Editor {
-            window,
-            document,
             node: editor_node,
             id_map: HashMap::new(),
             lines: Vec::new(),
@@ -58,10 +51,15 @@ impl Default for _Editor {
 }
 
 impl Editor {
+    pub fn load(&self)
+    {
+        document().body().unwrap().append_child(self.0.borrow().node_ref().as_ref()).expect("Load");
+    }
+
     pub fn initialize(&self) {
-        self.0.borrow_mut().insert_line(0, "Hello world!");
-        self.0.borrow_mut().insert_line(1, "Hello world!");
-        self.0.borrow_mut().insert_line(2, "Hello world!");
+        self.0.borrow_mut().insert_line(0, "Hello world! Frist Line");
+        self.0.borrow_mut().insert_line(1, "Hello world! Thrid Line");
+        self.0.borrow_mut().insert_line(1, "Hello world! Second Line");
         self.initialize_listener();
     }
 
@@ -94,39 +92,30 @@ impl Editor {
         handle_keydown_closure.forget();
     }
 }
+
+impl Component for _Editor {
+    fn node_ref(&self) -> impl AsRef<web_sys::Element> {
+        &self.node
+    }
+}
+
 impl _Editor {
     fn insert_line(&mut self, index: usize, text: &str) {
         let id = self.get_next_id();
-        let mut new_line = EditLine::new(id, &self.document);
+        let mut new_line: ComponentHolder<_> = EditLine::new(id).into();
         self.id_map.values_mut().for_each(|idx| {
             if *idx >= index {
                 *idx += 1;
             }
         });
         self.id_map.insert(id, index);
-        let new_line_node = new_line.node().clone();
-        *new_line.text_mut() = text.to_string();
+        *new_line.ref_mut().text_mut() = text.to_string();
         self.lines.insert(index, new_line);
-        if self.lines.len() == index + 1 {
-            self.node
-                .append_child(&new_line_node)
-                .expect("Append to editor failed");
-        } else {
-            self.node
-                .insert_before(&new_line_node, Some(self.lines[index + 1].node()))
-                .expect("Insert line to editor failed");
-        }
-    }
-
-    fn get_dom_selection(&self) -> web_sys::Selection {
-        self.window
-            .get_selection()
-            .expect("Cannot get dom selection")
-            .expect("Dom selection not found")
+        self.dom_insert_child(index, self.lines[index].as_ref());
     }
 
     fn get_logic_seletion(&self) -> Option<LogicSelection> {
-        let dom_selection = self.get_dom_selection();
+        let dom_selection = get_dom_selection();
         let anchor = dom_selection.anchor_node()?;
         let focus = dom_selection.focus_node()?;
 
@@ -140,7 +129,7 @@ impl _Editor {
                 Some(LogicSelection::new(
                     (
                         anchor_idx,
-                        if self.lines[anchor_idx].text().is_empty() {
+                        if self.lines[anchor_idx].as_ref().text().is_empty() {
                             0
                         } else {
                             dom_selection.anchor_offset() as usize
@@ -148,7 +137,7 @@ impl _Editor {
                     ),
                     (
                         focus_idx,
-                        if self.lines[focus_idx].text().is_empty() {
+                        if self.lines[focus_idx].as_ref().text().is_empty() {
                             0
                         } else {
                             dom_selection.focus_offset() as usize
@@ -161,7 +150,7 @@ impl _Editor {
                 Some(LogicSelection::new(
                     (
                         anchor_idx,
-                        if self.lines[anchor_idx].text().is_empty() {
+                        if self.lines[anchor_idx].as_ref().text().is_empty() {
                             0
                         } else {
                             dom_selection.anchor_offset() as usize
@@ -172,6 +161,7 @@ impl _Editor {
                         self.lines
                             .last()
                             .expect("Empty lines")
+                            .as_ref()
                             .text()
                             .chars()
                             .count(),
@@ -186,13 +176,14 @@ impl _Editor {
                         self.lines
                             .first()
                             .expect("Empty lines")
+                            .as_ref()
                             .text()
                             .chars()
                             .count(),
                     ),
                     (
                         focus_idx,
-                        if self.lines[focus_idx].text().is_empty() {
+                        if self.lines[focus_idx].as_ref().text().is_empty() {
                             0
                         } else {
                             dom_selection.focus_offset() as usize
@@ -227,6 +218,7 @@ impl _Editor {
                     let area = selection.to_area();
                     let new_text = &ev.data().unwrap_or_default();
                     self.lines[selection.focus.0]
+                        .ref_mut()
                         .text_mut()
                         .replace_range(area.start.1..area.end.1, new_text);
                     selection = LogicSelection::new_cursor(
@@ -245,11 +237,13 @@ impl _Editor {
                     let area = selection.to_area();
                     if selection.is_cursor() && selection.focus.1 > 0 {
                         self.lines[selection.focus.0]
+                            .ref_mut()
                             .text_mut()
                             .replace_range(area.start.1 - 1..area.end.1, "");
                         selection = LogicSelection::new_cursor(area.start.0, area.start.1 - 1);
                     } else if !selection.is_cursor() {
                         self.lines[selection.focus.0]
+                            .ref_mut()
                             .text_mut()
                             .replace_range(area.start.1..area.end.1, "");
                         selection = LogicSelection::new_cursor(area.start.0, area.start.1);
@@ -266,13 +260,20 @@ impl _Editor {
                 {
                     let area = selection.to_area();
                     if selection.is_cursor()
-                        && selection.focus.1 < self.lines[selection.focus.0].text().chars().count()
+                        && selection.focus.1
+                            < self.lines[selection.focus.0]
+                                .as_ref()
+                                .text()
+                                .chars()
+                                .count()
                     {
                         self.lines[selection.focus.0]
+                            .ref_mut()
                             .text_mut()
                             .replace_range(area.start.1..area.end.1 + 1, "");
                     } else if !selection.is_cursor() {
                         self.lines[selection.focus.0]
+                            .ref_mut()
                             .text_mut()
                             .replace_range(area.start.1..area.end.1, "");
                     }
@@ -290,9 +291,11 @@ impl _Editor {
                     && selection.anchor.0 == selection.focus.0
                 {
                     let area = selection.to_area();
-                    let first_part = self.lines[area.start.0].text()[..area.start.1].to_string();
-                    let second_part = self.lines[area.start.0].text()[area.end.1..].to_string();
-                    *self.lines[area.start.0].text_mut() = first_part;
+                    let first_part =
+                        self.lines[area.start.0].as_ref().text()[..area.start.1].to_string();
+                    let second_part =
+                        self.lines[area.start.0].as_ref().text()[area.end.1..].to_string();
+                    *self.lines[area.start.0].ref_mut().text_mut() = first_part;
                     self.insert_line(area.start.0 + 1, &second_part);
                     self.set_dom_selection(Some(LogicSelection::new_cursor(area.start.0 + 1, 0)));
                 } else {
@@ -316,16 +319,19 @@ impl _Editor {
         web_sys::console::log_1(&format!("Keydown {}", ev.key()).into());
         match ev.key().as_str() {
             "ArrowLeft" => {
-
                 if let Some(selection) = self.get_logic_seletion()
                     && selection.is_cursor()
                     && selection.focus.0 > 0
-                    && self.lines[selection.focus.0].text().is_empty()
+                    && self.lines[selection.focus.0].as_ref().text().is_empty()
                 {
                     ev.prevent_default();
                     self.set_dom_selection(Some(LogicSelection::new_cursor(
                         selection.focus.0 - 1,
-                        self.lines[selection.focus.0 - 1].text().chars().count(),
+                        self.lines[selection.focus.0 - 1]
+                            .as_ref()
+                            .text()
+                            .chars()
+                            .count(),
                     )));
                 };
             }
@@ -333,7 +339,7 @@ impl _Editor {
                 if let Some(selection) = self.get_logic_seletion()
                     && selection.is_cursor()
                     && selection.focus.0 + 1 < self.lines.len()
-                    && self.lines[selection.focus.0].text().is_empty()
+                    && self.lines[selection.focus.0].as_ref().text().is_empty()
                 {
                     ev.prevent_default();
                     self.set_dom_selection(Some(LogicSelection::new_cursor(
@@ -348,14 +354,13 @@ impl _Editor {
 
     fn set_dom_selection(&self, logic_selection: Option<LogicSelection>) {
         if let Some(LogicSelection { anchor, focus }) = logic_selection {
-            let anchor_node = &self.lines[anchor.0].text_node();
-            let focus_node = &self.lines[focus.0].text_node();
-
-            self.get_dom_selection()
-                .set_base_and_extent(anchor_node, anchor.1 as u32, focus_node, focus.1 as u32)
+            let anchor_node = self.lines[anchor.0].as_ref().text_node();
+            let focus_node = self.lines[focus.0].as_ref().text_node();
+            get_dom_selection()
+                .set_base_and_extent(&anchor_node, anchor.1 as u32, &focus_node, focus.1 as u32)
                 .expect("Set dom selection");
         } else {
-            self.get_dom_selection()
+            get_dom_selection()
                 .remove_all_ranges()
                 .expect("Fail in clearing dom selection");
         }
