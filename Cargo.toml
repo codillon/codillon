@@ -16,7 +16,7 @@ delegate = "0.13.4"
 js-sys = "0.3.77"
 str_indices = "0.4.4"
 wasm-bindgen = "0.2.100"
-web-sys = { version = "0.3.77", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range"] }
+web-sys = { version = "0.3.77", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent"] }
 
 [patch.crates-io]
 web-sys = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
