@@ -41,7 +41,7 @@ jobs:
     - uses: taiki-e/install-action@9ba3ac3fd006a70c6e186a683577abc1ccf0ff3a
       with:
         tool: "trunk, wasm-bindgen"
-    - run: trunk build --release
+    - run: RUSTFLAGS='--cfg getrandom_backend="wasm_js"' trunk build --release
 
   test:
     name: Test
