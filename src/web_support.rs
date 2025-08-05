@@ -10,7 +10,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::wasm_bindgen::JsCast;
+use web_sys::{HtmlBodyElement, wasm_bindgen::JsCast};
 
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the web_support module.
@@ -200,12 +200,14 @@ impl<T: AnyElement> ElementHandle<T> {
 
 // Wrapper for a DOM Document, allowing modification of the body and
 // the ability to create Elements (as ElementHandles).
-pub struct DocumentHandle<BodyType: ElementComponent> {
+pub struct DocumentHandle<BodyType: ElementComponent<Element = HtmlBodyElement>> {
     document: web_sys::Document,
     body: Option<BodyType>,
 }
 
-impl<BodyType: ElementComponent> WithElement for DocumentHandle<BodyType> {
+impl<BodyType: ElementComponent<Element = HtmlBodyElement>> WithElement
+    for DocumentHandle<BodyType>
+{
     type Element = BodyType::Element;
     fn with_element(&self, mut f: impl FnMut(&Self::Element), g: AccessToken) {
         if let Some(body) = &self.body {
@@ -214,7 +216,7 @@ impl<BodyType: ElementComponent> WithElement for DocumentHandle<BodyType> {
     }
 }
 
-impl<BodyType: ElementComponent> Default for DocumentHandle<BodyType> {
+impl<BodyType: ElementComponent<Element = HtmlBodyElement>> Default for DocumentHandle<BodyType> {
     fn default() -> Self {
         Self {
             document: web_sys::window().unwrap().document().unwrap(),
@@ -225,7 +227,7 @@ impl<BodyType: ElementComponent> Default for DocumentHandle<BodyType> {
 
 pub struct ElementFactory(web_sys::Document);
 
-impl<BodyType: ElementComponent> DocumentHandle<BodyType> {
+impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyType> {
     pub fn body(&self) -> Option<&BodyType> {
         self.body.as_ref()
     }
