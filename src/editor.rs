@@ -66,13 +66,8 @@ impl Editor {
     }
 }
 
-impl WithNode for Editor {
-    fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken) {
-        self.0.borrow().with_node(f, g);
-    }
-}
-
-impl WithElement<HtmlDivElement> for Editor {
+impl WithElement for Editor {
+    type Element = HtmlDivElement;
     fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
         self.0.borrow().component.with_element(f, g);
     }

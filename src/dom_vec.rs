@@ -1,8 +1,6 @@
 // A Codillon DOM "vector": a variable-length collection of Components of the same type
 
-use crate::web_support::{
-    AccessToken, AnyElement, Component, ElementHandle, WithElement, WithNode,
-};
+use crate::web_support::{AccessToken, AnyElement, Component, ElementHandle, WithElement};
 use delegate::delegate;
 
 pub struct DomVec<Child: Component, Element: AnyElement> {
@@ -60,13 +58,8 @@ impl<Child: Component, Element: AnyElement> Component for DomVec<Child, Element>
 }
 
 // Accessors for the parent element (only usable by the web_support module).
-impl<Child: Component, Element: AnyElement> WithNode for DomVec<Child, Element> {
-    fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken) {
-        self.elem.with_node(f, g);
-    }
-}
-
-impl<Child: Component, Element: AnyElement> WithElement<Element> for DomVec<Child, Element> {
+impl<Child: Component, Element: AnyElement> WithElement for DomVec<Child, Element> {
+    type Element = Element;
     fn with_element(&self, f: impl FnMut(&Element), g: AccessToken) {
         self.elem.with_element(f, g);
     }

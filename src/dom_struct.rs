@@ -3,7 +3,6 @@
 
 use crate::web_support::{
     AccessToken, AnyElement, ArrayHandle, Component, ElementHandle, NodeListHandle, WithElement,
-    WithNode,
 };
 use delegate::delegate;
 
@@ -90,13 +89,8 @@ impl<Child: Structure, Element: AnyElement> Component for DomStruct<Child, Eleme
 }
 
 // Accessors for the parent element (only usable by the web_support module).
-impl<Child: Structure, Element: AnyElement> WithNode for DomStruct<Child, Element> {
-    fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken) {
-        self.elem.with_node(f, g);
-    }
-}
-
-impl<Child: Structure, Element: AnyElement> WithElement<Element> for DomStruct<Child, Element> {
+impl<Child: Structure, Element: AnyElement> WithElement for DomStruct<Child, Element> {
+    type Element = Element;
     fn with_element(&self, f: impl FnMut(&Element), g: AccessToken) {
         self.elem.with_element(f, g);
     }

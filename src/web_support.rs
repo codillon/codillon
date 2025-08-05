@@ -31,8 +31,15 @@ pub trait AnyElement: AsRef<web_sys::HtmlElement> + AsRef<web_sys::Node> {
 
 impl<T: AsRef<web_sys::HtmlElement> + AsRef<web_sys::Node>> AnyElement for T {}
 
-pub trait WithElement<T: AnyElement> {
-    fn with_element(&self, f: impl FnMut(&T), g: AccessToken);
+pub trait WithElement {
+    type Element: AnyElement;
+    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken);
+}
+
+impl<T: WithElement> WithNode for T {
+    fn with_node(&self, mut f: impl FnMut(&web_sys::Node), g: AccessToken) {
+        self.with_element(|elem| f(elem.as_ref()), g);
+    }
 }
 
 // Wrapper for a Node or Element that removes it from its parent when dropped
@@ -111,13 +118,8 @@ pub struct ElementHandle<T: AnyElement> {
     event_handlers: Handlers,
 }
 
-impl<T: AnyElement> WithNode for ElementHandle<T> {
-    fn with_node(&self, mut f: impl FnMut(&web_sys::Node), _g: AccessToken) {
-        f(self.elem.0.as_ref())
-    }
-}
-
-impl<T: AnyElement> WithElement<T> for ElementHandle<T> {
+impl<T: AnyElement> WithElement for ElementHandle<T> {
+    type Element = T;
     fn with_element(&self, mut f: impl FnMut(&T), _g: AccessToken) {
         f(&self.elem.0)
     }
@@ -198,22 +200,21 @@ impl<T: AnyElement> ElementHandle<T> {
 
 // Wrapper for a DOM Document, allowing modification of the body and
 // the ability to create Elements (as ElementHandles).
-pub struct DocumentHandle<BodyType: ElementComponent<web_sys::HtmlBodyElement>> {
+pub struct DocumentHandle<BodyType: ElementComponent> {
     document: web_sys::Document,
     body: Option<BodyType>,
 }
 
-impl<BodyType: ElementComponent<web_sys::HtmlBodyElement>> WithElement<web_sys::HtmlBodyElement>
-    for DocumentHandle<BodyType>
-{
-    fn with_element(&self, f: impl FnMut(&web_sys::HtmlBodyElement), g: AccessToken) {
+impl<BodyType: ElementComponent> WithElement for DocumentHandle<BodyType> {
+    type Element = BodyType::Element;
+    fn with_element(&self, mut f: impl FnMut(&Self::Element), g: AccessToken) {
         if let Some(body) = &self.body {
-            body.with_element(f, g);
+            body.with_element(|elem| f(elem), g);
         }
     }
 }
 
-impl<BodyType: ElementComponent<web_sys::HtmlBodyElement>> Default for DocumentHandle<BodyType> {
+impl<BodyType: ElementComponent> Default for DocumentHandle<BodyType> {
     fn default() -> Self {
         Self {
             document: web_sys::window().unwrap().document().unwrap(),
@@ -224,7 +225,7 @@ impl<BodyType: ElementComponent<web_sys::HtmlBodyElement>> Default for DocumentH
 
 pub struct ElementFactory(web_sys::Document);
 
-impl<BodyType: ElementComponent<web_sys::HtmlBodyElement>> DocumentHandle<BodyType> {
+impl<BodyType: ElementComponent> DocumentHandle<BodyType> {
     pub fn body(&self) -> Option<&BodyType> {
         self.body.as_ref()
     }
@@ -234,7 +235,7 @@ impl<BodyType: ElementComponent<web_sys::HtmlBodyElement>> DocumentHandle<BodyTy
     }
 
     pub fn set_body(&mut self, body: BodyType) {
-        body.with_element(|elem| self.document.set_body(Some(elem)), TOKEN);
+        body.with_element(|elem| self.document.set_body(Some(elem.as_ref())), TOKEN);
         self.body = Some(body);
     }
 
@@ -340,5 +341,5 @@ pub trait Component: WithNode {
 }
 
 // ElementComponent is a trait for a "Component" that is also an HTML Element (e.g. not Text).
-pub trait ElementComponent<T: AnyElement>: Component + WithElement<T> {}
-impl<T: AnyElement, U: Component + WithElement<T>> ElementComponent<T> for U {}
+pub trait ElementComponent: Component + WithElement {}
+impl<U: Component + WithElement> ElementComponent for U {}
