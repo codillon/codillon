@@ -4,7 +4,7 @@ use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
     dom_vec::DomVec,
-    web_support::{AccessToken, Component, ElementFactory, WithElement},
+    web_support::{AccessToken, Component, ElementFactory, WithElement, WithNode},
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement, InputEvent};
@@ -75,6 +75,18 @@ impl WithElement for Editor {
 
 impl Component for Editor {
     fn audit(&self) {
-        self.0.borrow().component.audit()
+        self.0.borrow().audit()
+    }
+}
+
+impl WithNode for _Editor {
+    fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken) {
+        self.component.with_node(f, g);
+    }
+}
+
+impl Component for _Editor {
+    fn audit(&self) {
+        self.component.audit()
     }
 }
