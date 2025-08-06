@@ -23,6 +23,11 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         self.elem.append_node(self.contents.last().unwrap());
     }
 
+    pub fn insert(&mut self, index: usize, elem: Child) {
+        self.contents.insert(index, elem);
+        self.elem.insert_node(index, &self.contents[index]);
+    }
+
     pub fn remove(&mut self, index: usize) -> Child {
         self.contents.remove(index)
     }

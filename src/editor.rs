@@ -1,10 +1,10 @@
 // The Codillon code editor (doesn't do much, but does capture beforeinput and logs to console)
-
-use super::line::EditLine;
+mod line;
 use crate::web_support::{
     AccessToken, Component, ElementFactory, SelectionHandle, WithElement, WithNode,
     components::DomVec,
 };
+use line::EditLine;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use web_sys::{HtmlDivElement, InputEvent};
 
@@ -32,6 +32,18 @@ impl _Editor {
         self.component
             .push(EditLine::new(string, &self._factory, self._next_id));
         self._id_map.insert(self._next_id, self.component.len() - 1);
+        self._next_id += 1;
+    }
+
+    pub fn insert_line(&mut self, index: usize, string: &str) {
+        self.component
+            .insert(index, EditLine::new(string, &self._factory, self._next_id));
+        self._id_map.values_mut().for_each(|line_no| {
+            if *line_no >= index {
+                *line_no += 1;
+            }
+        });
+        self._id_map.insert(self._next_id, index);
         self._next_id += 1;
     }
 
@@ -117,22 +129,21 @@ impl _Editor {
                     unhandled_log();
                 }
             }
-            // "insertParagraph" | "insertLineBreak" => {
-            //     if let Some(selection) = self.get_logic_seletion()
-            //         && selection.anchor.0 == selection.focus.0
-            //     {
-            //         let area = selection.to_area();
-            //         let first_part =
-            //             self.lines[area.start.0].as_ref().text()[..area.start.1].to_string();
-            //         let second_part =
-            //             self.lines[area.start.0].as_ref().text()[area.end.1..].to_string();
-            //         *self.lines[area.start.0].ref_mut().text_mut() = first_part;
-            //         self.insert_line(area.start.0 + 1, &second_part);
-            //         self.set_dom_selection(Some(LogicSelection::new_cursor(area.start.0 + 1, 0)));
-            //     } else {
-            //         unhandled_log();
-            //     }
-            // }
+            "insertParagraph" | "insertLineBreak" => {
+                if let Some(selection) = self.get_logic_seletion()
+                    && selection.anchor.0 == selection.focus.0
+                {
+                    let area = selection.to_area();
+                    let first_part =
+                        self.component[area.start.0].text()[..area.start.1].to_string();
+                    let second_part = self.component[area.start.0].text()[area.end.1..].to_string();
+                    *self.component[area.start.0].text_mut() = first_part;
+                    self.insert_line(area.start.0 + 1, &second_part);
+                    self.apply_selection(Some(LogicSelection::new_cursor(area.start.0 + 1, 0)));
+                } else {
+                    unhandled_log();
+                }
+            }
             _ => {
                 unhandled_log();
             }

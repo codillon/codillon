@@ -214,6 +214,23 @@ impl<T: AnyElement> ElementHandle<T> {
         )
     }
 
+    pub fn insert_node(&self, index: usize, child: &impl WithNode) {
+        child.with_node(
+            |new_child| {
+                self.with_element(
+                    |node| {
+                        let elem: &web_sys::HtmlElement = node.as_ref();
+                        let child_node = elem.child_nodes().item(index as u32);
+                        elem.insert_before(new_child, child_node.as_ref())
+                            .expect("Insert Child to htmlElement");
+                    },
+                    TOKEN,
+                )
+            },
+            TOKEN,
+        );
+    }
+
     pub fn attach_nodes(&self, children: ArrayHandle) {
         self.elem.element().replace_children_with_node(&children.0);
     }
