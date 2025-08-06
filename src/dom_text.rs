@@ -28,6 +28,10 @@ impl DomText {
         self.text_node.set_data(string);
     }
 
+    pub fn data(&self) -> &String {
+        &self.contents
+    }
+
     pub fn insert_at_char(&mut self, char_idx: usize, string: &str) -> Result<()> {
         let byte_idx = str_indices::chars::to_byte_idx(&self.contents, char_idx);
         let utf16_idx = str_indices::utf16::from_byte_idx(&self.contents, byte_idx);

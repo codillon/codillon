@@ -34,6 +34,9 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
     to self.contents {
         pub fn get(&self, index: usize) -> Option<&Child>;
         pub fn get_mut(&mut self, index: usize) -> Option<&mut Child>;
+        pub fn len(&self) -> usize;
+        pub fn is_empty(&self) -> bool;
+        pub fn last(&self) -> Option<&Child>;
     }
     to self.elem {
         pub fn set_attribute(&mut self, name: &str, value: &str);

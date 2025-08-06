@@ -125,14 +125,11 @@ pub struct ElementReader<T: AsRef<web_sys::Element>>(T);
 
 impl<T: AsRef<Node>> NodeReader<T> {
     pub fn parent_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.as_ref().parent_node().map(|node| NodeReader(node))
+        self.0.as_ref().parent_node().map(NodeReader)
     }
 
     pub fn parent_element(&self) -> Option<ElementReader<web_sys::Element>> {
-        self.0
-            .as_ref()
-            .parent_element()
-            .map(|elem| ElementReader(elem))
+        self.0.as_ref().parent_element().map(ElementReader)
     }
 }
 
@@ -140,19 +137,13 @@ impl<T: AsRef<Node>> NodeReader<T> {
     pub fn new(node: T) -> Self {
         Self(node)
     }
-
-
 }
 
 impl<T: AsRef<Node>> NodeReader<T> {
     pub fn dyn_into<U: AsRef<Node> + JsCast>(self) -> Result<NodeReader<U>, Self> {
         if self.0.as_ref().dyn_ref::<U>().is_some() {
             Ok(NodeReader::new(
-                self.0
-                    .as_ref()
-                    .clone()
-                    .dyn_into::<U>()
-                    .expect("dyn_into"),
+                self.0.as_ref().clone().dyn_into::<U>().expect("dyn_into"),
             ))
         } else {
             Err(self)
@@ -160,22 +151,17 @@ impl<T: AsRef<Node>> NodeReader<T> {
     }
 }
 
-impl<T: AsRef<web_sys::Element>> ElementReader<T>
-{
-    pub fn new(elem: T) -> Self
-    {
+impl<T: AsRef<web_sys::Element>> ElementReader<T> {
+    pub fn new(elem: T) -> Self {
         Self(elem)
     }
 
     pub fn parent_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.as_ref().parent_node().map(|node| NodeReader(node))
+        self.0.as_ref().parent_node().map(NodeReader)
     }
 
     pub fn parent_element(&self) -> Option<ElementReader<web_sys::Element>> {
-        self.0
-            .as_ref()
-            .parent_element()
-            .map(|elem| ElementReader(elem))
+        self.0.as_ref().parent_element().map(ElementReader)
     }
 
     pub fn get_attribute(&self, attr: &str) -> Option<String> {
@@ -183,17 +169,15 @@ impl<T: AsRef<web_sys::Element>> ElementReader<T>
     }
 }
 
-impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> Into<ElementReader<T>> for NodeReader<T>
-{
-    fn into(self) -> ElementReader<T> {
-        ElementReader::new(self.0)
+impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> From<NodeReader<T>> for ElementReader<T> {
+    fn from(reader: NodeReader<T>) -> Self {
+        ElementReader::new(reader.0)
     }
 }
 
-impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> Into<NodeReader<T>> for ElementReader<T>
-{
-    fn into(self) -> NodeReader<T> {
-        NodeReader::new(self.0)
+impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> From<ElementReader<T>> for NodeReader<T> {
+    fn from(reader: ElementReader<T>) -> Self {
+        NodeReader::new(reader.0)
     }
 }
 
@@ -281,11 +265,11 @@ pub struct SelectionHandle(web_sys::Selection);
 
 impl SelectionHandle {
     pub fn get_focus_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.focus_node().map(|node| NodeReader(node))
+        self.0.focus_node().map(NodeReader)
     }
 
     pub fn get_anchor_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.anchor_node().map(|node| NodeReader(node))
+        self.0.anchor_node().map(NodeReader)
     }
 
     pub fn get_focus_offset(&self) -> usize {
@@ -348,7 +332,7 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyT
         self.document
             .get_selection()
             .expect("Get Document Selection")
-            .map(|dom_selection| SelectionHandle(dom_selection))
+            .map(SelectionHandle)
     }
 
     pub fn audit(&self) {
