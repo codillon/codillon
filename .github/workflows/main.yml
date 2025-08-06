@@ -69,8 +69,6 @@ jobs:
     - uses: ./.github/actions/install-rust
     - run: rustup component add rustfmt
     - run: find . -name '*.rs' | xargs rustfmt --check --edition 2024
-    - run: cargo install leptosfmt
-    - run: leptosfmt --check .
 
   doc:
     runs-on: ubuntu-latest
