@@ -12,6 +12,8 @@ use std::{
 use wasm_bindgen::closure::Closure;
 use web_sys::{HtmlBodyElement, Node, wasm_bindgen::JsCast};
 
+use crate::web_support::SelectionHandle;
+
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the web_support module.
 struct _Private();
@@ -120,8 +122,8 @@ pub struct ElementHandle<T: AnyElement> {
 
 // NodeReader and ElementReader are used traverse
 // and read attributes
-pub struct NodeReader<T: AsRef<Node>>(T);
-pub struct ElementReader<T: AsRef<web_sys::Element>>(T);
+pub struct NodeReader<T: AsRef<Node>>(pub(super) T);
+pub struct ElementReader<T: AsRef<web_sys::Element>>(pub(super) T);
 
 impl<T: AsRef<Node>> NodeReader<T> {
     pub fn parent_node(&self) -> Option<NodeReader<web_sys::Node>> {
@@ -258,26 +260,6 @@ impl<T: AnyElement> ElementHandle<T> {
                 .as_ref()
                 .unchecked_ref(),
         ));
-    }
-}
-
-pub struct SelectionHandle(web_sys::Selection);
-
-impl SelectionHandle {
-    pub fn get_focus_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.focus_node().map(NodeReader)
-    }
-
-    pub fn get_anchor_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.anchor_node().map(NodeReader)
-    }
-
-    pub fn get_focus_offset(&self) -> usize {
-        self.0.focus_offset() as usize
-    }
-
-    pub fn get_anchor_offset(&self) -> usize {
-        self.0.anchor_offset() as usize
     }
 }
 

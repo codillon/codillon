@@ -1,75 +1,12 @@
 // The Codillon code editor (doesn't do much, but does capture beforeinput and logs to console)
 
 use crate::{
-    dom_struct::DomStruct,
-    dom_text::DomText,
     dom_vec::DomVec,
-    web_support::{
-        AccessToken, Component, ElementFactory, ElementReader, NodeReader, SelectionHandle,
-        WithElement, WithNode,
-    },
+    line::EditLine,
+    web_support::{AccessToken, Component, ElementFactory, LogicSelection, SelectionHandle, WithElement, WithNode},
 };
-use delegate::delegate;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
-use wasm_bindgen::JsCast;
-use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement, InputEvent};
-
-type DomBr = DomStruct<(), HtmlBrElement>;
-type LineContents = (DomText, (DomBr, ()));
-struct EditLine {
-    component: DomStruct<LineContents, HtmlDivElement>,
-    _id: usize,
-}
-
-impl WithElement for EditLine {
-    type Element = HtmlDivElement;
-    delegate! {
-        to self.component
-        {
-            fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken);
-        }
-    }
-}
-
-impl Component for EditLine {
-    delegate! {
-        to self.component {
-            fn audit(&self);
-        }
-    }
-}
-
-impl EditLine {
-    pub const EDITLINE_ID_ATTR: &str = "data-editline-id";
-    pub fn new(contents: &str, factory: &ElementFactory, id: usize) -> Self {
-        let mut dom_editline = DomStruct::new(
-            (
-                DomText::new(contents),
-                (DomStruct::<(), HtmlBrElement>::new((), factory.br()), ()),
-            ),
-            factory.div(),
-        );
-        dom_editline.set_attribute(Self::EDITLINE_ID_ATTR, &id.to_string());
-        Self {
-            component: dom_editline,
-            _id: id,
-        }
-    }
-
-    fn find_id_from_node<T: AsRef<web_sys::Node> + JsCast>(node: NodeReader<T>) -> Option<usize> {
-        let mut elem: ElementReader<web_sys::Element> = match node.dyn_into::<web_sys::Element>() {
-            Ok(node) => node.into(),
-            Err(node) => node.parent_element().expect("Get a parent element parent"),
-        };
-
-        loop {
-            if let Some(id) = elem.get_attribute(Self::EDITLINE_ID_ATTR) {
-                return Some(id.parse::<usize>().expect("parse id"));
-            }
-            elem = elem.parent_element()?;
-        }
-    }
-}
+use web_sys::{HtmlDivElement, InputEvent};
 
 struct _Editor {
     _next_id: usize,
@@ -100,15 +37,119 @@ impl _Editor {
 
     fn handle_input(&mut self, ev: InputEvent) {
         ev.prevent_default();
-        web_sys::console::log_1(
-            &format!(
-                "got: {} + {} + at {:?}",
-                ev.input_type(),
-                ev.data().unwrap_or_default(),
-                self.get_logic_seletion()
+
+        let unhandled_log = || {
+            web_sys::console::log_1(
+                &format!(
+                    "Unhandled Event Type:{}, Data: {:?}, Selection:{:?}",
+                    ev.input_type(),
+                    ev.data(),
+                    self.get_logic_seletion()
+                )
+                .into(),
             )
-            .into(),
-        );
+        };
+
+        match ev.input_type().as_str() {
+            "insertText" => {
+                if let Some(selection) = self.get_logic_seletion()
+                    && selection.anchor.0 == selection.focus.0
+                {
+                    let area = selection.to_area();
+                    let new_text = &ev.data().unwrap_or_default();
+                    self.component[selection.focus.0]
+                        .text_mut()
+                        .replace_range(area.start.1..area.end.1, new_text);
+                    // selection = LogicSelection::new_cursor(
+                    //     area.start.0,
+                    //     area.start.1 + new_text.chars().count(),
+                    // );
+                    // self.set_dom_selection(Some(selection));
+                } else {
+                    unhandled_log();
+                }
+            }
+            // "deleteContentBackward" => {
+            //     if let Some(mut selection) = self.get_logic_seletion()
+            //         && selection.anchor.0 == selection.focus.0
+            //     {
+            //         let area = selection.to_area();
+            //         if selection.is_cursor() && selection.focus.1 > 0 {
+            //             self.lines[selection.focus.0]
+            //                 .ref_mut()
+            //                 .text_mut()
+            //                 .replace_range(area.start.1 - 1..area.end.1, "");
+            //             selection = LogicSelection::new_cursor(area.start.0, area.start.1 - 1);
+            //         } else if !selection.is_cursor() {
+            //             self.lines[selection.focus.0]
+            //                 .ref_mut()
+            //                 .text_mut()
+            //                 .replace_range(area.start.1..area.end.1, "");
+            //             selection = LogicSelection::new_cursor(area.start.0, area.start.1);
+            //         }
+
+            //         self.set_dom_selection(Some(selection));
+            //     } else {
+            //         unhandled_log();
+            //     }
+            // }
+            // "deleteContentForward" => {
+            //     if let Some(selection) = self.get_logic_seletion()
+            //         && selection.anchor.0 == selection.focus.0
+            //     {
+            //         let area = selection.to_area();
+            //         if selection.is_cursor()
+            //             && selection.focus.1
+            //                 < self.lines[selection.focus.0]
+            //                     .as_ref()
+            //                     .text()
+            //                     .chars()
+            //                     .count()
+            //         {
+            //             self.lines[selection.focus.0]
+            //                 .ref_mut()
+            //                 .text_mut()
+            //                 .replace_range(area.start.1..area.end.1 + 1, "");
+            //         } else if !selection.is_cursor() {
+            //             self.lines[selection.focus.0]
+            //                 .ref_mut()
+            //                 .text_mut()
+            //                 .replace_range(area.start.1..area.end.1, "");
+            //         }
+
+            //         self.set_dom_selection(Some(LogicSelection::new_cursor(
+            //             area.start.0,
+            //             area.start.1,
+            //         )));
+            //     } else {
+            //         unhandled_log();
+            //     }
+            // }
+            // "insertParagraph" | "insertLineBreak" => {
+            //     if let Some(selection) = self.get_logic_seletion()
+            //         && selection.anchor.0 == selection.focus.0
+            //     {
+            //         let area = selection.to_area();
+            //         let first_part =
+            //             self.lines[area.start.0].as_ref().text()[..area.start.1].to_string();
+            //         let second_part =
+            //             self.lines[area.start.0].as_ref().text()[area.end.1..].to_string();
+            //         *self.lines[area.start.0].ref_mut().text_mut() = first_part;
+            //         self.insert_line(area.start.0 + 1, &second_part);
+            //         self.set_dom_selection(Some(LogicSelection::new_cursor(area.start.0 + 1, 0)));
+            //     } else {
+            //         unhandled_log();
+            //     }
+            // }
+            _ => {
+                unhandled_log();
+            }
+        }
+        #[cfg(debug_assertions)]
+        {
+            web_sys::console::log_1(&"successful audit".into());
+            self.audit();
+        }
     }
 
     fn get_logic_seletion(&self) -> Option<LogicSelection> {
@@ -133,15 +174,7 @@ impl _Editor {
                     (anchor_idx, self._dom_selection.get_anchor_offset()),
                     (
                         self.component.len() - 1,
-                        self.component
-                            .last()
-                            .expect("Empty lines")
-                            .component
-                            .get()
-                            .0
-                            .data()
-                            .chars()
-                            .count(),
+                        self.component.last().unwrap().text().chars().count(),
                     ),
                 ))
             }
@@ -201,34 +234,5 @@ impl WithNode for _Editor {
 impl Component for _Editor {
     fn audit(&self) {
         self.component.audit()
-    }
-}
-
-/// LogicSelection is the selection area in logical model's view.
-/// Usually it is dom selection restricted to editable area.
-#[derive(Debug, Clone, Copy)]
-struct LogicSelection {
-    pub anchor: (usize, usize), // #Ln, #Col
-    pub focus: (usize, usize),
-}
-
-impl LogicSelection {
-    pub fn new_cursor(r: usize, c: usize) -> LogicSelection {
-        LogicSelection {
-            anchor: (r, c),
-            focus: (r, c),
-        }
-    }
-
-    pub fn new(anchor: (usize, usize), focus: (usize, usize)) -> LogicSelection {
-        LogicSelection { anchor, focus }
-    }
-
-    pub fn is_cursor(&self) -> bool {
-        self.anchor == self.focus
-    }
-
-    pub fn to_area(self) -> std::ops::Range<(usize, usize)> {
-        std::cmp::min(self.anchor, self.focus)..std::cmp::max(self.anchor, self.focus)
     }
 }

@@ -1,5 +1,7 @@
 // A Codillon DOM "vector": a variable-length collection of Components of the same type
 
+use std::ops::{Index, IndexMut};
+
 use crate::web_support::{AccessToken, AnyElement, Component, ElementHandle, WithElement};
 use delegate::delegate;
 
@@ -42,6 +44,19 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         pub fn set_attribute(&mut self, name: &str, value: &str);
     pub fn set_onbeforeinput<F: Fn(web_sys::InputEvent) + 'static>(&mut self, handler: F);
     }
+    }
+}
+
+impl<Child: Component, Element: AnyElement> Index<usize> for DomVec<Child, Element> {
+    type Output = Child;
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).unwrap()
+    }
+}
+
+impl<Child: Component, Element: AnyElement> IndexMut<usize> for DomVec<Child, Element> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        self.get_mut(index).unwrap()
     }
 }
 

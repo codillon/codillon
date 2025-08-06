@@ -19,7 +19,6 @@ fn setup() -> Result<()> {
     });
 
     web_sys::console::log_1(&"successful audit".into());
-
     Ok(())
 }
 

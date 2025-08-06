@@ -2,6 +2,8 @@
 // the interface allows assignment, appending, and inserting into the
 // string, and enforces that the DOM contents will match the Rust contents.
 
+use std::ops::{Deref, DerefMut};
+
 use crate::web_support::{AccessToken, Component, TextHandle, WithNode};
 use anyhow::Result;
 
@@ -28,8 +30,12 @@ impl DomText {
         self.text_node.set_data(string);
     }
 
-    pub fn data(&self) -> &String {
+    pub fn text(&self) -> &String {
         &self.contents
+    }
+
+    pub fn text_mut(&mut self) -> TextGuard {
+        TextGuard(self)
     }
 
     pub fn insert_at_char(&mut self, char_idx: usize, string: &str) -> Result<()> {
@@ -50,5 +56,26 @@ impl WithNode for DomText {
 impl Component for DomText {
     fn audit(&self) {
         assert_eq!(self.contents, self.text_node.data());
+    }
+}
+
+pub struct TextGuard<'a>(&'a mut DomText);
+
+impl<'a> Deref for TextGuard<'a> {
+    type Target = String;
+    fn deref(&self) -> &Self::Target {
+        &self.0.contents
+    }
+}
+
+impl<'a> DerefMut for TextGuard<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0.contents
+    }
+}
+
+impl<'a> Drop for TextGuard<'a> {
+    fn drop(&mut self) {
+        self.0.text_node.set_data(&self.0.contents);
     }
 }
