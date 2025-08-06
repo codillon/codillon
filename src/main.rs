@@ -1,5 +1,5 @@
 use anyhow::Result;
-use codillon::{dom_struct::DomStruct, editor::Editor, web_support::DocumentHandle};
+use codillon::{editor::Editor, web_support::DocumentHandle, web_support::components::DomStruct};
 use std::cell::RefCell;
 
 type Body = DomStruct<(Editor, ()), web_sys::HtmlBodyElement>;

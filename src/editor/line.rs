@@ -1,7 +1,6 @@
-use crate::{
-    dom_struct::DomStruct,
-    dom_text::{DomText, TextGuard},
-    web_support::{AccessToken, Component, ElementFactory, ElementReader, NodeReader, WithElement},
+use crate::web_support::{
+    AccessToken, Component, ElementFactory, ElementReader, NodeReader, WithElement,
+    components::{DomStruct, DomText, TextGuard},
 };
 use delegate::delegate;
 use wasm_bindgen::JsCast;
@@ -10,8 +9,8 @@ use web_sys::{HtmlBrElement, HtmlDivElement};
 type DomBr = DomStruct<(), HtmlBrElement>;
 type LineContents = (DomText, (DomBr, ()));
 pub struct EditLine {
-    component: DomStruct<LineContents, HtmlDivElement>,
-    _id: usize,
+    pub(super) component: DomStruct<LineContents, HtmlDivElement>,
+    pub(super) _id: usize,
 }
 
 impl WithElement for EditLine {

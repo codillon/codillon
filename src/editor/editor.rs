@@ -1,9 +1,9 @@
 // The Codillon code editor (doesn't do much, but does capture beforeinput and logs to console)
 
-use crate::{
-    dom_vec::DomVec,
-    line::EditLine,
-    web_support::{AccessToken, Component, ElementFactory, LogicSelection, SelectionHandle, WithElement, WithNode},
+use super::line::EditLine;
+use crate::web_support::{
+    AccessToken, Component, ElementFactory, SelectionHandle, WithElement, WithNode,
+    components::DomVec,
 };
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use web_sys::{HtmlDivElement, InputEvent};
@@ -52,7 +52,7 @@ impl _Editor {
 
         match ev.input_type().as_str() {
             "insertText" => {
-                if let Some(selection) = self.get_logic_seletion()
+                if let Some(mut selection) = self.get_logic_seletion()
                     && selection.anchor.0 == selection.focus.0
                 {
                     let area = selection.to_area();
@@ -60,71 +60,63 @@ impl _Editor {
                     self.component[selection.focus.0]
                         .text_mut()
                         .replace_range(area.start.1..area.end.1, new_text);
-                    // selection = LogicSelection::new_cursor(
-                    //     area.start.0,
-                    //     area.start.1 + new_text.chars().count(),
-                    // );
-                    // self.set_dom_selection(Some(selection));
+                    selection = LogicSelection::new_cursor(
+                        area.start.0,
+                        area.start.1 + new_text.chars().count(),
+                    );
+                    self.apply_selection(Some(selection));
                 } else {
                     unhandled_log();
                 }
             }
-            // "deleteContentBackward" => {
-            //     if let Some(mut selection) = self.get_logic_seletion()
-            //         && selection.anchor.0 == selection.focus.0
-            //     {
-            //         let area = selection.to_area();
-            //         if selection.is_cursor() && selection.focus.1 > 0 {
-            //             self.lines[selection.focus.0]
-            //                 .ref_mut()
-            //                 .text_mut()
-            //                 .replace_range(area.start.1 - 1..area.end.1, "");
-            //             selection = LogicSelection::new_cursor(area.start.0, area.start.1 - 1);
-            //         } else if !selection.is_cursor() {
-            //             self.lines[selection.focus.0]
-            //                 .ref_mut()
-            //                 .text_mut()
-            //                 .replace_range(area.start.1..area.end.1, "");
-            //             selection = LogicSelection::new_cursor(area.start.0, area.start.1);
-            //         }
+            "deleteContentBackward" => {
+                if let Some(mut selection) = self.get_logic_seletion()
+                    && selection.anchor.0 == selection.focus.0
+                {
+                    let area = selection.to_area();
+                    if selection.is_cursor() && selection.focus.1 > 0 {
+                        self.component[selection.focus.0]
+                            .text_mut()
+                            .replace_range(area.start.1 - 1..area.end.1, "");
+                        selection = LogicSelection::new_cursor(area.start.0, area.start.1 - 1);
+                    } else if !selection.is_cursor() {
+                        self.component[selection.focus.0]
+                            .text_mut()
+                            .replace_range(area.start.1..area.end.1, "");
+                        selection = LogicSelection::new_cursor(area.start.0, area.start.1);
+                    }
 
-            //         self.set_dom_selection(Some(selection));
-            //     } else {
-            //         unhandled_log();
-            //     }
-            // }
-            // "deleteContentForward" => {
-            //     if let Some(selection) = self.get_logic_seletion()
-            //         && selection.anchor.0 == selection.focus.0
-            //     {
-            //         let area = selection.to_area();
-            //         if selection.is_cursor()
-            //             && selection.focus.1
-            //                 < self.lines[selection.focus.0]
-            //                     .as_ref()
-            //                     .text()
-            //                     .chars()
-            //                     .count()
-            //         {
-            //             self.lines[selection.focus.0]
-            //                 .ref_mut()
-            //                 .text_mut()
-            //                 .replace_range(area.start.1..area.end.1 + 1, "");
-            //         } else if !selection.is_cursor() {
-            //             self.lines[selection.focus.0]
-            //                 .ref_mut()
-            //                 .text_mut()
-            //                 .replace_range(area.start.1..area.end.1, "");
-            //         }
+                    self.apply_selection(Some(selection));
+                } else {
+                    unhandled_log();
+                }
+            }
+            "deleteContentForward" => {
+                if let Some(selection) = self.get_logic_seletion()
+                    && selection.anchor.0 == selection.focus.0
+                {
+                    let area = selection.to_area();
+                    if selection.is_cursor()
+                        && selection.focus.1
+                            < self.component[selection.focus.0].text().chars().count()
+                    {
+                        self.component[selection.focus.0]
+                            .text_mut()
+                            .replace_range(area.start.1..area.end.1 + 1, "");
+                    } else if !selection.is_cursor() {
+                        self.component[selection.focus.0]
+                            .text_mut()
+                            .replace_range(area.start.1..area.end.1, "");
+                    }
 
-            //         self.set_dom_selection(Some(LogicSelection::new_cursor(
-            //             area.start.0,
-            //             area.start.1,
-            //         )));
-            //     } else {
-            //         unhandled_log();
-            //     }
-            // }
+                    self.apply_selection(Some(LogicSelection::new_cursor(
+                        area.start.0,
+                        area.start.1,
+                    )));
+                } else {
+                    unhandled_log();
+                }
+            }
             // "insertParagraph" | "insertLineBreak" => {
             //     if let Some(selection) = self.get_logic_seletion()
             //         && selection.anchor.0 == selection.focus.0
@@ -188,6 +180,16 @@ impl _Editor {
             (None, None) => None,
         }
     }
+    fn apply_selection(&mut self, logic_selection: Option<LogicSelection>) {
+        if let Some(LogicSelection { anchor, focus }) = logic_selection {
+            let anchor_node = &self.component[anchor.0].component.get().0;
+            let focus_node = &self.component[focus.0].component.get().0;
+            self._dom_selection
+                .set_selection(anchor_node, anchor.1, focus_node, focus.1);
+        } else {
+            self._dom_selection.remove_selection();
+        }
+    }
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -234,5 +236,34 @@ impl WithNode for _Editor {
 impl Component for _Editor {
     fn audit(&self) {
         self.component.audit()
+    }
+}
+
+/// LogicSelection is the selection area in logical model's view.
+/// Usually it is dom selection restricted to editable area.
+#[derive(Debug, Clone, Copy)]
+struct LogicSelection {
+    pub anchor: (usize, usize), // #Ln, #Col
+    pub focus: (usize, usize),
+}
+
+impl LogicSelection {
+    pub fn new_cursor(r: usize, c: usize) -> LogicSelection {
+        LogicSelection {
+            anchor: (r, c),
+            focus: (r, c),
+        }
+    }
+
+    pub fn new(anchor: (usize, usize), focus: (usize, usize)) -> LogicSelection {
+        LogicSelection { anchor, focus }
+    }
+
+    pub fn is_cursor(&self) -> bool {
+        self.anchor == self.focus
+    }
+
+    pub fn to_area(self) -> std::ops::Range<(usize, usize)> {
+        std::cmp::min(self.anchor, self.focus)..std::cmp::max(self.anchor, self.focus)
     }
 }

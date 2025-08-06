@@ -4,6 +4,9 @@
 // from modifying a DOM object belonging to another. This means that Components
 // cannot directly access the children or parents of a DOM node.
 
+mod selection;
+pub use selection::SelectionHandle;
+
 use delegate::delegate;
 use std::{
     collections::HashMap,
@@ -12,10 +15,8 @@ use std::{
 use wasm_bindgen::closure::Closure;
 use web_sys::{HtmlBodyElement, Node, wasm_bindgen::JsCast};
 
-use crate::web_support::SelectionHandle;
-
 // Traits that give "raw" access to an underlying node or element,
-// only usable from the web_support module.
+// only usable from the web_support::core module.
 struct _Private();
 pub struct AccessToken(_Private);
 const TOKEN: AccessToken = AccessToken(_Private());
