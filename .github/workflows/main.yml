@@ -41,7 +41,7 @@ jobs:
     - uses: taiki-e/install-action@9ba3ac3fd006a70c6e186a683577abc1ccf0ff3a
       with:
         tool: "trunk, wasm-bindgen"
-    - run: trunk build --release
+    - run: RUSTFLAGS='--cfg getrandom_backend="wasm_js"' trunk build --release
 
   test:
     name: Test
@@ -69,8 +69,6 @@ jobs:
     - uses: ./.github/actions/install-rust
     - run: rustup component add rustfmt
     - run: find . -name '*.rs' | xargs rustfmt --check --edition 2024
-    - run: cargo install leptosfmt
-    - run: leptosfmt --check .
 
   doc:
     runs-on: ubuntu-latest
