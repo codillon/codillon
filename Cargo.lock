@@ -245,7 +245,7 @@ dependencies = [
  "str_indices",
  "wasm-bindgen",
  "wasm-tools",
- "wasmparser 0.235.0",
+ "wasmparser 0.236.0",
  "wasmprinter 0.235.0",
  "wast 235.0.0",
  "wat",
@@ -1554,10 +1554,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "161296c618fa2d63f6ed5fffd1112937e803cb9ec71b32b01a76321555660917"
 dependencies = [
  "bitflags",
- "hashbrown 0.15.4",
  "indexmap 2.10.0",
  "semver",
- "serde",
 ]
 
 [[package]]
@@ -1570,6 +1568,7 @@ dependencies = [
  "hashbrown 0.15.4",
  "indexmap 2.10.0",
  "semver",
+ "serde",
 ]
 
 [[package]]
