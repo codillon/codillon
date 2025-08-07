@@ -50,16 +50,6 @@ impl _Editor {
     fn handle_input(&mut self, ev: InputEvent) {
         ev.prevent_default();
 
-        web_sys::console::log_1(
-            &format!(
-                "Event Type:{}, Data: {:?}, Selection:{:?}",
-                ev.input_type(),
-                ev.data(),
-                self.get_logic_seletion()
-            )
-            .into(),
-        );
-
         let unhandled_log = || {
             web_sys::console::log_1(
                 &format!(
@@ -185,7 +175,7 @@ impl _Editor {
         let anchor_id = EditLine::find_id_from_node(anchor);
         let focus_id = EditLine::find_id_from_node(focus);
 
-        match (anchor_id, focus_id) {
+        let mut selection = match (anchor_id, focus_id) {
             (Some(anchor_id), Some(focus_id)) => {
                 let anchor_idx: usize = *self._id_map.get(&anchor_id).expect("can't find line");
                 let focus_idx: usize = *self._id_map.get(&focus_id).expect("can't find line");
@@ -212,7 +202,17 @@ impl _Editor {
                 ))
             }
             (None, None) => None,
+        };
+
+        if let Some(selection) = &mut selection {
+            if self.component[selection.anchor.0].text().is_empty() {
+                selection.anchor.1 = 0;
+            }
+            if self.component[selection.focus.0].text().is_empty() {
+                selection.focus.1 = 0;
+            }
         }
+        selection
     }
     fn apply_selection(&mut self, logic_selection: Option<LogicSelection>) {
         if let Some(LogicSelection { anchor, focus }) = logic_selection {
