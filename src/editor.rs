@@ -50,6 +50,16 @@ impl _Editor {
     fn handle_input(&mut self, ev: InputEvent) {
         ev.prevent_default();
 
+        web_sys::console::log_1(
+            &format!(
+                "Event Type:{}, Data: {:?}, Selection:{:?}",
+                ev.input_type(),
+                ev.data(),
+                self.get_logic_seletion()
+            )
+            .into(),
+        );
+
         let unhandled_log = || {
             web_sys::console::log_1(
                 &format!(
@@ -70,8 +80,10 @@ impl _Editor {
                     let area = selection.to_area();
                     let new_text = &ev.data().unwrap_or_default();
                     self.component[selection.focus.0]
-                        .text_mut()
-                        .replace_range(area.start.1..area.end.1, new_text);
+                        .component
+                        .get_mut()
+                        .0
+                        .replace_data(area.start.1..area.end.1, new_text);
                     selection = LogicSelection::new_cursor(
                         area.start.0,
                         area.start.1 + new_text.chars().count(),
@@ -88,13 +100,17 @@ impl _Editor {
                     let area = selection.to_area();
                     if selection.is_cursor() && selection.focus.1 > 0 {
                         self.component[selection.focus.0]
-                            .text_mut()
-                            .replace_range(area.start.1 - 1..area.end.1, "");
+                            .component
+                            .get_mut()
+                            .0
+                            .replace_data(area.start.1 - 1..area.end.1, "");
                         selection = LogicSelection::new_cursor(area.start.0, area.start.1 - 1);
                     } else if !selection.is_cursor() {
                         self.component[selection.focus.0]
-                            .text_mut()
-                            .replace_range(area.start.1..area.end.1, "");
+                            .component
+                            .get_mut()
+                            .0
+                            .replace_data(area.start.1..area.end.1, "");
                         selection = LogicSelection::new_cursor(area.start.0, area.start.1);
                     }
 
@@ -113,12 +129,16 @@ impl _Editor {
                             < self.component[selection.focus.0].text().chars().count()
                     {
                         self.component[selection.focus.0]
-                            .text_mut()
-                            .replace_range(area.start.1..area.end.1 + 1, "");
+                            .component
+                            .get_mut()
+                            .0
+                            .replace_data(area.start.1..area.end.1 + 1, "");
                     } else if !selection.is_cursor() {
                         self.component[selection.focus.0]
-                            .text_mut()
-                            .replace_range(area.start.1..area.end.1, "");
+                            .component
+                            .get_mut()
+                            .0
+                            .replace_data(area.start.1..area.end.1, "");
                     }
 
                     self.apply_selection(Some(LogicSelection::new_cursor(
@@ -134,10 +154,13 @@ impl _Editor {
                     && selection.anchor.0 == selection.focus.0
                 {
                     let area = selection.to_area();
-                    let first_part =
-                        self.component[area.start.0].text()[..area.start.1].to_string();
                     let second_part = self.component[area.start.0].text()[area.end.1..].to_string();
-                    *self.component[area.start.0].text_mut() = first_part;
+                    let line_chars_cnt = self.component[area.start.0].text().chars().count();
+                    self.component[area.start.0]
+                        .component
+                        .get_mut()
+                        .0
+                        .replace_data(area.start.1..line_chars_cnt, "");
                     self.insert_line(area.start.0 + 1, &second_part);
                     self.apply_selection(Some(LogicSelection::new_cursor(area.start.0 + 1, 0)));
                 } else {

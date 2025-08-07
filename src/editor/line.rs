@@ -71,6 +71,7 @@ impl EditLine {
         }
         to self.component.get_mut().0
         {
+            #[allow(dead_code)]
             pub fn text_mut(&mut self) -> TextGuard;
         }
     }

@@ -96,14 +96,12 @@ impl WithNode for TextHandle {
 
 impl TextHandle {
     delegate! {
-    to self.0 {
-        pub fn data(&self) -> String;
-    pub fn set_data(&self, value: &str);
-    #[unwrap] // no return value anyway
-    pub fn append_data(&self, data: &str);
-    #[unwrap] // no return value anyway
-    pub fn insert_data(&self, offset: u32, data: &str);
-    }
+        to self.0 {
+            pub fn data(&self) -> String;
+        pub fn set_data(&self, value: &str);
+        #[unwrap] // no return value anyway
+        pub fn replace_data(&self, offset: u32, count: u32, data: &str);
+        }
     }
 }
 

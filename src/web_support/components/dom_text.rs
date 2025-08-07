@@ -5,7 +5,6 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::web_support::{AccessToken, Component, TextHandle, WithNode};
-use anyhow::Result;
 
 #[derive(Default)]
 pub struct DomText {
@@ -20,9 +19,18 @@ impl DomText {
         ret
     }
 
-    pub fn push_str(&mut self, string: &str) {
-        self.contents.push_str(string);
-        self.text_node.append_data(string);
+    pub fn replace_data(&mut self, char_idx_range: std::ops::Range<usize>, string: &str) {
+        let begin_byte_idx = str_indices::chars::to_byte_idx(&self.contents, char_idx_range.start);
+        let begin_utf16_idx = str_indices::utf16::from_byte_idx(&self.contents, begin_byte_idx);
+        let end_byte_idx = str_indices::chars::to_byte_idx(&self.contents, char_idx_range.end);
+        let end_utf16_idx = str_indices::utf16::from_byte_idx(&self.contents, char_idx_range.end);
+        self.contents
+            .replace_range(begin_byte_idx..end_byte_idx, string);
+        self.text_node.replace_data(
+            begin_utf16_idx as u32,
+            (end_utf16_idx - begin_utf16_idx) as u32,
+            string,
+        );
     }
 
     pub fn set_data(&mut self, string: &str) {
@@ -36,14 +44,6 @@ impl DomText {
 
     pub fn text_mut(&mut self) -> TextGuard {
         TextGuard(self)
-    }
-
-    pub fn insert_at_char(&mut self, char_idx: usize, string: &str) -> Result<()> {
-        let byte_idx = str_indices::chars::to_byte_idx(&self.contents, char_idx);
-        let utf16_idx = str_indices::utf16::from_byte_idx(&self.contents, byte_idx);
-        self.contents.insert_str(byte_idx, string);
-        self.text_node.insert_data(utf16_idx.try_into()?, string);
-        Ok(())
     }
 }
 
