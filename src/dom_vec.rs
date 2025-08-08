@@ -20,6 +20,10 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.contents.len()
+    }
+
     pub fn push(&mut self, elem: Child) {
         self.contents.push(elem);
         self.elem.append_node(self.contents.last().unwrap());

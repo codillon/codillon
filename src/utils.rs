@@ -1,9 +1,59 @@
 use anyhow::{Result, anyhow};
+use self_cell::self_cell;
 use std::ops::RangeInclusive;
 use wasm_tools::parse_binary_wasm;
 use wasmparser::{Parser, ValType};
 use wast::core::{Instruction, Module};
 use wast::parser::{self, ParseBuffer};
+
+type Ops<'a> = Result<Vec<Vec<wasmparser::Operator<'a>>>>;
+
+self_cell!(
+    pub struct OkModule {
+        owner: Vec<u8>,
+        #[covariant]
+        dependent: Ops,
+        // Reverse mapping maps op index (wihtin a function) to a global edit line index
+    }
+
+    impl {Debug}
+);
+
+impl OkModule {
+    pub fn build(wasm_bin: Vec<u8>) -> Result<Self> {
+        Ok(OkModule::new(wasm_bin, |wasm_bin| {
+            let parser = wasmparser::Parser::new(0);
+            let mut functions = Vec::new();
+
+            for payload in parser.parse_all(wasm_bin) {
+                if let wasmparser::Payload::CodeSectionEntry(body) = payload? {
+                    let mut func_ops = Vec::new();
+                    for op in body.get_operators_reader()? {
+                        if op.is_err() {
+                            continue;
+                        };
+                        func_ops.push(op?);
+                    }
+                    functions.push(func_ops);
+                }
+            }
+            Ok(functions)
+        }))
+    }
+
+    pub fn borrow_binary(&self) -> &[u8] {
+        self.borrow_owner()
+    }
+
+    pub fn borrow_ops(&self) -> &Ops {
+        self.borrow_dependent()
+    }
+}
+
+pub fn str_to_binary(s: &str) -> Result<Vec<u8>> {
+    let txt = format!("module {s}");
+    Ok(parser::parse::<Module>(&ParseBuffer::new(&txt)?)?.encode()?)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstrInfo {
@@ -12,6 +62,9 @@ pub enum InstrInfo {
     End,
     OtherStructured, // block, loop, or try_table
     Other,           // any other instruction
+    FuncHeader,
+    FuncEnd,
+    EmptyorMalformed,
 }
 
 impl From<Instruction<'_>> for InstrInfo {
@@ -40,22 +93,31 @@ impl From<Instruction<'_>> for InstrInfo {
 /// s: A string slice representing a Wasm instruction
 ///
 /// # Returns
-/// Err: Malformed
-/// Ok(None): empty
-/// Ok(Some(InstrInfo)): instruction of given category
-pub fn parse_instr(s: &str) -> Result<Option<InstrInfo>> {
+/// InstrInfo: instruction (or malformed "instruction") of given category
+pub fn parse_instr(s: &str) -> InstrInfo {
     //get rid of comments and spaces (clippy says not to use nth...)
     let s = s
         .split(";;")
         .next()
         .expect("split produced empty iterator")
         .trim();
-    Ok(if s.is_empty() {
+    if s.is_empty() {
         // is there an instruction on this line?
-        None
+        InstrInfo::EmptyorMalformed
+    } else if s == ")" {
+        InstrInfo::FuncEnd
+    } else if s.starts_with("(func") {
+        let module = format!("module {s})");
+        if let Ok(buf) = ParseBuffer::new(&module) && parser::parse::<Module>(&buf).is_ok() {
+            InstrInfo::FuncHeader
+        } else {
+            InstrInfo::EmptyorMalformed
+        }
+    } else if let Ok(buf) = ParseBuffer::new(s) && let Ok(instr) = parser::parse::<Instruction>(&buf) {
+        instr.into()
     } else {
-        Some(parser::parse::<Instruction>(&ParseBuffer::new(s)?)?.into())
-    })
+        InstrInfo::EmptyorMalformed
+    }
 }
 
 /// Decides if a given string is a well-formed text-format Wasm function
@@ -148,15 +210,12 @@ pub type Frame = RangeInclusive<usize>;
 ///
 /// ### Returns
 /// A tuple of a vector containing the deactivated indices, and the number of **end** appended at the end.
-pub fn fix_frames(instrs: &[Option<InstrInfo>]) -> (Vec<usize>, usize) {
+pub fn fix_frames(instrs: &[InstrInfo]) -> (Vec<usize>, usize) {
     let mut deactivated = Vec::new();
     // Use stacks as memory of frame begining borders.
     let mut frame_border_stack = Vec::new();
 
     for (idx, instr) in instrs.iter().enumerate() {
-        let Some(instr) = instr else {
-            continue;
-        };
         match instr {
             InstrInfo::If | InstrInfo::OtherStructured => frame_border_stack.push((instr, idx)),
             InstrInfo::Else => {
@@ -187,38 +246,39 @@ pub fn fix_frames(instrs: &[Option<InstrInfo>]) -> (Vec<usize>, usize) {
 ///
 /// ### Panics
 /// When the input has unmatched frames
-pub fn match_frames(instrs: &[Option<InstrInfo>]) -> Vec<Frame> {
+pub fn match_frames(instrs: &[InstrInfo]) -> Vec<Frame> {
     let mut frames = Vec::new();
     // Use stacks as memory of frame begining borders.
     let mut frame_border_stack = Vec::new();
 
     for (idx, instr) in instrs.iter().enumerate() {
-        if let Some(instr) = instr {
-            match instr {
-                InstrInfo::If | InstrInfo::OtherStructured => {
-                    frame_border_stack.push((instr, idx));
-                }
-                InstrInfo::Else => {
-                    if let Some((prev, last_span_start)) = frame_border_stack.pop()
-                        && matches!(prev, InstrInfo::If)
-                    {
-                        let last_span_end = idx - 1;
-                        frames.push(last_span_start..=last_span_end);
-                    } else {
-                        panic!("Unmatched else");
-                    }
-                    frame_border_stack.push((instr, idx));
-                }
-                InstrInfo::End => {
-                    if let Some((_, last_span_start)) = frame_border_stack.pop() {
-                        frames.push(last_span_start..=idx);
-                    } else {
-                        panic!("Unmatched end");
-                    }
-                }
-                _ => (), // Ignore other instructions
+        match instr {
+            InstrInfo::If | InstrInfo::OtherStructured => {
+                frame_border_stack.push((instr, idx));
             }
+            InstrInfo::Else => {
+                if let Some((prev, last_span_start)) = frame_border_stack.pop()
+                    && matches!(prev, InstrInfo::If)
+                {
+                    let last_span_end = idx - 1;
+                    frames.push(last_span_start..=last_span_end);
+                } else {
+                    panic!("Unmatched else");
+                }
+                frame_border_stack.push((instr, idx));
+            }
+            InstrInfo::End => {
+                if let Some((_, last_span_start)) = frame_border_stack.pop() {
+                    frames.push(last_span_start..=idx);
+                } else {
+                    panic!("Unmatched end");
+                }
+            }
+            _ => (), // Ignore other instructions
         }
+    }
+    if !frame_border_stack.is_empty() {
+        panic!("Unmatched frames: {:?}", frame_border_stack);
     }
     frames
 }
@@ -242,32 +302,41 @@ mod tests {
     #[test]
     fn test_is_well_formed_instr() -> Result<()> {
         //well-formed instructions
-        assert!(parse_instr("i32.add")? == Some(InstrInfo::Other));
-        assert!(parse_instr("i32.const 5")? == Some(InstrInfo::Other));
+        assert!(parse_instr("i32.add") == InstrInfo::Other);
+        assert!(parse_instr("i32.const 5") == InstrInfo::Other);
         //not well-formed "instructions"
-        assert!(parse_instr("i32.bogus").is_err());
-        assert!(parse_instr("i32.const").is_err());
-        assert!(parse_instr("i32.const x").is_err());
+        assert!(parse_instr("i32.bogus") == InstrInfo::EmptyorMalformed);
+        assert!(parse_instr("i32.const") == InstrInfo::EmptyorMalformed);
+        assert!(parse_instr("i32.const x") == InstrInfo::EmptyorMalformed);
         //not well-formed "instructions": multiple instructions per line, folded instructions
-        assert!(parse_instr("i32.const 4 i32.const 5").is_err());
-        assert!(parse_instr("(i32.const 4)").is_err());
-        assert!(parse_instr("(i32.add (i32.const 4) (i32.const 5))").is_err());
+        assert!(parse_instr("i32.const 4 i32.const 5") == InstrInfo::EmptyorMalformed);
+        assert!(parse_instr("(i32.const 4)") == InstrInfo::EmptyorMalformed);
+        assert!(parse_instr("(i32.add (i32.const 4) (i32.const 5))") == InstrInfo::EmptyorMalformed);
         //spaces before and after, comments, and empty lines are well-formed
-        assert!(parse_instr("    i32.const 5")? == Some(InstrInfo::Other));
-        assert!(parse_instr("    i32.const 5 ;; hello ")? == Some(InstrInfo::Other));
-        assert!(parse_instr("i32.const 5     ")? == Some(InstrInfo::Other));
-        assert!(parse_instr(";;Hello")?.is_none());
-        assert!(parse_instr("   ;; Hello ")?.is_none());
-        assert!(parse_instr("i32.const 5   ;;this is a const")? == Some(InstrInfo::Other));
-        assert!(parse_instr("")?.is_none());
-        assert!(parse_instr("   ")?.is_none());
-        assert!(parse_instr("if")? == Some(InstrInfo::If));
-        assert!(parse_instr("if (result i32)")? == Some(InstrInfo::If));
-        assert!(parse_instr("   else   ")? == Some(InstrInfo::Else));
-        assert!(parse_instr("   end   ")? == Some(InstrInfo::End));
-        assert!(parse_instr("   block   ")? == Some(InstrInfo::OtherStructured));
-        assert!(parse_instr("   loop   ")? == Some(InstrInfo::OtherStructured));
-        assert!(parse_instr("   try_table   ")? == Some(InstrInfo::OtherStructured));
+        assert!(parse_instr("    i32.const 5") == InstrInfo::Other);
+        assert!(parse_instr("    i32.const 5 ;; hello ") == InstrInfo::Other);
+        assert!(parse_instr("i32.const 5     ") == InstrInfo::Other);
+        assert!(parse_instr(";;Hello") == InstrInfo::EmptyorMalformed);
+        assert!(parse_instr("   ;; Hello ") == InstrInfo::EmptyorMalformed);
+        assert!(parse_instr("i32.const 5   ;;this is a const") == InstrInfo::Other);
+        assert!(parse_instr("") == InstrInfo::EmptyorMalformed);
+        assert!(parse_instr("   ") == InstrInfo::EmptyorMalformed);
+        assert!(parse_instr("if") == InstrInfo::If);
+        assert!(parse_instr("if (result i32)") == InstrInfo::If);
+        assert!(parse_instr("   else   ") == InstrInfo::Else);
+        assert!(parse_instr("   end   ") == InstrInfo::End);
+        assert!(parse_instr("   block   ") == InstrInfo::OtherStructured);
+        assert!(parse_instr("   loop   ") == InstrInfo::OtherStructured);
+        assert!(parse_instr("   try_table   ") == InstrInfo::OtherStructured);
+        //func header and func end are well-formed
+        assert!(parse_instr("(func") == InstrInfo::FuncHeader);
+        assert!(parse_instr("(func (param i32)") == InstrInfo::FuncHeader);
+        assert!(parse_instr("(func (result i32)") == InstrInfo::FuncHeader);
+        assert!(parse_instr("(func (param i32) (result i32)") == InstrInfo::FuncHeader);
+        assert!(parse_instr(")") == InstrInfo::FuncEnd);
+        //func header is not well-formed
+        assert!(parse_instr("func (par i32)") == InstrInfo::EmptyorMalformed);
+        assert!(parse_instr("func (resul i32)") == InstrInfo::EmptyorMalformed);
         Ok(())
     }
     #[test]
@@ -303,7 +372,7 @@ mod tests {
         let (deativated, appended) = fix_frames(
             &instrs1
                 .into_iter()
-                .map(|instr| parse_instr(instr).unwrap())
+                .map(|instr| parse_instr(instr))
                 .collect::<Vec<_>>(),
         );
         assert!(deativated.is_empty() && appended == 1);
@@ -318,7 +387,7 @@ mod tests {
         let (deativated, appended) = fix_frames(
             &instrs2
                 .into_iter()
-                .map(|instr| parse_instr(instr).unwrap())
+                .map(|instr| parse_instr(instr))
                 .collect::<Vec<_>>(),
         );
         assert!(deativated.len() == 1 && *deativated.first().unwrap() == 2 && appended == 1);
@@ -331,7 +400,7 @@ mod tests {
         let frames1 = match_frames(
             &instrs1
                 .into_iter()
-                .map(|instr| parse_instr(instr).unwrap())
+                .map(|instr| parse_instr(instr))
                 .collect::<Vec<_>>(),
         );
         let expected1 = [0..=3]; // block from 0 to 3
@@ -359,7 +428,7 @@ mod tests {
         let mut frames2 = match_frames(
             &instrs2
                 .into_iter()
-                .map(|instr| parse_instr(instr).unwrap())
+                .map(|instr| parse_instr(instr))
                 .collect::<Vec<_>>(),
         );
         let mut expected2 = [

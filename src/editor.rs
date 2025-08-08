@@ -1,10 +1,11 @@
 // The Codillon code editor (doesn't do much, but does capture beforeinput and logs to console)
 
 use crate::{
+    dom_sidecar::DomSidecar,
     dom_struct::DomStruct,
     dom_text::DomText,
     dom_vec::DomVec,
-    utils::FmtError,
+    utils::*,
     web_support::{
         AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
         StaticRangeHandle, WithElement, compare_document_position, set_cursor_position,
@@ -21,8 +22,19 @@ type DomBr = DomStruct<(), HtmlBrElement>;
 type LineContents = (DomText, (DomBr, ()));
 type EditLine = DomStruct<LineContents, HtmlSpanElement>;
 
+struct EditLineSidecar {
+    id: usize,
+    info: InstrInfo,
+    //params: Vec<(wasmparser::ValType, usize)>,
+    //returns: Vec<(wasmparser::ValType)>,
+    //op: Option<usize>,
+}
+
 struct _Editor {
-    component: DomVec<EditLine, HtmlDivElement>,
+    _next_id: usize,
+    _id_map: HashMap<usize, usize>,
+    _module: OkModule,
+    component: DomVec<DomSidecar<EditLine, EditLineSidecar>, HtmlDivElement>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -30,6 +42,9 @@ pub struct Editor(Rc<RefCell<_Editor>>);
 impl Editor {
     pub fn new(factory: &ElementFactory) -> Self {
         let mut inner = _Editor {
+            _next_id: 0,
+            _id_map: HashMap::default(),
+            _module: OkModule::build(str_to_binary("").expect("wasm binary")).expect("OkModule"),
             component: DomVec::new(factory.div()),
         };
 
@@ -54,10 +69,21 @@ impl Editor {
     }
 
     fn push_line(&mut self, factory: &ElementFactory, string: &str) {
-        self.component_mut().push(EditLine::new(
-            (DomText::new(string), (DomBr::new((), factory.br()), ())),
-            factory.span(),
+        {let mut editor = self.0.borrow_mut();
+        let id = editor._next_id;
+        let component = &mut editor.component;
+        component.push(DomSidecar::new(
+            EditLine::new(
+                (DomText::new(string), (DomBr::new((), factory.br()), ())),
+                factory.span(),
+            ),
+            EditLineSidecar {
+                id: id,
+                info: parse_instr(string),
+            },
         ));
+        editor._next_id += 1;}
+        self.update_module();
     }
 
     // Replace a given range (currently within a single line) with new text
@@ -198,6 +224,18 @@ impl Editor {
                 .context("line {idx}")?,
             |x| &mut x.get_mut().0,
         ))
+    }
+
+    fn update_module(&mut self) {
+        let mut editor = self.0.borrow_mut();
+        let mut lines = String::new();
+        for i in 0..editor.component.len() {
+            let line = editor.component.get(i).unwrap();
+            let text = line.borrow_component().get().0.get_contents();
+            lines.push_str(&format!("{};\n", text));
+        }
+        let bin = str_to_binary(&lines).expect("wasm binary");
+        editor._module = OkModule::build(bin).expect("OkModule");
     }
 }
 
