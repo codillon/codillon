@@ -1,17 +1,17 @@
 // The Codillon code editor (doesn't do much, but does capture beforeinput and logs to console)
+mod line;
 
 use crate::{
-    dom_struct::DomStruct,
-    dom_text::DomText,
-    dom_vec::DomVec,
-    web_support::{AccessToken, Component, ElementFactory, WithElement},
+    editor::line::DomBr,
+    web_support::{
+        AccessToken, Component, ElementFactory, WithElement,
+        components::{DomText, DomVec},
+    },
 };
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
-use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement, InputEvent};
 
-type DomBr = DomStruct<(), HtmlBrElement>;
-type LineContents = (DomText, (DomBr, ()));
-type EditLine = DomStruct<LineContents, HtmlSpanElement>;
+use line::EditLine;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use web_sys::{HtmlDivElement, InputEvent};
 
 struct _Editor {
     _next_id: usize,
