@@ -2,7 +2,8 @@
 // of heterogeneous Components of (possibly) different types.
 
 use crate::web_support::{
-    AccessToken, AnyElement, ArrayHandle, Component, ElementHandle, NodeListHandle, WithElement,
+    AccessToken, AnyElement, ArrayHandle, Component, ElementAsNode, ElementHandle, NodeListHandle,
+    WithElement,
 };
 use delegate::delegate;
 
@@ -95,3 +96,5 @@ impl<Child: Structure, Element: AnyElement> WithElement for DomStruct<Child, Ele
         self.elem.with_element(f, g);
     }
 }
+
+impl<Child: Structure, Element: AnyElement> ElementAsNode for DomStruct<Child, Element> {}
