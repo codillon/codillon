@@ -6,8 +6,8 @@ use crate::{
     dom_vec::DomVec,
     utils::FmtError,
     web_support::{
-        AccessToken, Component, ElementFactory, InputEventHandle, NodeRef, StaticRangeHandle,
-        WithElement, compare_document_position, set_cursor_position,
+        AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
+        StaticRangeHandle, WithElement, compare_document_position, set_cursor_position,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -207,6 +207,8 @@ impl WithElement for Editor {
         self.component().with_element(f, g);
     }
 }
+
+impl ElementAsNode for Editor {}
 
 impl Component for Editor {
     fn audit(&self) {
