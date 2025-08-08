@@ -1,5 +1,5 @@
 use anyhow::Result;
-use codillon::{dom_struct::DomStruct, editor::Editor, web_support::DocumentHandle};
+use codillon::{editor::Editor, web_support::DocumentHandle, web_support::components::DomStruct};
 use std::cell::RefCell;
 
 type Body = DomStruct<(Editor, ()), web_sys::HtmlBodyElement>;
@@ -12,12 +12,13 @@ thread_local! {
 fn setup() -> Result<()> {
     DOCUMENT.with_borrow_mut(|doc| {
         let factory = doc.element_factory();
-        doc.set_body(Body::new((Editor::new(&factory), ()), factory.body()));
+        let selection = doc.get_selection().expect("doc selection");
+        let body = factory.body();
+        doc.set_body(Body::new((Editor::new(factory, selection), ()), body));
         doc.audit();
     });
 
     web_sys::console::log_1(&"successful audit".into());
-
     Ok(())
 }
 

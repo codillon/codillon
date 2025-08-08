@@ -4,16 +4,19 @@
 // from modifying a DOM object belonging to another. This means that Components
 // cannot directly access the children or parents of a DOM node.
 
+mod selection;
+pub use selection::SelectionHandle;
+
 use delegate::delegate;
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::{HtmlBodyElement, wasm_bindgen::JsCast};
+use web_sys::{HtmlBodyElement, Node, wasm_bindgen::JsCast};
 
 // Traits that give "raw" access to an underlying node or element,
-// only usable from the web_support module.
+// only usable from the web_support::core module.
 struct _Private();
 pub struct AccessToken(_Private);
 const TOKEN: AccessToken = AccessToken(_Private());
@@ -93,14 +96,12 @@ impl WithNode for TextHandle {
 
 impl TextHandle {
     delegate! {
-    to self.0 {
-        pub fn data(&self) -> String;
-    pub fn set_data(&self, value: &str);
-    #[unwrap] // no return value anyway
-    pub fn append_data(&self, data: &str);
-    #[unwrap] // no return value anyway
-    pub fn insert_data(&self, offset: u32, data: &str);
-    }
+        to self.0 {
+            pub fn data(&self) -> String;
+        pub fn set_data(&self, value: &str);
+        #[unwrap] // no return value anyway
+        pub fn replace_data(&self, offset: u32, count: u32, data: &str);
+        }
     }
 }
 
@@ -116,6 +117,69 @@ pub struct ElementHandle<T: AnyElement> {
     elem: AutoRemove<T>,
     attributes: HashMap<String, String>,
     event_handlers: Handlers,
+}
+
+// NodeReader and ElementReader are used traverse
+// and read attributes
+pub struct NodeReader<T: AsRef<Node>>(pub(super) T);
+pub struct ElementReader<T: AsRef<web_sys::Element>>(pub(super) T);
+
+impl<T: AsRef<Node>> NodeReader<T> {
+    pub fn parent_node(&self) -> Option<NodeReader<web_sys::Node>> {
+        self.0.as_ref().parent_node().map(NodeReader)
+    }
+
+    pub fn parent_element(&self) -> Option<ElementReader<web_sys::Element>> {
+        self.0.as_ref().parent_element().map(ElementReader)
+    }
+}
+
+impl<T: AsRef<Node>> NodeReader<T> {
+    pub fn new(node: T) -> Self {
+        Self(node)
+    }
+}
+
+impl<T: AsRef<Node>> NodeReader<T> {
+    pub fn dyn_into<U: AsRef<Node> + JsCast>(self) -> Result<NodeReader<U>, Self> {
+        if self.0.as_ref().dyn_ref::<U>().is_some() {
+            Ok(NodeReader::new(
+                self.0.as_ref().clone().dyn_into::<U>().expect("dyn_into"),
+            ))
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl<T: AsRef<web_sys::Element>> ElementReader<T> {
+    pub fn new(elem: T) -> Self {
+        Self(elem)
+    }
+
+    pub fn parent_node(&self) -> Option<NodeReader<web_sys::Node>> {
+        self.0.as_ref().parent_node().map(NodeReader)
+    }
+
+    pub fn parent_element(&self) -> Option<ElementReader<web_sys::Element>> {
+        self.0.as_ref().parent_element().map(ElementReader)
+    }
+
+    pub fn get_attribute(&self, attr: &str) -> Option<String> {
+        self.0.as_ref().get_attribute(attr)
+    }
+}
+
+impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> From<NodeReader<T>> for ElementReader<T> {
+    fn from(reader: NodeReader<T>) -> Self {
+        ElementReader::new(reader.0)
+    }
+}
+
+impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> From<ElementReader<T>> for NodeReader<T> {
+    fn from(reader: ElementReader<T>) -> Self {
+        NodeReader::new(reader.0)
+    }
 }
 
 impl<T: AnyElement> WithElement for ElementHandle<T> {
@@ -146,6 +210,23 @@ impl<T: AnyElement> ElementHandle<T> {
             |node| self.elem.element().replace_children_with_node_1(node),
             TOKEN,
         )
+    }
+
+    pub fn insert_node(&self, index: usize, child: &impl WithNode) {
+        child.with_node(
+            |new_child| {
+                self.with_element(
+                    |node| {
+                        let elem: &web_sys::HtmlElement = node.as_ref();
+                        let child_node = elem.child_nodes().item(index as u32);
+                        elem.insert_before(new_child, child_node.as_ref())
+                            .expect("Insert Child to htmlElement");
+                    },
+                    TOKEN,
+                )
+            },
+            TOKEN,
+        );
     }
 
     pub fn attach_nodes(&self, children: ArrayHandle) {
@@ -243,6 +324,13 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyT
 
     pub fn element_factory(&self) -> ElementFactory {
         ElementFactory(self.document.clone())
+    }
+
+    pub fn get_selection(&self) -> Option<SelectionHandle> {
+        self.document
+            .get_selection()
+            .expect("Get Document Selection")
+            .map(SelectionHandle)
     }
 
     pub fn audit(&self) {
