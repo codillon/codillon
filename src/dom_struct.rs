@@ -2,7 +2,8 @@
 // of heterogeneous Components of (possibly) different types.
 
 use crate::web_support::{
-    AccessToken, AnyElement, ArrayHandle, Component, ElementHandle, NodeListHandle, WithElement,
+    AccessToken, AnyElement, ArrayHandle, Component, ElementHandle, InputEventHandle,
+    NodeListHandle, WithElement,
 };
 use delegate::delegate;
 
@@ -73,7 +74,7 @@ impl<Child: Structure, Element: AnyElement> DomStruct<Child, Element> {
     delegate! {
     to self.elem {
     pub fn set_attribute(&mut self, name: &str, value: &str);
-        pub fn set_onbeforeinput<F: Fn(web_sys::InputEvent) + 'static>(&mut self, handler: F);
+        pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
     }
     }
 }
