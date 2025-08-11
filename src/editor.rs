@@ -61,9 +61,17 @@ impl Editor {
                 .expect("input handler")
         });
 
-        for i in 0..100 {
-            ret.push_line(factory, &format!("This is 🏳️‍⚧️ line {i}."));
-        }
+        ret.push_line(factory, "(func");
+        ret.push_line(factory, "i32.const 1");
+        ret.push_line(factory, "drop");
+        ret.push_line(factory, ")");
+        web_sys::console::log_1(
+            &format!(
+                "id after push: {:?}",
+                ret.0.borrow()._module,
+            )
+            .into(),
+        );
 
         ret
     }
@@ -232,9 +240,10 @@ impl Editor {
         for i in 0..editor.component.len() {
             let line = editor.component.get(i).unwrap();
             let text = line.borrow_component().get().0.get_contents();
-            lines.push_str(&format!("{};\n", text));
+            lines.push_str(&format!("{}\n", text));
         }
-        let bin = str_to_binary(&lines).expect("wasm binary");
+        web_sys::console::log_1(&format!("lines: {lines}").into());
+        let bin = str_to_binary(&lines).unwrap_or_default();
         editor._module = OkModule::build(bin).expect("OkModule");
     }
 }

@@ -282,6 +282,27 @@ pub fn match_frames(instrs: &[InstrInfo]) -> Vec<Frame> {
     }
     frames
 }
+ 
+pub fn fix_paren(instrs: &[InstrInfo]) -> usize {
+    let mut paren_stack = Vec::new();
+    for (idx, instr) in instrs.iter().enumerate() {
+        match instr {
+            InstrInfo::FuncHeader => {
+                paren_stack.push(idx);
+            }
+            InstrInfo::FuncEnd => {
+                if None == paren_stack.pop() {
+                    panic!("Unmatched function end at index {idx}");
+                }
+            }
+            _ => (), // Ignore other instructions
+        }
+    }
+    if !paren_stack.is_empty() {
+        return paren_stack.len()
+    }
+    0
+}
 
 pub trait FmtError {
     type T;
