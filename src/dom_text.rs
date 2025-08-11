@@ -3,7 +3,6 @@
 // string, and enforces that the DOM contents will match the Rust contents.
 
 use crate::web_support::{AccessToken, Component, TextHandle, WithNode};
-use anyhow::Result;
 
 #[derive(Default)]
 pub struct DomText {
@@ -18,9 +17,17 @@ impl DomText {
         ret
     }
 
-    pub fn push_str(&mut self, string: &str) {
-        self.contents.push_str(string);
-        self.text_node.append_data(string);
+    pub fn replace_data(&mut self, utf16_idx_range: std::ops::Range<usize>, string: &str) {
+        let begin_byte_idx = str_indices::utf16::to_byte_idx(&self.contents, utf16_idx_range.start);
+        let end_byte_idx = str_indices::utf16::to_byte_idx(&self.contents, utf16_idx_range.end);
+
+        self.contents
+            .replace_range(begin_byte_idx..end_byte_idx, string);
+        self.text_node.replace_data(
+            utf16_idx_range.start as u32,
+            (utf16_idx_range.end - utf16_idx_range.start) as u32,
+            string,
+        );
     }
 
     pub fn set_data(&mut self, string: &str) {
@@ -28,12 +35,8 @@ impl DomText {
         self.text_node.set_data(string);
     }
 
-    pub fn insert_at_char(&mut self, char_idx: usize, string: &str) -> Result<()> {
-        let byte_idx = str_indices::chars::to_byte_idx(&self.contents, char_idx);
-        let utf16_idx = str_indices::utf16::from_byte_idx(&self.contents, byte_idx);
-        self.contents.insert_str(byte_idx, string);
-        self.text_node.insert_data(utf16_idx.try_into()?, string);
-        Ok(())
+    pub fn text(&self) -> &String {
+        &self.contents
     }
 }
 

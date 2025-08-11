@@ -10,7 +10,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::{HtmlBodyElement, wasm_bindgen::JsCast};
+use web_sys::{HtmlBodyElement, Node, wasm_bindgen::JsCast};
 
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the web_support module.
@@ -93,14 +93,12 @@ impl WithNode for TextHandle {
 
 impl TextHandle {
     delegate! {
-    to self.0 {
-        pub fn data(&self) -> String;
-    pub fn set_data(&self, value: &str);
-    #[unwrap] // no return value anyway
-    pub fn append_data(&self, data: &str);
-    #[unwrap] // no return value anyway
-    pub fn insert_data(&self, offset: u32, data: &str);
-    }
+        to self.0 {
+            pub fn data(&self) -> String;
+        pub fn set_data(&self, value: &str);
+        #[unwrap] // no return value anyway
+        pub fn replace_data(&self, offset: u32, count: u32, data: &str);
+        }
     }
 }
 
@@ -116,6 +114,69 @@ pub struct ElementHandle<T: AnyElement> {
     elem: AutoRemove<T>,
     attributes: HashMap<String, String>,
     event_handlers: Handlers,
+}
+
+// NodeReader and ElementReader are used traverse
+// and read attributes
+pub struct NodeReader<T: AsRef<Node>>(T);
+pub struct ElementReader<T: AsRef<web_sys::Element>>(T);
+
+impl<T: AsRef<Node>> NodeReader<T> {
+    pub fn parent_node(&self) -> Option<NodeReader<web_sys::Node>> {
+        self.0.as_ref().parent_node().map(NodeReader)
+    }
+
+    pub fn parent_element(&self) -> Option<ElementReader<web_sys::Element>> {
+        self.0.as_ref().parent_element().map(ElementReader)
+    }
+}
+
+impl<T: AsRef<Node>> NodeReader<T> {
+    pub fn new(node: T) -> Self {
+        Self(node)
+    }
+}
+
+impl<T: AsRef<Node>> NodeReader<T> {
+    pub fn dyn_into<U: AsRef<Node> + JsCast>(self) -> Result<NodeReader<U>, Self> {
+        if self.0.as_ref().dyn_ref::<U>().is_some() {
+            Ok(NodeReader::new(
+                self.0.as_ref().clone().dyn_into::<U>().expect("dyn_into"),
+            ))
+        } else {
+            Err(self)
+        }
+    }
+}
+
+impl<T: AsRef<web_sys::Element>> ElementReader<T> {
+    pub fn new(elem: T) -> Self {
+        Self(elem)
+    }
+
+    pub fn parent_node(&self) -> Option<NodeReader<web_sys::Node>> {
+        self.0.as_ref().parent_node().map(NodeReader)
+    }
+
+    pub fn parent_element(&self) -> Option<ElementReader<web_sys::Element>> {
+        self.0.as_ref().parent_element().map(ElementReader)
+    }
+
+    pub fn get_attribute(&self, attr: &str) -> Option<String> {
+        self.0.as_ref().get_attribute(attr)
+    }
+}
+
+impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> From<NodeReader<T>> for ElementReader<T> {
+    fn from(reader: NodeReader<T>) -> Self {
+        ElementReader::new(reader.0)
+    }
+}
+
+impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> From<ElementReader<T>> for NodeReader<T> {
+    fn from(reader: ElementReader<T>) -> Self {
+        NodeReader::new(reader.0)
+    }
 }
 
 impl<T: AnyElement> WithElement for ElementHandle<T> {
@@ -245,6 +306,13 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyT
         ElementFactory(self.document.clone())
     }
 
+    pub fn get_selection(&self) -> Option<SelectionHandle> {
+        self.document
+            .get_selection()
+            .expect("Get Document Selection")
+            .map(SelectionHandle)
+    }
+
     pub fn audit(&self) {
         match (&self.body, self.document.body()) {
             (Some(body), Some(dom_body)) => {
@@ -345,3 +413,54 @@ pub trait Component: WithNode {
 // ElementComponent is a trait for a "Component" that is also an HTML Element (e.g. not Text).
 pub trait ElementComponent: Component + WithElement {}
 impl<U: Component + WithElement> ElementComponent for U {}
+
+pub struct SelectionHandle(web_sys::Selection);
+
+impl SelectionHandle {
+    pub fn get_focus_node(&self) -> Option<NodeReader<web_sys::Node>> {
+        self.0.focus_node().map(NodeReader)
+    }
+
+    pub fn get_anchor_node(&self) -> Option<NodeReader<web_sys::Node>> {
+        self.0.anchor_node().map(NodeReader)
+    }
+
+    pub fn get_focus_offset(&self) -> usize {
+        self.0.focus_offset() as usize
+    }
+
+    pub fn get_anchor_offset(&self) -> usize {
+        self.0.anchor_offset() as usize
+    }
+
+    pub fn remove_selection(&mut self) {
+        self.0.remove_all_ranges().expect("remove selection");
+    }
+
+    pub fn set_selection(
+        &mut self,
+        anchor: &impl WithNode,
+        anchor_offset: usize,
+        focus: &impl WithNode,
+        focus_offset: usize,
+    ) {
+        anchor.with_node(
+            |anchor| {
+                focus.with_node(
+                    |focus| {
+                        self.0
+                            .set_base_and_extent(
+                                anchor,
+                                anchor_offset as u32,
+                                focus,
+                                focus_offset as u32,
+                            )
+                            .expect("set dom selection")
+                    },
+                    TOKEN,
+                );
+            },
+            TOKEN,
+        );
+    }
+}
