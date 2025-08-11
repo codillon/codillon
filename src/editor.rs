@@ -15,7 +15,7 @@ use std::{
     cell::{Ref, RefCell, RefMut},
     rc::Rc,
 };
-use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
+use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement, Text, console::log_1};
 
 type DomBr = DomStruct<(), HtmlBrElement>;
 type LineContents = (DomText, (DomBr, ()));
@@ -47,7 +47,7 @@ impl Editor {
         });
 
         for i in 0..100 {
-            ret.push_line(factory, &format!("This is line {i}."));
+            ret.push_line(factory, &format!("This is 🏳️‍⚧️ line {i}."));
         }
 
         ret
@@ -66,8 +66,18 @@ impl Editor {
 
         let target_range = ev.get_first_target_range()?;
 
-        if ev.input_type() != "insertText" || !target_range.collapsed() {
-            return Ok(()); // unhandled
+        let the_data = match &ev.input_type() as &str {
+            "insertText" => ev.data().context("no data")?,
+            "insertFromPaste" => ev
+                .data_transfer()
+                .context("no data_transfer")?
+                .get_data("text/plain")
+                .fmt_err()?,
+            _ => bail!("unhandled"),
+        };
+
+        if !target_range.collapsed() {
+            bail!("unhandled non-collapsed selection");
         }
 
         let (line_index, pos_in_line) = self.find_idx_and_utf16_pos(
@@ -77,12 +87,15 @@ impl Editor {
 
         let new_cursor_pos = self
             .line_mut(line_index)?
-            .insert_at_utf16_pos(pos_in_line, &ev.data().unwrap_or_default())?;
+            .insert_at_utf16_pos(pos_in_line, &the_data)?;
 
         set_cursor_position(&*self.line(line_index)?, new_cursor_pos);
 
         #[cfg(debug_assertions)]
-        self.audit();
+        {
+            self.audit();
+            log_1(&"successful audit".into());
+        }
 
         Ok(())
     }
@@ -126,7 +139,7 @@ impl Editor {
 
         // Otherwise, it must be in the text node. Make sure offset is
         // a sensible UTF-16 position, and return it.
-        debug_assert!(node.is_a::<web_sys::Text>());
+        debug_assert!(node.is_a::<Text>());
         if offset > self.line(line_idx)?.len_utf16() {
             bail!("invalid offset in line {line_idx}");
         }

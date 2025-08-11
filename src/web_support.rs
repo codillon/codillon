@@ -383,7 +383,7 @@ impl InputEventHandle {
         pub fn type_(&self) -> String;
         pub fn input_type(&self) -> String;
         pub fn data(&self) -> Option<String>;
-
+        pub fn data_transfer(&self) -> Option<web_sys::DataTransfer>;
     }
     }
 
