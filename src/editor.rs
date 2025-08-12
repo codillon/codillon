@@ -24,15 +24,15 @@ type LineContents = (DomText, (DomBr, ()));
 type EditLine = DomStruct<LineContents, HtmlSpanElement>;
 
 pub struct EditlineSidecar {
-    id: usize,
+    _id: usize,
     info: InstrInfo,
     activated: bool,
 }
 
 impl EditlineSidecar {
-    pub fn new(id: usize, info: InstrInfo, activated: bool) -> Self {
+    pub fn new(_id: usize, info: InstrInfo, activated: bool) -> Self {
         Self {
-            id,
+            _id,
             info,
             activated,
         }
@@ -97,7 +97,7 @@ impl Editor {
     fn push_line(&mut self, factory: &ElementFactory, string: &str) {
         {
             let mut editor = self.0.borrow_mut();
-            let id = editor._next_id;
+            let _id = editor._next_id;
             let component = &mut editor.component;
             component.push(DomSidecar::new(
                 EditLine::new(
@@ -105,7 +105,7 @@ impl Editor {
                     factory.span(),
                 ),
                 EditlineSidecar {
-                    id,
+                    _id,
                     info: parse_instr(string),
                     activated: true,
                 },
@@ -234,7 +234,9 @@ impl Editor {
         Ref::map(self.0.borrow(), |c| &c.component)
     }
 
-    fn component_mut(&self) -> RefMut<'_, DomVec<DomSidecar<EditLine, EditlineSidecar>, HtmlDivElement>> {
+    fn component_mut(
+        &self,
+    ) -> RefMut<'_, DomVec<DomSidecar<EditLine, EditlineSidecar>, HtmlDivElement>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component)
     }
 

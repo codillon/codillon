@@ -2,9 +2,8 @@
 // of heterogeneous Components of (possibly) different types.
 
 use crate::web_support::{
-    AccessToken, AnyElement, ArrayHandle, Component, ElementAsNode, ElementHandle, InputEventHandle,
-    NodeListHandle,
-    WithElement,
+    AccessToken, AnyElement, ArrayHandle, Component, ElementAsNode, ElementHandle,
+    InputEventHandle, NodeListHandle, WithElement,
 };
 use delegate::delegate;
 

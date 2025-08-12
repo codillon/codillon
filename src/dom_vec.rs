@@ -1,8 +1,7 @@
 // A Codillon DOM "vector": a variable-length collection of Components of the same type
 
 use crate::web_support::{
-    
-    AccessToken, AnyElement, Component, ElementAsNode, ElementHandle, InputEventHandle, WithElement
+    AccessToken, AnyElement, Component, ElementAsNode, ElementHandle, InputEventHandle, WithElement,
 };
 use delegate::delegate;
 
