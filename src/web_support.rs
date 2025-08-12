@@ -4,6 +4,8 @@
 // from modifying a DOM object belonging to another. This means that Components
 // cannot directly access the children or parents of a DOM node.
 
+use crate::utils::FmtError;
+use anyhow::{Result, bail};
 use delegate::delegate;
 use std::{
     collections::HashMap,
@@ -185,8 +187,9 @@ impl<T: AnyElement> ElementHandle<T> {
         NodeListHandle(self.elem.element().child_nodes())
     }
 
-    pub fn set_onbeforeinput<F: Fn(web_sys::InputEvent) + 'static>(&mut self, handler: F) {
-        self.event_handlers.beforeinput = Some(Closure::new(handler));
+    pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F) {
+        self.event_handlers.beforeinput =
+            Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
         self.elem.element().set_onbeforeinput(Some(
             self.event_handlers
                 .beforeinput
@@ -334,6 +337,112 @@ impl ArrayHandle {
             TOKEN,
         )
     }
+}
+
+// Wrapper for an "unmanaged" Node (will not be removed from DOM when dropped)
+pub struct NodeRef(web_sys::Node);
+
+impl WithNode for NodeRef {
+    fn with_node(&self, mut f: impl FnMut(&web_sys::Node), _g: AccessToken) {
+        f(&self.0)
+    }
+}
+
+impl NodeRef {
+    pub fn is_a<T: wasm_bindgen::JsCast>(&self) -> bool {
+        self.0.dyn_ref::<T>().is_some()
+    }
+}
+
+// Wrapper for a StaticRange (giving access to its start and end nodes as NodeRefs)
+pub struct StaticRangeHandle(web_sys::Range);
+
+impl StaticRangeHandle {
+    delegate! {
+        to self.0 {
+        #[expr($.fmt_err())]
+        pub fn start_offset(&self) -> Result<u32>;
+        #[expr($.fmt_err())]
+        pub fn end_offset(&self) -> Result<u32>;
+        pub fn collapsed(&self) -> bool;
+        #[expr(Ok(NodeRef($.fmt_err()?)))]
+        pub fn start_container(&self) -> Result<NodeRef>;
+        #[expr(Ok(NodeRef($.fmt_err()?)))]
+        pub fn end_container(&self) -> Result<NodeRef>;
+    }
+    }
+}
+
+// Wrapper for an InputEvent (giving access to its target as a StaticRangeHandle)
+pub struct InputEventHandle(web_sys::InputEvent);
+
+impl InputEventHandle {
+    delegate! {
+    to self.0 {
+        pub fn prevent_default(&self);
+        pub fn type_(&self) -> String;
+        pub fn input_type(&self) -> String;
+        pub fn data(&self) -> Option<String>;
+        pub fn data_transfer(&self) -> Option<web_sys::DataTransfer>;
+    }
+    }
+
+    pub fn get_first_target_range(&self) -> Result<StaticRangeHandle> {
+        let ranges = self.0.get_target_ranges();
+        if ranges.length() == 0 {
+            bail!("no target ranges");
+        }
+
+        Ok(StaticRangeHandle(
+            ranges.get(0).unchecked_into::<web_sys::Range>(),
+        ))
+    }
+}
+
+// Compare the position of two nodes in a document
+pub fn compare_document_position(a: &impl WithNode, b: &impl WithNode) -> std::cmp::Ordering {
+    let mut is_same = false;
+    let mut pos: u16 = 0;
+    a.with_node(
+        |a_node| {
+            b.with_node(
+                |b_node| {
+                    is_same = a_node.is_same_node(Some(b_node));
+                    pos = a_node.compare_document_position(b_node);
+                },
+                TOKEN,
+            )
+        },
+        TOKEN,
+    );
+    if is_same
+        || (pos
+            & (web_sys::Node::DOCUMENT_POSITION_CONTAINED_BY
+                | web_sys::Node::DOCUMENT_POSITION_CONTAINS)
+            != 0)
+    {
+        std::cmp::Ordering::Equal
+    } else if pos & web_sys::Node::DOCUMENT_POSITION_FOLLOWING != 0 {
+        std::cmp::Ordering::Less
+    } else {
+        std::cmp::Ordering::Greater
+    }
+}
+
+// Set the cursor position
+pub fn set_cursor_position(node: &impl WithNode, offset: usize) {
+    node.with_node(
+        |n| {
+            web_sys::window()
+                .expect("window")
+                .get_selection()
+                .expect("selection error")
+                .expect("selection not found")
+                .set_position_with_offset(Some(n), offset.try_into().expect("offset -> u32"))
+                .expect("set position with offset")
+        },
+        TOKEN,
+    )
 }
 
 // A trait for a safe "Component", allowing wrapped access to its root Node and audit

@@ -223,6 +223,17 @@ pub fn match_frames(instrs: &[Option<InstrInfo>]) -> Vec<Frame> {
     frames
 }
 
+pub trait FmtError {
+    type T;
+    fn fmt_err(self) -> anyhow::Result<Self::T, anyhow::Error>;
+}
+impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
+    type T = T;
+    fn fmt_err(self) -> anyhow::Result<T, anyhow::Error> {
+        self.map_err(|e| anyhow::Error::msg(format!("{e:?}")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
