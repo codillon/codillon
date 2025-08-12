@@ -60,7 +60,7 @@ impl Editor {
         ));
     }
 
-    fn process_single_line_replace(
+    fn process_target_range_replace(
         &mut self,
         target_range: StaticRangeHandle,
         the_data: &str,
@@ -104,17 +104,17 @@ impl Editor {
 
         match &ev.input_type() as &str {
             "insertText" => {
-                self.process_single_line_replace(target_range, &ev.data().context("no data")?)
+                self.process_target_range_replace(target_range, &ev.data().context("no data")?)
             }
-            "insertFromPaste" => self.process_single_line_replace(
+            "insertFromPaste" => self.process_target_range_replace(
                 target_range,
                 &ev.data_transfer()
                     .context("no data_transfer")?
                     .get_data("text/plain")
                     .fmt_err()?,
             ),
-            "deleteContentBackward" => self.process_single_line_replace(target_range, ""),
-            "deleteContentForward" => self.process_single_line_replace(target_range, ""),
+            "deleteContentBackward" => self.process_target_range_replace(target_range, ""),
+            "deleteContentForward" => self.process_target_range_replace(target_range, ""),
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
