@@ -12,9 +12,7 @@ thread_local! {
 fn setup() -> Result<()> {
     DOCUMENT.with_borrow_mut(|doc| {
         let factory = doc.element_factory();
-        let selection = doc.get_selection().expect("doc selection");
-        let body = factory.body();
-        doc.set_body(Body::new((Editor::new(factory, selection), ()), body));
+        doc.set_body(Body::new((Editor::new(&factory), ()), factory.body()));
         doc.audit();
     });
 

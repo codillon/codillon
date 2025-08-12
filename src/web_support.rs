@@ -4,13 +4,15 @@
 // from modifying a DOM object belonging to another. This means that Components
 // cannot directly access the children or parents of a DOM node.
 
+use crate::utils::FmtError;
+use anyhow::{Result, bail};
 use delegate::delegate;
 use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::{HtmlBodyElement, Node, wasm_bindgen::JsCast};
+use web_sys::{HtmlBodyElement, wasm_bindgen::JsCast};
 
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the web_support module.
@@ -93,12 +95,22 @@ impl WithNode for TextHandle {
 
 impl TextHandle {
     delegate! {
-        to self.0 {
-            pub fn data(&self) -> String;
-        pub fn set_data(&self, value: &str);
-        #[unwrap] // no return value anyway
-        pub fn replace_data(&self, offset: u32, count: u32, data: &str);
-        }
+    to self.0 {
+        pub fn data(&self) -> String;
+    pub fn set_data(&self, value: &str);
+    #[unwrap] // no return value anyway
+    pub fn append_data(&self, data: &str);
+    #[unwrap] // no return value anyway
+    pub fn insert_data(&self, offset: u32, data: &str);
+
+    #[expr($.fmt_err())]
+    pub fn replace_data(
+    &self,
+        offset: u32,
+        count: u32,
+        data: &str,
+    ) -> Result<()>;
+    }
     }
 }
 
@@ -114,69 +126,6 @@ pub struct ElementHandle<T: AnyElement> {
     elem: AutoRemove<T>,
     attributes: HashMap<String, String>,
     event_handlers: Handlers,
-}
-
-// NodeReader and ElementReader are used traverse
-// and read attributes
-pub struct NodeReader<T: AsRef<Node>>(T);
-pub struct ElementReader<T: AsRef<web_sys::Element>>(T);
-
-impl<T: AsRef<Node>> NodeReader<T> {
-    pub fn parent_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.as_ref().parent_node().map(NodeReader)
-    }
-
-    pub fn parent_element(&self) -> Option<ElementReader<web_sys::Element>> {
-        self.0.as_ref().parent_element().map(ElementReader)
-    }
-}
-
-impl<T: AsRef<Node>> NodeReader<T> {
-    pub fn new(node: T) -> Self {
-        Self(node)
-    }
-}
-
-impl<T: AsRef<Node>> NodeReader<T> {
-    pub fn dyn_into<U: AsRef<Node> + JsCast>(self) -> Result<NodeReader<U>, Self> {
-        if self.0.as_ref().dyn_ref::<U>().is_some() {
-            Ok(NodeReader::new(
-                self.0.as_ref().clone().dyn_into::<U>().expect("dyn_into"),
-            ))
-        } else {
-            Err(self)
-        }
-    }
-}
-
-impl<T: AsRef<web_sys::Element>> ElementReader<T> {
-    pub fn new(elem: T) -> Self {
-        Self(elem)
-    }
-
-    pub fn parent_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.as_ref().parent_node().map(NodeReader)
-    }
-
-    pub fn parent_element(&self) -> Option<ElementReader<web_sys::Element>> {
-        self.0.as_ref().parent_element().map(ElementReader)
-    }
-
-    pub fn get_attribute(&self, attr: &str) -> Option<String> {
-        self.0.as_ref().get_attribute(attr)
-    }
-}
-
-impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> From<NodeReader<T>> for ElementReader<T> {
-    fn from(reader: NodeReader<T>) -> Self {
-        ElementReader::new(reader.0)
-    }
-}
-
-impl<T: AsRef<web_sys::Element> + AsRef<web_sys::Node>> From<ElementReader<T>> for NodeReader<T> {
-    fn from(reader: ElementReader<T>) -> Self {
-        NodeReader::new(reader.0)
-    }
 }
 
 impl<T: AnyElement> WithElement for ElementHandle<T> {
@@ -246,8 +195,9 @@ impl<T: AnyElement> ElementHandle<T> {
         NodeListHandle(self.elem.element().child_nodes())
     }
 
-    pub fn set_onbeforeinput<F: Fn(web_sys::InputEvent) + 'static>(&mut self, handler: F) {
-        self.event_handlers.beforeinput = Some(Closure::new(handler));
+    pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F) {
+        self.event_handlers.beforeinput =
+            Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
         self.elem.element().set_onbeforeinput(Some(
             self.event_handlers
                 .beforeinput
@@ -304,13 +254,6 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyT
 
     pub fn element_factory(&self) -> ElementFactory {
         ElementFactory(self.document.clone())
-    }
-
-    pub fn get_selection(&self) -> Option<SelectionHandle> {
-        self.document
-            .get_selection()
-            .expect("Get Document Selection")
-            .map(SelectionHandle)
     }
 
     pub fn audit(&self) {
@@ -404,6 +347,107 @@ impl ArrayHandle {
     }
 }
 
+// Wrapper for an "unmanaged" Node (will not be removed from DOM when dropped)
+pub struct NodeRef(web_sys::Node);
+
+impl WithNode for NodeRef {
+    fn with_node(&self, mut f: impl FnMut(&web_sys::Node), _g: AccessToken) {
+        f(&self.0)
+    }
+}
+
+impl NodeRef {
+    pub fn is_a<T: wasm_bindgen::JsCast>(&self) -> bool {
+        self.0.dyn_ref::<T>().is_some()
+    }
+}
+
+// Wrapper for a StaticRange (giving access to its start and end nodes as NodeRefs)
+pub struct StaticRangeHandle(web_sys::Range);
+
+impl StaticRangeHandle {
+    delegate! {
+        to self.0 {
+        #[expr($.fmt_err())]
+        pub fn start_offset(&self) -> Result<u32>;
+        #[expr($.fmt_err())]
+        pub fn end_offset(&self) -> Result<u32>;
+        pub fn collapsed(&self) -> bool;
+        #[expr(Ok(NodeRef($.fmt_err()?)))]
+        pub fn start_container(&self) -> Result<NodeRef>;
+        #[expr(Ok(NodeRef($.fmt_err()?)))]
+        pub fn end_container(&self) -> Result<NodeRef>;
+    }
+    }
+}
+
+// Wrapper for an InputEvent (giving access to its target as a StaticRangeHandle)
+pub struct InputEventHandle(web_sys::InputEvent);
+
+impl InputEventHandle {
+    delegate! {
+    to self.0 {
+        pub fn prevent_default(&self);
+        pub fn type_(&self) -> String;
+        pub fn input_type(&self) -> String;
+        pub fn data(&self) -> Option<String>;
+        pub fn data_transfer(&self) -> Option<web_sys::DataTransfer>;
+    }
+    }
+
+    pub fn get_first_target_range(&self) -> Result<StaticRangeHandle> {
+        let ranges = self.0.get_target_ranges();
+        if ranges.length() == 0 {
+            bail!("no target ranges");
+        }
+
+        Ok(StaticRangeHandle(
+            ranges.get(0).unchecked_into::<web_sys::Range>(),
+        ))
+    }
+}
+
+// Compare the position of two nodes in a document
+pub fn compare_document_position(a: &impl WithNode, b: &impl WithNode) -> std::cmp::Ordering {
+    let mut is_same = false;
+    let mut pos: u16 = 0;
+    a.with_node(
+        |a_node| {
+            b.with_node(
+                |b_node| {
+                    is_same = a_node.is_same_node(Some(b_node));
+                    pos = a_node.compare_document_position(b_node);
+                },
+                TOKEN,
+            )
+        },
+        TOKEN,
+    );
+    if is_same || (pos & web_sys::Node::DOCUMENT_POSITION_CONTAINED_BY != 0) {
+        std::cmp::Ordering::Equal
+    } else if pos & web_sys::Node::DOCUMENT_POSITION_FOLLOWING != 0 {
+        std::cmp::Ordering::Less
+    } else {
+        std::cmp::Ordering::Greater
+    }
+}
+
+// Set the cursor position
+pub fn set_cursor_position(node: &impl WithNode, offset: usize) {
+    node.with_node(
+        |n| {
+            web_sys::window()
+                .expect("window")
+                .get_selection()
+                .expect("selection error")
+                .expect("selection not found")
+                .set_position_with_offset(Some(n), offset.try_into().expect("offset -> u32"))
+                .expect("set position with offset")
+        },
+        TOKEN,
+    )
+}
+
 // A trait for a safe "Component", allowing wrapped access to its root Node and audit
 // that the DOM subtree matches the Component's expectations.
 pub trait Component: WithNode {
@@ -413,54 +457,3 @@ pub trait Component: WithNode {
 // ElementComponent is a trait for a "Component" that is also an HTML Element (e.g. not Text).
 pub trait ElementComponent: Component + WithElement {}
 impl<U: Component + WithElement> ElementComponent for U {}
-
-pub struct SelectionHandle(web_sys::Selection);
-
-impl SelectionHandle {
-    pub fn get_focus_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.focus_node().map(NodeReader)
-    }
-
-    pub fn get_anchor_node(&self) -> Option<NodeReader<web_sys::Node>> {
-        self.0.anchor_node().map(NodeReader)
-    }
-
-    pub fn get_focus_offset(&self) -> usize {
-        self.0.focus_offset() as usize
-    }
-
-    pub fn get_anchor_offset(&self) -> usize {
-        self.0.anchor_offset() as usize
-    }
-
-    pub fn remove_selection(&mut self) {
-        self.0.remove_all_ranges().expect("remove selection");
-    }
-
-    pub fn set_selection(
-        &mut self,
-        anchor: &impl WithNode,
-        anchor_offset: usize,
-        focus: &impl WithNode,
-        focus_offset: usize,
-    ) {
-        anchor.with_node(
-            |anchor| {
-                focus.with_node(
-                    |focus| {
-                        self.0
-                            .set_base_and_extent(
-                                anchor,
-                                anchor_offset as u32,
-                                focus,
-                                focus_offset as u32,
-                            )
-                            .expect("set dom selection")
-                    },
-                    TOKEN,
-                );
-            },
-            TOKEN,
-        );
-    }
-}

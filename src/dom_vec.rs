@@ -1,8 +1,8 @@
 // A Codillon DOM "vector": a variable-length collection of Components of the same type
 
-use std::ops::{Index, IndexMut};
-
-use crate::web_support::{AccessToken, AnyElement, Component, ElementHandle, WithElement};
+use crate::web_support::{
+    AccessToken, AnyElement, Component, ElementHandle, InputEventHandle, WithElement,
+};
 use delegate::delegate;
 
 pub struct DomVec<Child: Component, Element: AnyElement> {
@@ -34,29 +34,18 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
 
     delegate! {
     to self.contents {
-        pub fn get(&self, index: usize) -> Option<&Child>;
-        pub fn get_mut(&mut self, index: usize) -> Option<&mut Child>;
         pub fn len(&self) -> usize;
         pub fn is_empty(&self) -> bool;
-        pub fn last(&self) -> Option<&Child>;
+        pub fn get(&self, index: usize) -> Option<&Child>;
+        pub fn get_mut(&mut self, index: usize) -> Option<&mut Child>;
+    pub fn binary_search_by<'a, F>(&'a self, f: F) -> Result<usize, usize>
+    where
+            F: FnMut(&'a Child) -> std::cmp::Ordering;
     }
     to self.elem {
         pub fn set_attribute(&mut self, name: &str, value: &str);
-    pub fn set_onbeforeinput<F: Fn(web_sys::InputEvent) + 'static>(&mut self, handler: F);
+    pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
     }
-    }
-}
-
-impl<Child: Component, Element: AnyElement> Index<usize> for DomVec<Child, Element> {
-    type Output = Child;
-    fn index(&self, index: usize) -> &Self::Output {
-        self.get(index).unwrap()
-    }
-}
-
-impl<Child: Component, Element: AnyElement> IndexMut<usize> for DomVec<Child, Element> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        self.get_mut(index).unwrap()
     }
 }
 
