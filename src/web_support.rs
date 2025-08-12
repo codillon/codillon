@@ -415,7 +415,12 @@ pub fn compare_document_position(a: &impl WithNode, b: &impl WithNode) -> std::c
         },
         TOKEN,
     );
-    if is_same || (pos & web_sys::Node::DOCUMENT_POSITION_CONTAINED_BY != 0) {
+    if is_same
+        || (pos
+            & (web_sys::Node::DOCUMENT_POSITION_CONTAINED_BY
+                | web_sys::Node::DOCUMENT_POSITION_CONTAINS)
+            != 0)
+    {
         std::cmp::Ordering::Equal
     } else if pos & web_sys::Node::DOCUMENT_POSITION_FOLLOWING != 0 {
         std::cmp::Ordering::Less

@@ -40,7 +40,7 @@ impl Editor {
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
 
         let editor_ref = Rc::clone(&ret.0);
-        ret.0.borrow_mut().component.set_onbeforeinput(move |ev| {
+        ret.component_mut().set_onbeforeinput(move |ev| {
             Editor(editor_ref.clone())
                 .handle_input(ev)
                 .expect("input handler")
@@ -54,7 +54,7 @@ impl Editor {
     }
 
     fn push_line(&mut self, factory: &ElementFactory, string: &str) {
-        self.0.borrow_mut().component.push(EditLine::new(
+        self.component_mut().push(EditLine::new(
             (DomText::new(string), (DomBr::new((), factory.br()), ())),
             factory.span(),
         ));
