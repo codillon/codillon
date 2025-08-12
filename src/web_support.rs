@@ -102,6 +102,14 @@ impl TextHandle {
     pub fn append_data(&self, data: &str);
     #[unwrap] // no return value anyway
     pub fn insert_data(&self, offset: u32, data: &str);
+
+    #[expr($.fmt_err())]
+    pub fn replace_data(
+    &self,
+        offset: u32,
+        count: u32,
+        data: &str,
+    ) -> Result<()>;
     }
     }
 }

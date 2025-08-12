@@ -76,20 +76,33 @@ impl Editor {
             _ => bail!("unhandled"),
         };
 
-        if !target_range.collapsed() {
-            bail!("unhandled non-collapsed selection");
+        if the_data.chars().any(|x| x.is_control()) {
+            bail!("unhandled: control char [e.g. carriage return] in input");
         }
 
-        let (line_index, pos_in_line) = self.find_idx_and_utf16_pos(
+        let (start_line_index, start_pos_in_line) = self.find_idx_and_utf16_pos(
+            target_range.start_container().fmt_err()?,
+            target_range.start_offset().fmt_err()?,
+        )?;
+
+        let (end_line_index, end_pos_in_line) = self.find_idx_and_utf16_pos(
             target_range.end_container().fmt_err()?,
             target_range.end_offset().fmt_err()?,
         )?;
 
-        let new_cursor_pos = self
-            .line_mut(line_index)?
-            .insert_at_utf16_pos(pos_in_line, &the_data)?;
+        if start_line_index != end_line_index {
+            bail!(
+                "unhandled: multi-line target range {start_line_index}/{start_pos_in_line}..{end_line_index}/{end_pos_in_line}"
+            );
+        }
 
-        set_cursor_position(&*self.line(line_index)?, new_cursor_pos);
+        let new_cursor_pos = self.line_mut(start_line_index)?.replace_range(
+            start_pos_in_line,
+            end_pos_in_line,
+            &the_data,
+        )?;
+
+        set_cursor_position(&*self.line(start_line_index)?, new_cursor_pos);
 
         #[cfg(debug_assertions)]
         {
@@ -132,8 +145,8 @@ impl Editor {
         if node.is_a::<HtmlSpanElement>() {
             return Ok(match offset {
                 0 => (line_idx, 0),
-                1 => (line_idx, self.line(line_idx)?.len_utf16()),
-                _ => bail!("unexpected offset when cursor in span"),
+                1 | 2 => (line_idx, self.line(line_idx)?.len_utf16()),
+                _ => bail!("unexpected offset {offset} when cursor in span"),
             });
         }
 
