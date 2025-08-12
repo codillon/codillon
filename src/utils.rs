@@ -61,7 +61,7 @@ impl OkModule {
         self.borrow_owner()
     }
 
-    pub fn borrow_ops(&self) -> &Ops {
+    pub fn borrow_ops(&self) -> &Ops<'_> {
         self.borrow_dependent()
     }
 }
@@ -380,12 +380,8 @@ mod tests {
     #[test]
     fn test_fix_frames() {
         let instrs1 = ["block", "i32.const 42", "drop"];
-        let (deativated, appended) = fix_frames(
-            &instrs1
-                .into_iter()
-                .map(|instr| parse_instr(instr))
-                .collect::<Vec<_>>(),
-        );
+        let (deativated, appended) =
+            fix_frames(&instrs1.into_iter().map(parse_instr).collect::<Vec<_>>());
         assert!(deativated.is_empty() && appended == 1);
 
         let instrs2 = [
@@ -395,12 +391,8 @@ mod tests {
             "end",   // 3
         ];
 
-        let (deativated, appended) = fix_frames(
-            &instrs2
-                .into_iter()
-                .map(|instr| parse_instr(instr))
-                .collect::<Vec<_>>(),
-        );
+        let (deativated, appended) =
+            fix_frames(&instrs2.into_iter().map(parse_instr).collect::<Vec<_>>());
         assert!(deativated.len() == 1 && *deativated.first().unwrap() == 2 && appended == 1);
     }
 
@@ -408,12 +400,7 @@ mod tests {
     fn test_frame_match() {
         // Test case 1: Simple block
         let instrs1 = ["block", "i32.const 42", "drop", "end"];
-        let frames1 = match_frames(
-            &instrs1
-                .into_iter()
-                .map(|instr| parse_instr(instr))
-                .collect::<Vec<_>>(),
-        );
+        let frames1 = match_frames(&instrs1.into_iter().map(parse_instr).collect::<Vec<_>>());
         let expected1 = [0..=3]; // block from 0 to 3
         assert_eq!(frames1, expected1);
 
@@ -436,12 +423,7 @@ mod tests {
             "end",          // 14
         ];
 
-        let mut frames2 = match_frames(
-            &instrs2
-                .into_iter()
-                .map(|instr| parse_instr(instr))
-                .collect::<Vec<_>>(),
-        );
+        let mut frames2 = match_frames(&instrs2.into_iter().map(parse_instr).collect::<Vec<_>>());
         let mut expected2 = [
             0..=3,  // first block
             4..=14, // second block
@@ -459,7 +441,7 @@ mod tests {
     #[test]
     fn test_collect_operands() -> Result<()> {
         //block instruction with params and results
-        let output = vec![
+        let output = [
             (vec![], vec![ValType::I32]),
             (vec![], vec![ValType::I32]),
             (
@@ -477,7 +459,7 @@ mod tests {
             "i32.const 1\ni32.const 2\nblock (param i32 i32) (result i32)\ni32.add\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let sidecars = vec![
+        let sidecars = [
             EditlineSidecar::new(0, InstrInfo::Other, true),
             EditlineSidecar::new(1, InstrInfo::Other, true),
             EditlineSidecar::new(2, InstrInfo::OtherStructured, true),
@@ -490,13 +472,13 @@ mod tests {
         assert_eq!(
             collect_operands(
                 module.borrow_binary(),
-                &module.borrow_ops().as_ref().expect("ops")
+                module.borrow_ops().as_ref().expect("ops")
             )?,
             output
         );
 
         //if else with params and results
-        let output = vec![
+        let output = [
             (vec![], vec![ValType::I32]),
             (vec![(ValType::I32, 0)], vec![]),
             (vec![], vec![ValType::I32]),
@@ -508,7 +490,7 @@ mod tests {
         let lines = "i32.const 1\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let sidecars = vec![
+        let sidecars = [
             EditlineSidecar::new(0, InstrInfo::Other, true),
             EditlineSidecar::new(1, InstrInfo::If, true),
             EditlineSidecar::new(2, InstrInfo::Other, true),
@@ -522,13 +504,13 @@ mod tests {
         assert_eq!(
             collect_operands(
                 module.borrow_binary(),
-                &module.borrow_ops().as_ref().expect("ops")
+                module.borrow_ops().as_ref().expect("ops")
             )?,
             output
         );
 
         //loop with param and return
-        let output = vec![
+        let output = [
             (vec![], vec![ValType::I32]),
             (vec![(ValType::I32, 0)], vec![ValType::I32]),
             (vec![], vec![ValType::I32]),
@@ -552,7 +534,7 @@ mod tests {
         let lines = "i32.const 10\nloop (param i32) (result i32)\ni32.const 1\ni32.sub\nbr_if 1\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let sidecars = vec![
+        let sidecars = [
             EditlineSidecar::new(0, InstrInfo::Other, true),
             EditlineSidecar::new(1, InstrInfo::OtherStructured, true),
             EditlineSidecar::new(2, InstrInfo::Other, true),
@@ -567,13 +549,13 @@ mod tests {
         assert_eq!(
             collect_operands(
                 module.borrow_binary(),
-                &module.borrow_ops().as_ref().expect("ops")
+                module.borrow_ops().as_ref().expect("ops")
             )?,
             output
         );
 
         //nested block and if
-        let output = vec![
+        let output = [
             (vec![], vec![ValType::I32]),
             (vec![(ValType::I32, 0)], vec![ValType::I32]),
             (vec![(ValType::I32, 1)], vec![]),
@@ -596,7 +578,7 @@ mod tests {
         let lines = "i32.const 10\nblock (param i32) (result i32)\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let sidecars = vec![
+        let sidecars = [
             EditlineSidecar::new(0, InstrInfo::Other, true),
             EditlineSidecar::new(1, InstrInfo::OtherStructured, true),
             EditlineSidecar::new(2, InstrInfo::If, true),
@@ -612,17 +594,17 @@ mod tests {
         assert_eq!(
             collect_operands(
                 module.borrow_binary(),
-                &module.borrow_ops().as_ref().expect("ops")
+                module.borrow_ops().as_ref().expect("ops")
             )?,
             output
         );
 
         //empty block
-        let output = vec![(vec![], vec![]), (vec![], vec![])];
+        let output = [(vec![], vec![]), (vec![], vec![])];
         let lines = "block\nend";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let sidecars = vec![
+        let sidecars = [
             EditlineSidecar::new(0, InstrInfo::OtherStructured, true),
             EditlineSidecar::new(1, InstrInfo::End, true),
         ];
@@ -631,7 +613,7 @@ mod tests {
         assert_eq!(
             collect_operands(
                 module.borrow_binary(),
-                &module.borrow_ops().as_ref().expect("ops")
+                module.borrow_ops().as_ref().expect("ops")
             )?,
             output
         );
