@@ -6,11 +6,11 @@ use crate::{
     dom_vec::DomVec,
     utils::FmtError,
     web_support::{
-        AccessToken, Component, ElementFactory, InputEventHandle, NodeRef, WithElement,
-        compare_document_position, set_cursor_position,
+        AccessToken, Component, ElementFactory, InputEventHandle, NodeRef, StaticRangeHandle,
+        WithElement, compare_document_position, set_cursor_position,
     },
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Ok, Result, bail};
 use std::{
     cell::{Ref, RefCell, RefMut},
     rc::Rc,
@@ -60,22 +60,11 @@ impl Editor {
         ));
     }
 
-    // The input handler. Currently only handles "insertText" events.
-    fn handle_input(&mut self, ev: InputEventHandle) -> Result<()> {
-        ev.prevent_default();
-
-        let target_range = ev.get_first_target_range()?;
-
-        let the_data = match &ev.input_type() as &str {
-            "insertText" => ev.data().context("no data")?,
-            "insertFromPaste" => ev
-                .data_transfer()
-                .context("no data_transfer")?
-                .get_data("text/plain")
-                .fmt_err()?,
-            _ => bail!("unhandled"),
-        };
-
+    fn process_single_line_replace(
+        &mut self,
+        target_range: StaticRangeHandle,
+        the_data: &str,
+    ) -> Result<()> {
         if the_data.chars().any(|x| x.is_control()) {
             bail!("unhandled: control char [e.g. carriage return] in input");
         }
@@ -99,10 +88,39 @@ impl Editor {
         let new_cursor_pos = self.line_mut(start_line_index)?.replace_range(
             start_pos_in_line,
             end_pos_in_line,
-            &the_data,
+            the_data,
         )?;
 
         set_cursor_position(&*self.line(start_line_index)?, new_cursor_pos);
+
+        Ok(())
+    }
+
+    // The input handler. Currently only handles "insertText" events.
+    fn handle_input(&mut self, ev: InputEventHandle) -> Result<()> {
+        ev.prevent_default();
+
+        let target_range = ev.get_first_target_range()?;
+
+        match &ev.input_type() as &str {
+            "insertText" => {
+                self.process_single_line_replace(target_range, &ev.data().context("no data")?)
+            }
+            "insertFromPaste" => self.process_single_line_replace(
+                target_range,
+                &ev.data_transfer()
+                    .context("no data_transfer")?
+                    .get_data("text/plain")
+                    .fmt_err()?,
+            ),
+            "deleteContentBackward" => self.process_single_line_replace(target_range, ""),
+            "deleteContentForward" => self.process_single_line_replace(target_range, ""),
+            _ => bail!(format!(
+                "unhandled input type {}, data {:?}",
+                ev.input_type(),
+                ev.data()
+            )),
+        }?;
 
         #[cfg(debug_assertions)]
         {
