@@ -24,6 +24,10 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         self.contents.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.contents.is_empty()
+    }
+
     pub fn push(&mut self, elem: Child) {
         self.contents.push(elem);
         self.elem.append_node(self.contents.last().unwrap());

@@ -22,19 +22,32 @@ type DomBr = DomStruct<(), HtmlBrElement>;
 type LineContents = (DomText, (DomBr, ()));
 type EditLine = DomStruct<LineContents, HtmlSpanElement>;
 
-struct EditLineSidecar {
+pub struct EditlineSidecar {
     id: usize,
     info: InstrInfo,
-    //params: Vec<(wasmparser::ValType, usize)>,
-    //returns: Vec<(wasmparser::ValType)>,
-    //op: Option<usize>,
+    activated: bool,
+}
+
+impl EditlineSidecar {
+    pub fn new(id: usize, info: InstrInfo, activated: bool) -> Self {
+        Self {
+            id,
+            info,
+            activated,
+        }
+    }
+
+    pub fn can_have_op(&self) -> bool {
+        self.info != InstrInfo::EmptyorMalformed && self.activated
+    }
 }
 
 struct _Editor {
     _next_id: usize,
     _id_map: HashMap<usize, usize>,
     _module: OkModule,
-    component: DomVec<DomSidecar<EditLine, EditLineSidecar>, HtmlDivElement>,
+    _synthetic_ends: usize,
+    component: DomVec<DomSidecar<EditLine, EditlineSidecar>, HtmlDivElement>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -44,7 +57,9 @@ impl Editor {
         let mut inner = _Editor {
             _next_id: 0,
             _id_map: HashMap::default(),
-            _module: OkModule::build(str_to_binary("").expect("wasm binary")).expect("OkModule"),
+            _module: OkModule::build(str_to_binary("").expect("wasm binary"), Vec::new())
+                .expect("OkModule"),
+            _synthetic_ends: 0,
             component: DomVec::new(factory.div()),
         };
 
@@ -61,14 +76,16 @@ impl Editor {
                 .expect("input handler")
         });
 
-        ret.push_line(factory, "(func");
         ret.push_line(factory, "i32.const 1");
         ret.push_line(factory, "drop");
-        ret.push_line(factory, ")");
+
         web_sys::console::log_1(
             &format!(
-                "id after push: {:?}",
-                ret.0.borrow()._module,
+                "operands: {:?}",
+                collect_operands(
+                    ret.0.borrow()._module.borrow_binary(),
+                    ret.0.borrow()._module.borrow_ops().as_ref().unwrap()
+                ),
             )
             .into(),
         );
@@ -77,20 +94,24 @@ impl Editor {
     }
 
     fn push_line(&mut self, factory: &ElementFactory, string: &str) {
-        {let mut editor = self.0.borrow_mut();
-        let id = editor._next_id;
-        let component = &mut editor.component;
-        component.push(DomSidecar::new(
-            EditLine::new(
-                (DomText::new(string), (DomBr::new((), factory.br()), ())),
-                factory.span(),
-            ),
-            EditLineSidecar {
-                id: id,
-                info: parse_instr(string),
-            },
-        ));
-        editor._next_id += 1;}
+        {
+            let mut editor = self.0.borrow_mut();
+            let id = editor._next_id;
+            let component = &mut editor.component;
+            component.push(DomSidecar::new(
+                EditLine::new(
+                    (DomText::new(string), (DomBr::new((), factory.br()), ())),
+                    factory.span(),
+                ),
+                EditlineSidecar {
+                    id,
+                    info: parse_instr(string),
+                    activated: true,
+                },
+            ));
+            editor._next_id += 1;
+        }
+        self.fix_frames();
         self.update_module();
     }
 
@@ -234,17 +255,63 @@ impl Editor {
         ))
     }
 
-    fn update_module(&mut self) {
-        let mut editor = self.0.borrow_mut();
+    //get activated, non-empty, well-formed lines as '\n' delimited string
+    fn text(&self) -> String {
+        let editor = self.0.borrow();
         let mut lines = String::new();
         for i in 0..editor.component.len() {
-            let line = editor.component.get(i).unwrap();
+            let line = editor.component.get(i).expect("DomSidecar");
             let text = line.borrow_component().get().0.get_contents();
-            lines.push_str(&format!("{}\n", text));
+            let sidecar = line.borrow_sidecar();
+            if sidecar.info != InstrInfo::EmptyorMalformed && sidecar.activated {
+                lines.push_str(&format!("{text}\n"));
+            }
         }
+        lines
+    }
+
+    //get vector of each line's InstrInfo
+    fn instrs(&self) -> Vec<InstrInfo> {
+        let editor = self.0.borrow();
+        let mut lines = Vec::new();
+        for i in 0..editor.component.len() {
+            let line = editor.component.get(i).expect("DomSidecar");
+            let info = line.borrow_sidecar().info;
+            lines.push(info)
+        }
+        lines
+    }
+
+    fn update_module(&mut self) {
+        let lines = self.text();
+        let mut editor = self.0.borrow_mut();
         web_sys::console::log_1(&format!("lines: {lines}").into());
-        let bin = str_to_binary(&lines).unwrap_or_default();
-        editor._module = OkModule::build(bin).expect("OkModule");
+        let bin = str_to_binary(&lines).expect("wasm binary");
+        let mut sidecars = Vec::new();
+        for i in 0..editor.component.len() {
+            let sidecar = editor
+                .component
+                .get(i)
+                .expect("DomSidecar")
+                .borrow_sidecar();
+            sidecars.push(sidecar);
+        }
+        editor._module = OkModule::build(bin, sidecars).expect("OkModule");
+    }
+
+    fn fix_frames(&mut self) {
+        let instrs = self.instrs();
+        let mut editor = self.0.borrow_mut();
+        let (deactivate_indices, num_synthetic_end) = fix_frames(&instrs);
+        for i in 0..editor.component.len() {
+            let sidecar = editor
+                .component
+                .get_mut(i)
+                .expect("DomSidecar")
+                .borrow_sidecar_mut();
+            sidecar.activated = !deactivate_indices.contains(&i);
+        }
+        editor._synthetic_ends = num_synthetic_end;
     }
 }
 
