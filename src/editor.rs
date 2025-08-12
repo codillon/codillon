@@ -5,7 +5,9 @@ use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
     dom_vec::DomVec,
-    utils::*,
+    utils::{
+        FmtError, InstrInfo, OkModule, collect_operands, fix_frames, parse_instr, str_to_binary,
+    },
     web_support::{
         AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
         StaticRangeHandle, WithElement, compare_document_position, set_cursor_position,
@@ -14,7 +16,6 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::{
     cell::{Ref, RefCell, RefMut},
-    collections::HashMap,
     rc::Rc,
 };
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement, Text, console::log_1};
@@ -23,32 +24,25 @@ type DomBr = DomStruct<(), HtmlBrElement>;
 type LineContents = (DomText, (DomBr, ()));
 type EditLine = DomStruct<LineContents, HtmlSpanElement>;
 
-pub struct EditlineSidecar {
-    _id: usize,
+pub struct CodeInfo {
     info: InstrInfo,
-    activated: bool,
+    active: bool,
 }
 
-impl EditlineSidecar {
-    pub fn new(_id: usize, info: InstrInfo, activated: bool) -> Self {
-        Self {
-            _id,
-            info,
-            activated,
-        }
+impl CodeInfo {
+    pub fn new(info: InstrInfo, active: bool) -> Self {
+        Self { info, active }
     }
 
     pub fn can_have_op(&self) -> bool {
-        self.info != InstrInfo::EmptyorMalformed && self.activated
+        self.info != InstrInfo::EmptyorMalformed && self.active
     }
 }
 
 struct _Editor {
-    _next_id: usize,
-    _id_map: HashMap<usize, usize>,
-    _module: OkModule,
-    _synthetic_ends: usize,
-    component: DomVec<DomSidecar<EditLine, EditlineSidecar>, HtmlDivElement>,
+    module: OkModule,
+    synthetic_ends: usize,
+    component: DomVec<DomSidecar<EditLine, CodeInfo>, HtmlDivElement>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -56,11 +50,9 @@ pub struct Editor(Rc<RefCell<_Editor>>);
 impl Editor {
     pub fn new(factory: &ElementFactory) -> Self {
         let mut inner = _Editor {
-            _next_id: 0,
-            _id_map: HashMap::default(),
-            _module: OkModule::build(str_to_binary("").expect("wasm binary"), Vec::new())
+            module: OkModule::build(str_to_binary("").expect("wasm binary"), Vec::new())
                 .expect("OkModule"),
-            _synthetic_ends: 0,
+            synthetic_ends: 0,
             component: DomVec::new(factory.div()),
         };
 
@@ -84,8 +76,8 @@ impl Editor {
             &format!(
                 "operands: {:?}",
                 collect_operands(
-                    ret.0.borrow()._module.borrow_binary(),
-                    ret.0.borrow()._module.borrow_ops().as_ref().unwrap()
+                    ret.0.borrow().module.borrow_binary(),
+                    ret.0.borrow().module.borrow_ops().as_ref().unwrap()
                 ),
             )
             .into(),
@@ -97,20 +89,17 @@ impl Editor {
     fn push_line(&mut self, factory: &ElementFactory, string: &str) {
         {
             let mut editor = self.0.borrow_mut();
-            let _id = editor._next_id;
             let component = &mut editor.component;
             component.push(DomSidecar::new(
                 EditLine::new(
                     (DomText::new(string), (DomBr::new((), factory.br()), ())),
                     factory.span(),
                 ),
-                EditlineSidecar {
-                    _id,
+                CodeInfo {
                     info: parse_instr(string),
-                    activated: true,
+                    active: true,
                 },
             ));
-            editor._next_id += 1;
         }
         self.fix_frames();
         self.update_module();
@@ -230,13 +219,11 @@ impl Editor {
     }
 
     // Accessors for the component and for a particular line of code
-    fn component(&self) -> Ref<'_, DomVec<DomSidecar<EditLine, EditlineSidecar>, HtmlDivElement>> {
+    fn component(&self) -> Ref<'_, DomVec<DomSidecar<EditLine, CodeInfo>, HtmlDivElement>> {
         Ref::map(self.0.borrow(), |c| &c.component)
     }
 
-    fn component_mut(
-        &self,
-    ) -> RefMut<'_, DomVec<DomSidecar<EditLine, EditlineSidecar>, HtmlDivElement>> {
+    fn component_mut(&self) -> RefMut<'_, DomVec<DomSidecar<EditLine, CodeInfo>, HtmlDivElement>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component)
     }
 
@@ -258,7 +245,7 @@ impl Editor {
         ))
     }
 
-    //get activated, non-empty, well-formed lines as '\n' delimited string
+    //get active, non-empty, well-formed lines as '\n' delimited string
     fn text(&self) -> String {
         let editor = self.0.borrow();
         let mut lines = String::new();
@@ -266,9 +253,12 @@ impl Editor {
             let line = editor.component.get(i).expect("DomSidecar");
             let text = line.borrow_component().get().0.get_contents();
             let sidecar = line.borrow_sidecar();
-            if sidecar.info != InstrInfo::EmptyorMalformed && sidecar.activated {
+            if sidecar.info != InstrInfo::EmptyorMalformed && sidecar.active {
                 lines.push_str(&format!("{text}\n"));
             }
+        }
+        for _ in 0..editor.synthetic_ends {
+            lines.push_str("end\n");
         }
         lines
     }
@@ -299,7 +289,7 @@ impl Editor {
                 .borrow_sidecar();
             sidecars.push(sidecar);
         }
-        editor._module = OkModule::build(bin, sidecars).expect("OkModule");
+        editor.module = OkModule::build(bin, sidecars).expect("OkModule");
     }
 
     fn fix_frames(&mut self) {
@@ -312,9 +302,9 @@ impl Editor {
                 .get_mut(i)
                 .expect("DomSidecar")
                 .borrow_sidecar_mut();
-            sidecar.activated = !deactivate_indices.contains(&i);
+            sidecar.active = !deactivate_indices.contains(&i);
         }
-        editor._synthetic_ends = num_synthetic_end;
+        editor.synthetic_ends = num_synthetic_end;
     }
 }
 

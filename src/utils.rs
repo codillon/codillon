@@ -1,4 +1,4 @@
-use crate::editor::EditlineSidecar;
+use crate::editor::CodeInfo;
 use anyhow::{Result, anyhow};
 use self_cell::self_cell;
 use std::ops::RangeInclusive;
@@ -22,7 +22,7 @@ self_cell!(
 
 impl OkModule {
     //assumes only one function
-    pub fn build(wasm_bin: Vec<u8>, sidecars: Vec<&EditlineSidecar>) -> Result<Self> {
+    pub fn build(wasm_bin: Vec<u8>, sidecars: Vec<&CodeInfo>) -> Result<Self> {
         Ok(OkModule::new(wasm_bin, |wasm_bin| {
             //first, collect all operators
             let parser = Parser::new(0);
@@ -460,12 +460,12 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let sidecars = [
-            EditlineSidecar::new(0, InstrInfo::Other, true),
-            EditlineSidecar::new(1, InstrInfo::Other, true),
-            EditlineSidecar::new(2, InstrInfo::OtherStructured, true),
-            EditlineSidecar::new(3, InstrInfo::Other, true),
-            EditlineSidecar::new(4, InstrInfo::End, true),
-            EditlineSidecar::new(5, InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::OtherStructured, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::End, true),
+            CodeInfo::new(InstrInfo::Other, true),
         ];
         let sidecars = sidecars.iter().collect();
         let module = OkModule::build(wasm_bin, sidecars)?;
@@ -491,13 +491,13 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let sidecars = [
-            EditlineSidecar::new(0, InstrInfo::Other, true),
-            EditlineSidecar::new(1, InstrInfo::If, true),
-            EditlineSidecar::new(2, InstrInfo::Other, true),
-            EditlineSidecar::new(3, InstrInfo::Else, true),
-            EditlineSidecar::new(4, InstrInfo::Other, true),
-            EditlineSidecar::new(5, InstrInfo::End, true),
-            EditlineSidecar::new(6, InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::If, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Else, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::End, true),
+            CodeInfo::new(InstrInfo::Other, true),
         ];
         let sidecars = sidecars.iter().collect();
         let module = OkModule::build(wasm_bin, sidecars)?;
@@ -535,14 +535,14 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let sidecars = [
-            EditlineSidecar::new(0, InstrInfo::Other, true),
-            EditlineSidecar::new(1, InstrInfo::OtherStructured, true),
-            EditlineSidecar::new(2, InstrInfo::Other, true),
-            EditlineSidecar::new(3, InstrInfo::Other, true),
-            EditlineSidecar::new(4, InstrInfo::Other, true),
-            EditlineSidecar::new(5, InstrInfo::Other, true),
-            EditlineSidecar::new(6, InstrInfo::End, true),
-            EditlineSidecar::new(7, InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::OtherStructured, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::End, true),
+            CodeInfo::new(InstrInfo::Other, true),
         ];
         let sidecars = sidecars.iter().collect();
         let module = OkModule::build(wasm_bin, sidecars)?;
@@ -579,15 +579,15 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let sidecars = [
-            EditlineSidecar::new(0, InstrInfo::Other, true),
-            EditlineSidecar::new(1, InstrInfo::OtherStructured, true),
-            EditlineSidecar::new(2, InstrInfo::If, true),
-            EditlineSidecar::new(3, InstrInfo::Other, true),
-            EditlineSidecar::new(4, InstrInfo::Else, true),
-            EditlineSidecar::new(5, InstrInfo::Other, true),
-            EditlineSidecar::new(6, InstrInfo::End, true),
-            EditlineSidecar::new(7, InstrInfo::End, true),
-            EditlineSidecar::new(8, InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::OtherStructured, true),
+            CodeInfo::new(InstrInfo::If, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::Else, true),
+            CodeInfo::new(InstrInfo::Other, true),
+            CodeInfo::new(InstrInfo::End, true),
+            CodeInfo::new(InstrInfo::End, true),
+            CodeInfo::new(InstrInfo::Other, true),
         ];
         let sidecars = sidecars.iter().collect();
         let module = OkModule::build(wasm_bin, sidecars)?;
@@ -605,8 +605,8 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let sidecars = [
-            EditlineSidecar::new(0, InstrInfo::OtherStructured, true),
-            EditlineSidecar::new(1, InstrInfo::End, true),
+            CodeInfo::new(InstrInfo::OtherStructured, true),
+            CodeInfo::new(InstrInfo::End, true),
         ];
         let sidecars = sidecars.iter().collect();
         let module = OkModule::build(wasm_bin, sidecars)?;
