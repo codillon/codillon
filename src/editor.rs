@@ -14,6 +14,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::{
     cell::{Ref, RefCell, RefMut},
+    collections::HashMap,
     rc::Rc,
 };
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement, Text, console::log_1};
@@ -229,11 +230,11 @@ impl Editor {
     }
 
     // Accessors for the component and for a particular line of code
-    fn component(&self) -> Ref<'_, DomVec<EditLine, HtmlDivElement>> {
+    fn component(&self) -> Ref<'_, DomVec<DomSidecar<EditLine, EditlineSidecar>, HtmlDivElement>> {
         Ref::map(self.0.borrow(), |c| &c.component)
     }
 
-    fn component_mut(&self) -> RefMut<'_, DomVec<EditLine, HtmlDivElement>> {
+    fn component_mut(&self) -> RefMut<'_, DomVec<DomSidecar<EditLine, EditlineSidecar>, HtmlDivElement>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component)
     }
 
@@ -242,7 +243,7 @@ impl Editor {
             Ref::filter_map(self.component(), |c| c.get(idx))
                 .ok()
                 .context("line {idx}")?,
-            |x| &x.get().0,
+            |x| &x.borrow_component().get().0,
         ))
     }
 
@@ -251,7 +252,7 @@ impl Editor {
             RefMut::filter_map(self.component_mut(), |c| c.get_mut(idx))
                 .ok()
                 .context("line {idx}")?,
-            |x| &mut x.get_mut().0,
+            |x| &mut x.borrow_component_mut().get_mut().0,
         ))
     }
 

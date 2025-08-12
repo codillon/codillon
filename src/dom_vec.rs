@@ -2,8 +2,7 @@
 
 use crate::web_support::{
     
-    AccessToken, AnyElement, Component, ElementAsNode, ElementHandle, InputEventHandle, WithElement,
-,
+    AccessToken, AnyElement, Component, ElementAsNode, ElementHandle, InputEventHandle, WithElement
 };
 use delegate::delegate;
 
@@ -18,14 +17,6 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
             contents: Vec::new(),
             elem,
         }
-    }
-
-    pub fn len(&self) -> usize {
-        self.contents.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.contents.is_empty()
     }
 
     pub fn push(&mut self, elem: Child) {
