@@ -89,6 +89,10 @@ impl DomText {
     pub fn is_empty(&self) -> bool {
         self.contents.is_empty()
     }
+
+    pub fn get_contents(&self) -> &str {
+        &self.contents
+    }
 }
 
 impl WithNode for DomText {

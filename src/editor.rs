@@ -1,13 +1,16 @@
 // The Codillon code editor (doesn't do much, but does capture beforeinput and logs to console)
 
 use crate::{
+    dom_sidecar::DomSidecar,
     dom_struct::DomStruct,
     dom_text::DomText,
     dom_vec::DomVec,
-    utils::FmtError,
+    utils::{
+        FmtError, InstrInfo, OkModule, collect_operands, fix_frames, parse_instr, str_to_binary,
+    },
     web_support::{
-        AccessToken, Component, ElementFactory, InputEventHandle, NodeRef, StaticRangeHandle,
-        WithElement, compare_document_position, set_cursor_position,
+        AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
+        StaticRangeHandle, WithElement, compare_document_position, set_cursor_position,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -21,8 +24,25 @@ type DomBr = DomStruct<(), HtmlBrElement>;
 type LineContents = (DomText, (DomBr, ()));
 type EditLine = DomStruct<LineContents, HtmlSpanElement>;
 
+pub struct CodeInfo {
+    info: InstrInfo,
+    active: bool,
+}
+
+impl CodeInfo {
+    pub fn new(info: InstrInfo, active: bool) -> Self {
+        Self { info, active }
+    }
+
+    pub fn can_have_op(&self) -> bool {
+        self.info != InstrInfo::EmptyorMalformed && self.active
+    }
+}
+
 struct _Editor {
-    component: DomVec<EditLine, HtmlDivElement>,
+    module: OkModule,
+    synthetic_ends: usize,
+    component: DomVec<DomSidecar<EditLine, CodeInfo>, HtmlDivElement>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -30,6 +50,9 @@ pub struct Editor(Rc<RefCell<_Editor>>);
 impl Editor {
     pub fn new(factory: &ElementFactory) -> Self {
         let mut inner = _Editor {
+            module: OkModule::build(str_to_binary("").expect("wasm binary"), Vec::new())
+                .expect("OkModule"),
+            synthetic_ends: 0,
             component: DomVec::new(factory.div()),
         };
 
@@ -46,18 +69,40 @@ impl Editor {
                 .expect("input handler")
         });
 
-        for i in 0..100 {
-            ret.push_line(factory, &format!("This is 🏳️‍⚧️ line {i}."));
-        }
+        ret.push_line(factory, "i32.const 1");
+        ret.push_line(factory, "drop");
+
+        web_sys::console::log_1(
+            &format!(
+                "operands: {:?}",
+                collect_operands(
+                    ret.0.borrow().module.borrow_binary(),
+                    ret.0.borrow().module.borrow_ops().as_ref().unwrap()
+                ),
+            )
+            .into(),
+        );
 
         ret
     }
 
     fn push_line(&mut self, factory: &ElementFactory, string: &str) {
-        self.component_mut().push(EditLine::new(
-            (DomText::new(string), (DomBr::new((), factory.br()), ())),
-            factory.span(),
-        ));
+        {
+            let mut editor = self.0.borrow_mut();
+            let component = &mut editor.component;
+            component.push(DomSidecar::new(
+                EditLine::new(
+                    (DomText::new(string), (DomBr::new((), factory.br()), ())),
+                    factory.span(),
+                ),
+                CodeInfo {
+                    info: parse_instr(string),
+                    active: true,
+                },
+            ));
+        }
+        self.fix_frames();
+        self.update_module();
     }
 
     // Replace a given range (currently within a single line) with new text
@@ -174,11 +219,11 @@ impl Editor {
     }
 
     // Accessors for the component and for a particular line of code
-    fn component(&self) -> Ref<'_, DomVec<EditLine, HtmlDivElement>> {
+    fn component(&self) -> Ref<'_, DomVec<DomSidecar<EditLine, CodeInfo>, HtmlDivElement>> {
         Ref::map(self.0.borrow(), |c| &c.component)
     }
 
-    fn component_mut(&self) -> RefMut<'_, DomVec<EditLine, HtmlDivElement>> {
+    fn component_mut(&self) -> RefMut<'_, DomVec<DomSidecar<EditLine, CodeInfo>, HtmlDivElement>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component)
     }
 
@@ -187,7 +232,7 @@ impl Editor {
             Ref::filter_map(self.component(), |c| c.get(idx))
                 .ok()
                 .context("line {idx}")?,
-            |x| &x.get().0,
+            |x| &x.borrow_component().get().0,
         ))
     }
 
@@ -196,8 +241,70 @@ impl Editor {
             RefMut::filter_map(self.component_mut(), |c| c.get_mut(idx))
                 .ok()
                 .context("line {idx}")?,
-            |x| &mut x.get_mut().0,
+            |x| &mut x.borrow_component_mut().get_mut().0,
         ))
+    }
+
+    //get active, non-empty, well-formed lines as '\n' delimited string
+    fn text(&self) -> String {
+        let editor = self.0.borrow();
+        let mut lines = String::new();
+        for i in 0..editor.component.len() {
+            let line = editor.component.get(i).expect("DomSidecar");
+            let text = line.borrow_component().get().0.get_contents();
+            let sidecar = line.borrow_sidecar();
+            if sidecar.info != InstrInfo::EmptyorMalformed && sidecar.active {
+                lines.push_str(&format!("{text}\n"));
+            }
+        }
+        for _ in 0..editor.synthetic_ends {
+            lines.push_str("end\n");
+        }
+        lines
+    }
+
+    //get vector of each line's InstrInfo
+    fn instrs(&self) -> Vec<InstrInfo> {
+        let editor = self.0.borrow();
+        let mut lines = Vec::new();
+        for i in 0..editor.component.len() {
+            let line = editor.component.get(i).expect("DomSidecar");
+            let info = line.borrow_sidecar().info;
+            lines.push(info)
+        }
+        lines
+    }
+
+    fn update_module(&mut self) {
+        let lines = self.text();
+        let mut editor = self.0.borrow_mut();
+        web_sys::console::log_1(&format!("lines: {lines}").into());
+        let bin = str_to_binary(&lines).expect("wasm binary");
+        let mut sidecars = Vec::new();
+        for i in 0..editor.component.len() {
+            let sidecar = editor
+                .component
+                .get(i)
+                .expect("DomSidecar")
+                .borrow_sidecar();
+            sidecars.push(sidecar);
+        }
+        editor.module = OkModule::build(bin, sidecars).expect("OkModule");
+    }
+
+    fn fix_frames(&mut self) {
+        let instrs = self.instrs();
+        let mut editor = self.0.borrow_mut();
+        let (deactivate_indices, num_synthetic_end) = fix_frames(&instrs);
+        for i in 0..editor.component.len() {
+            let sidecar = editor
+                .component
+                .get_mut(i)
+                .expect("DomSidecar")
+                .borrow_sidecar_mut();
+            sidecar.active = !deactivate_indices.contains(&i);
+        }
+        editor.synthetic_ends = num_synthetic_end;
     }
 }
 
@@ -207,6 +314,8 @@ impl WithElement for Editor {
         self.component().with_element(f, g);
     }
 }
+
+impl ElementAsNode for Editor {}
 
 impl Component for Editor {
     fn audit(&self) {

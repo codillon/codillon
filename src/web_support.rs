@@ -38,7 +38,9 @@ pub trait WithElement {
     fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken);
 }
 
-impl<T: WithElement> WithNode for T {
+pub trait ElementAsNode {}
+
+impl<T: WithElement + ElementAsNode> WithNode for T {
     fn with_node(&self, mut f: impl FnMut(&web_sys::Node), g: AccessToken) {
         self.with_element(|elem| f(elem.as_ref()), g);
     }
