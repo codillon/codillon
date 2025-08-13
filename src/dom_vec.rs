@@ -49,6 +49,20 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
     }
 }
 
+impl<Child: Component, Element: AnyElement> std::ops::Index<usize> for DomVec<Child, Element> {
+    type Output = Child;
+
+    fn index(&self, index: usize) -> &Child {
+        &self.contents[index]
+    }
+}
+
+impl<Child: Component, Element: AnyElement> std::ops::IndexMut<usize> for DomVec<Child, Element> {
+    fn index_mut(&mut self, index: usize) -> &mut Child {
+        &mut self.contents[index]
+    }
+}
+
 // To audit, audit the parent element itself, then for each child component,
 // audit it, and also verify that the child's opinion of its node matches the
 // actual child node of the DomVec's parent element.
