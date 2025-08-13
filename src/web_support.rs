@@ -151,6 +151,20 @@ impl<T: AnyElement> ElementHandle<T> {
         )
     }
 
+    pub fn insert_node(&self, index: usize, child: &impl WithNode) {
+        child.with_node(
+            |node| {
+                let elem = self.elem.element();
+                let node_list = elem.child_nodes();
+                assert!(index <= node_list.length() as usize);
+                let anchor_node = node_list.item(index.try_into().expect("into u32"));
+                elem.insert_before(node, anchor_node.as_ref())
+                    .expect("insert_node");
+            },
+            TOKEN,
+        );
+    }
+
     pub fn attach_node(&self, child: &impl WithNode) {
         child.with_node(
             |node| self.elem.element().replace_children_with_node_1(node),
