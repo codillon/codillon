@@ -227,7 +227,7 @@ impl Editor {
                 indentity_decorator,
             ),
             "deleteContentBackward" | "deleteContentForward" => {
-                fn delete_decorater(
+                fn delete_decorator(
                     editor: &Editor,
                     start_cursor: &mut (usize, usize),
                     end_cursor: &mut (usize, usize),
@@ -240,7 +240,7 @@ impl Editor {
                         end_cursor.1 = 0;
                     }
                 }
-                self.replace_range_with_decorator(target_range, "", delete_decorater)
+                self.replace_range_with_decorator(target_range, "", delete_decorator)
             }
             "insertParagraph" => {
                 self.replace_range_with_decorator(target_range, "\n", indentity_decorator)
