@@ -23,14 +23,16 @@ type EditLine = DomStruct<LineContents, HtmlSpanElement>;
 
 struct _Editor {
     component: DomVec<EditLine, HtmlDivElement>,
+    factory: ElementFactory,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
 
 impl Editor {
-    pub fn new(factory: &ElementFactory) -> Self {
+    pub fn new(factory: ElementFactory) -> Self {
         let mut inner = _Editor {
             component: DomVec::new(factory.div()),
+            factory,
         };
 
         inner.component.set_attribute("class", "textentry");
@@ -47,48 +49,152 @@ impl Editor {
         });
 
         for i in 0..100 {
-            ret.push_line(factory, &format!("This is 🏳️‍⚧️ line {i}."));
+            ret.push_line(&format!("This is 🏳️‍⚧️ line {i}."));
         }
 
         ret
     }
 
-    fn push_line(&mut self, factory: &ElementFactory, string: &str) {
+    fn push_line(&mut self, string: &str) {
+        let br = self.0.borrow().factory.br();
+        let span = self.0.borrow().factory.span();
         self.component_mut().push(EditLine::new(
-            (DomText::new(string), (DomBr::new((), factory.br()), ())),
-            factory.span(),
+            (DomText::new(string), (DomBr::new((), br), ())),
+            span,
         ));
     }
 
-    // Replace a given range (currently within a single line) with new text
-    fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
-        if new_str.chars().any(|x| x.is_control()) {
-            bail!("unhandled: control char [e.g. carriage return] in input");
+    fn insert_line(&mut self, index: usize, string: &str) {
+        let br = self.0.borrow().factory.br();
+        let span = self.0.borrow().factory.span();
+        self.component_mut().insert(
+            index,
+            EditLine::new((DomText::new(string), (DomBr::new((), br), ())), span),
+        );
+    }
+
+    fn remove_line(&mut self, index: usize) {
+        self.component_mut().remove(index);
+    }
+
+    // Replace a given range with new text, multiline enabled
+    fn replace_range_with_decorator<F: Fn(&Self, &mut (usize, usize), &mut (usize, usize))>(
+        &mut self,
+        target_range: StaticRangeHandle,
+        new_str: &str,
+        range_decorator: F,
+    ) -> Result<()> {
+        if new_str
+            .chars()
+            .any(|x| x.is_control() && x != '\r' && x != '\n')
+        {
+            bail!("unhandled: control char in input");
         }
 
-        let (start_line_index, start_pos_in_line) = self.find_idx_and_utf16_pos(
+        let mut start_cursor = self.find_idx_and_utf16_pos(
             target_range.start_container().fmt_err()?,
             target_range.start_offset().fmt_err()?,
         )?;
 
-        let (end_line_index, end_pos_in_line) = self.find_idx_and_utf16_pos(
+        let mut end_cursor = self.find_idx_and_utf16_pos(
             target_range.end_container().fmt_err()?,
             target_range.end_offset().fmt_err()?,
         )?;
 
-        if start_line_index != end_line_index {
-            bail!(
-                "unhandled: multi-line target range {start_line_index}/{start_pos_in_line}..{end_line_index}/{end_pos_in_line}"
-            );
+        range_decorator(self, &mut start_cursor, &mut end_cursor);
+
+        assert!(start_cursor <= end_cursor);
+
+        let new_str_lines = new_str
+            .split('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .collect::<Vec<_>>();
+
+        match (end_cursor.0 > start_cursor.0, new_str_lines.len() > 1) {
+            (true, true) => {
+                let start_line_len = self.line(start_cursor.0)?.len_utf16();
+                self.line_mut(start_cursor.0)?.replace_range(
+                    start_cursor.1,
+                    start_line_len,
+                    new_str_lines.first().unwrap(),
+                )?;
+                self.line_mut(end_cursor.0)?.replace_range(
+                    0,
+                    end_cursor.1,
+                    new_str_lines.last().unwrap(),
+                )?;
+                end_cursor.1 = str_indices::utf16::count(new_str_lines.last().unwrap());
+                for lineno in (start_cursor.0 + new_str_lines.len() - 1..end_cursor.0).rev() {
+                    self.remove_line(lineno);
+                    end_cursor.0 -= 1;
+                }
+                for (lineno, new_line) in (1..new_str_lines.len() - 1)
+                    .map(|idx| (start_cursor.0 + idx, new_str_lines[idx]))
+                {
+                    if lineno < end_cursor.0 {
+                        self.line_mut(lineno)?.set_data(new_line);
+                    } else {
+                        self.insert_line(lineno, new_line);
+                        end_cursor.0 += 1;
+                    }
+                }
+            }
+            (true, false) => {
+                let last_line_len = self.line(end_cursor.0)?.len_utf16();
+                let last_part = self
+                    .line(end_cursor.0)?
+                    .slice_utf16(end_cursor.1..last_line_len)?
+                    .to_string();
+                for line_no in (start_cursor.0 + 1..=end_cursor.0).rev() {
+                    self.remove_line(line_no);
+                }
+                let start_line_len = self.line(start_cursor.0)?.len_utf16();
+                self.line_mut(start_cursor.0)?.replace_range(
+                    start_cursor.1,
+                    start_line_len,
+                    &[new_str_lines[0], &last_part].concat(),
+                )?;
+                end_cursor = (
+                    start_cursor.0,
+                    start_cursor.1 + str_indices::utf16::count(new_str_lines[0]),
+                )
+            }
+            (false, true) => {
+                let the_line_len = self.line(start_cursor.0)?.len_utf16();
+                let last_part = self
+                    .line(start_cursor.0)?
+                    .slice_utf16(end_cursor.1..the_line_len)?
+                    .to_string();
+                self.line_mut(start_cursor.0)?.replace_range(
+                    start_cursor.1,
+                    the_line_len,
+                    new_str_lines.first().unwrap(),
+                )?;
+                for (lineno, new_line) in (1..new_str_lines.len() - 1)
+                    .map(|idx| (start_cursor.0 + idx, new_str_lines[idx]))
+                {
+                    self.insert_line(lineno, new_line);
+                }
+                self.insert_line(
+                    start_cursor.0 + new_str_lines.len() - 1,
+                    &[*new_str_lines.last().unwrap(), &last_part].concat(),
+                );
+                end_cursor = (
+                    start_cursor.0 + new_str_lines.len() - 1,
+                    str_indices::utf16::count(new_str_lines.last().unwrap()),
+                )
+            }
+            (false, false) => {
+                self.line_mut(start_cursor.0)?.replace_range(
+                    start_cursor.1,
+                    end_cursor.1,
+                    new_str_lines[0],
+                )?;
+                end_cursor.1 = start_cursor.1 + str_indices::utf16::count(new_str_lines[0]);
+            }
         }
 
-        let new_cursor_pos = self.line_mut(start_line_index)?.replace_range(
-            start_pos_in_line,
-            end_pos_in_line,
-            new_str,
-        )?;
-
-        set_cursor_position(&*self.line(start_line_index)?, new_cursor_pos);
+        set_cursor_position(&*self.line(end_cursor.0)?, end_cursor.1);
 
         Ok(())
     }
@@ -99,17 +205,45 @@ impl Editor {
 
         let target_range = ev.get_first_target_range()?;
 
+        fn indentity_decorator(
+            _editor: &Editor,
+            _start_cursor: &mut (usize, usize),
+            _end_cursor: &mut (usize, usize),
+        ) {
+        }
+
         match &ev.input_type() as &str {
-            "insertText" => self.replace_range(target_range, &ev.data().context("no data")?),
-            "insertFromPaste" => self.replace_range(
+            "insertText" => self.replace_range_with_decorator(
+                target_range,
+                &ev.data().context("no data")?,
+                indentity_decorator,
+            ),
+            "insertFromPaste" => self.replace_range_with_decorator(
                 target_range,
                 &ev.data_transfer()
                     .context("no data_transfer")?
                     .get_data("text/plain")
                     .fmt_err()?,
+                indentity_decorator,
             ),
             "deleteContentBackward" | "deleteContentForward" => {
-                self.replace_range(target_range, "")
+                fn delete_decorater(
+                    editor: &Editor,
+                    start_cursor: &mut (usize, usize),
+                    end_cursor: &mut (usize, usize),
+                ) {
+                    if start_cursor == end_cursor
+                        && end_cursor.1 == editor.line(end_cursor.0).expect("get line").len_utf16()
+                        && end_cursor.0 + 1 < editor.component().len()
+                    {
+                        end_cursor.0 += 1;
+                        end_cursor.1 = 0;
+                    }
+                }
+                self.replace_range_with_decorator(target_range, "", delete_decorater)
+            }
+            "insertParagraph" => {
+                self.replace_range_with_decorator(target_range, "\n", indentity_decorator)
             }
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",

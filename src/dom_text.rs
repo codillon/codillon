@@ -3,7 +3,7 @@
 // string, and enforces that the DOM contents will match the Rust contents.
 
 use crate::web_support::{AccessToken, Component, TextHandle, WithNode};
-use anyhow::{Result, bail};
+use anyhow::{Ok, Result, bail};
 
 #[derive(Default)]
 pub struct DomText {
@@ -55,12 +55,18 @@ impl DomText {
         Ok(utf16_idx + utf16_inserted)
     }
 
+    pub fn slice_utf16(&self, range: std::ops::Range<usize>) -> Result<&str> {
+        let start_byte_idx = self.safe_utf16_to_byte_idx(range.start)?;
+        let end_byte_idx = self.safe_utf16_to_byte_idx(range.end)?;
+        Ok(&self.contents[start_byte_idx..end_byte_idx])
+    }
+
     pub fn replace_range(
         &mut self,
         utf16_start_idx: usize,
         utf16_end_idx: usize,
         string: &str,
-    ) -> Result<usize> {
+    ) -> Result<()> {
         let byte_start_idx = self.safe_utf16_to_byte_idx(utf16_start_idx)?;
         let byte_end_idx = self.safe_utf16_to_byte_idx(utf16_end_idx)?;
         if utf16_start_idx > utf16_end_idx || byte_start_idx > byte_end_idx {
@@ -74,8 +80,7 @@ impl DomText {
             utf16_count.try_into()?,
             string,
         )?;
-        let utf16_inserted = str_indices::utf16::count(string);
-        Ok(utf16_start_idx + utf16_inserted)
+        Ok(())
     }
 
     pub fn len_utf16(&self) -> usize {
