@@ -10,7 +10,7 @@ use crate::{
         WithElement, compare_document_position, set_cursor_position,
     },
 };
-use anyhow::{Context, Ok, Result, bail};
+use anyhow::{Context, Result, bail};
 use std::{
     cell::{Ref, RefCell, RefMut},
     rc::Rc,
@@ -60,12 +60,9 @@ impl Editor {
         ));
     }
 
-    fn process_target_range_replace(
-        &mut self,
-        target_range: StaticRangeHandle,
-        the_data: &str,
-    ) -> Result<()> {
-        if the_data.chars().any(|x| x.is_control()) {
+    // Replace a given range (currently within a single line) with new text
+    fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
+        if new_str.chars().any(|x| x.is_control()) {
             bail!("unhandled: control char [e.g. carriage return] in input");
         }
 
@@ -88,7 +85,7 @@ impl Editor {
         let new_cursor_pos = self.line_mut(start_line_index)?.replace_range(
             start_pos_in_line,
             end_pos_in_line,
-            the_data,
+            new_str,
         )?;
 
         set_cursor_position(&*self.line(start_line_index)?, new_cursor_pos);
@@ -96,25 +93,24 @@ impl Editor {
         Ok(())
     }
 
-    // The input handler. Currently only handles "insertText" events.
+    // The input handler. Currently only handles single-line insert/delete events.
     fn handle_input(&mut self, ev: InputEventHandle) -> Result<()> {
         ev.prevent_default();
 
         let target_range = ev.get_first_target_range()?;
 
         match &ev.input_type() as &str {
-            "insertText" => {
-                self.process_target_range_replace(target_range, &ev.data().context("no data")?)
-            }
-            "insertFromPaste" => self.process_target_range_replace(
+            "insertText" => self.replace_range(target_range, &ev.data().context("no data")?),
+            "insertFromPaste" => self.replace_range(
                 target_range,
                 &ev.data_transfer()
                     .context("no data_transfer")?
                     .get_data("text/plain")
                     .fmt_err()?,
             ),
-            "deleteContentBackward" => self.process_target_range_replace(target_range, ""),
-            "deleteContentForward" => self.process_target_range_replace(target_range, ""),
+            "deleteContentBackward" | "deleteContentForward" => {
+                self.replace_range(target_range, "")
+            }
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
