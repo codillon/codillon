@@ -1,7 +1,7 @@
 // A Codillon DOM "vector": a variable-length collection of Components of the same type
 
 use crate::web_support::{
-    AccessToken, AnyElement, Component, ElementHandle, InputEventHandle, WithElement,
+    AccessToken, AnyElement, Component, ElementAsNode, ElementHandle, InputEventHandle, WithElement,
 };
 use delegate::delegate;
 
@@ -49,6 +49,20 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
     }
 }
 
+impl<Child: Component, Element: AnyElement> std::ops::Index<usize> for DomVec<Child, Element> {
+    type Output = Child;
+
+    fn index(&self, index: usize) -> &Child {
+        &self.contents[index]
+    }
+}
+
+impl<Child: Component, Element: AnyElement> std::ops::IndexMut<usize> for DomVec<Child, Element> {
+    fn index_mut(&mut self, index: usize) -> &mut Child {
+        &mut self.contents[index]
+    }
+}
+
 // To audit, audit the parent element itself, then for each child component,
 // audit it, and also verify that the child's opinion of its node matches the
 // actual child node of the DomVec's parent element.
@@ -71,3 +85,5 @@ impl<Child: Component, Element: AnyElement> WithElement for DomVec<Child, Elemen
         self.elem.with_element(f, g);
     }
 }
+
+impl<Child: Component, Element: AnyElement> ElementAsNode for DomVec<Child, Element> {}
