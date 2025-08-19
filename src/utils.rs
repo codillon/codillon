@@ -171,6 +171,7 @@ pub type InstrOps = Vec<(Vec<(ValType, usize)>, Vec<ValType>)>;
 /// A vector of tuples where:
 /// the first element is a (ValType, usize) tuple representing an operand this instruction pops and the idx in the editor where this operand was pushed
 /// the second element is a ValType representing an operand this instruction pushes
+// TODO: use Operators in OkModule instead of re-parsing the binary, and annotate each Operator in OkModule with its type instead of returning a vector
 pub fn collect_operands<'a>(wasm_bin: &[u8], ops: &Vec<(Operator<'a>, usize)>) -> Result<InstrOps> {
     let mut validator = Validator::new();
     let parser = Parser::new(0);
