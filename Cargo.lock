@@ -1970,3 +1970,8 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[patch.unused]]
+name = "wasmprinter"
+version = "0.236.1"
+source = "git+https://github.com/codillon/wasm-tools?branch=trip%2Fprinter-config-no-resolve#da93736bdd770f1ade1f09147196bcd95e8005d0"

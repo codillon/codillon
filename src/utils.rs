@@ -4,6 +4,7 @@ use self_cell::self_cell;
 use std::ops::RangeInclusive;
 use wasm_tools::parse_binary_wasm;
 use wasmparser::{Operator, Parser, Payload, ValType, ValidPayload, Validator};
+use wasmprinter::{Config, Print};
 use wast::{
     core::{Instruction, Module},
     parser::{self, ParseBuffer},
@@ -78,6 +79,94 @@ pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
     let txt = format!("module (func\n{s})");
     Ok(parser::parse::<Module>(&ParseBuffer::new(&txt)?)?.encode()?)
 }
+
+// The constructor of the parent takes in the extra stuff and has a build
+pub struct SymbolicInfo {
+    instructions: Vec<(String, usize)>,
+}
+
+impl Default for SymbolicInfo {
+    fn default() -> Self {
+        SymbolicInfo::new(Vec::new())
+    }
+}
+
+impl SymbolicInfo {
+    fn new(instrs: Vec<(String, usize)>) -> Self {
+        Self {
+            instructions: instrs,
+        }
+    }
+
+    pub fn build(wasm: Vec<u8>, infos: &impl LineInfos) -> Result<Self> {
+        let mut shadow_instructions = ShadowInstructions::new();
+        let print_config = Config::new();
+        let res = print_config
+            .skip_resolution(true)
+            .print(&wasm, &mut shadow_instructions);
+        if res.is_err() {
+            web_sys::console::log_1(&format!("could not print the config: {:?}", res.err()).into());
+        }
+
+        let mut line_idx = 0;
+        let mut linked_instructions = Vec::new();
+        for line in shadow_instructions.get_instrs() {
+            web_sys::console::log_1(&format!("line {:?}", line).into());
+            while !infos.get(line_idx).is_instr() {
+                line_idx += 1;
+            }
+
+            linked_instructions.push((line.clone(), line_idx));
+            line_idx += 1;
+        }
+        Ok(SymbolicInfo {
+            instructions: linked_instructions,
+        })
+    }
+}
+
+pub struct ShadowInstructions {
+    instructions: Vec<String>,
+}
+
+impl ShadowInstructions {
+    pub fn new() -> Self {
+        let mut vec = Vec::new();
+        vec.push(String::new());
+        Self { instructions: vec }
+    }
+
+    pub fn add_to_current_line(&mut self, s: &str) {
+        if let Some(elem) = self.instructions.last_mut() {
+            elem.push_str(s);
+        }
+    }
+
+    pub fn new_line(&mut self) {
+        self.instructions.push(String::new());
+    }
+
+    pub fn get_instrs(&mut self) -> Vec<&String> {
+        self.instructions
+            .iter()
+            .filter(|s| parse_instr(s) != InstrInfo::EmptyOrMalformed)
+            .collect::<Vec<&String>>()
+    }
+}
+
+impl Print for ShadowInstructions {
+    fn write_str(&mut self, s: &str) -> std::io::Result<()> {
+        self.add_to_current_line(s);
+        Ok(())
+    }
+
+    fn newline(&mut self) -> std::io::Result<()> {
+        self.new_line();
+        Ok(())
+    }
+}
+
+// implement print for shadowInstructions
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstrInfo {

@@ -16,10 +16,28 @@ delegate = "0.13.4"
 js-sys = "0.3.77"
 str_indices = "0.4.4"
 wasm-bindgen = "0.2.100"
-web-sys = { version = "0.3.77", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer"] }
+web-sys = { version = "0.3.77", features = [
+    "Text",
+    "Element",
+    "HtmlDivElement",
+    "Window",
+    "Document",
+    "console",
+    "HtmlBodyElement",
+    "NodeList",
+    "HtmlBrElement",
+    "HtmlSpanElement",
+    "HtmlParagraphElement",
+    "HtmlElement",
+    "InputEvent",
+    "Range",
+    "Selection",
+    "DataTransfer",
+] }
 self_cell = "1.2.0"
 
 [patch.crates-io]
+wasmprinter = { git = "https://github.com/codillon/wasm-tools", branch = "trip/printer-config-no-resolve" }
 web-sys = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
 wasm-bindgen = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
 js-sys = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
