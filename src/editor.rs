@@ -6,8 +6,8 @@ use crate::{
     dom_text::DomText,
     dom_vec::DomVec,
     utils::{
-        FmtError, InstrInfo, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames,
-        parse_instr, str_to_binary,
+        FmtError, InstrInfo, LineInfos, LineInfosMut, OkModule, SymbolicInfo, collect_operands,
+        fix_frames, parse_instr, str_to_binary,
     },
     web_support::{
         AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
@@ -47,6 +47,7 @@ struct _Editor {
     module: OkModule,
     synthetic_ends: usize,
     component: ComponentType,
+    symbolic_info: SymbolicInfo,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -57,6 +58,7 @@ impl Editor {
             module: OkModule::default(),
             synthetic_ends: 0,
             component: DomVec::new(factory.div()),
+            symbolic_info: SymbolicInfo::default(),
         };
 
         inner.component.set_attribute("class", "textentry");
@@ -264,7 +266,9 @@ impl Editor {
             .instructions_as_text()
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
         let bin = str_to_binary(text).expect("wasm binary");
-        self.0.borrow_mut().module = OkModule::build(bin, self).expect("OkModule");
+
+        self.0.borrow_mut().module = OkModule::build(bin.clone(), self).expect("OkModule");
+        self.0.borrow_mut().symbolic_info = SymbolicInfo::build(bin, self).expect("SymbolicInfo");
 
         // log instruction types (TODO: integrate into OkModule)
         web_sys::console::log_1(
