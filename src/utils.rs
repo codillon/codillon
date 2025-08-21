@@ -82,9 +82,9 @@ pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
 
 // SymbolicInfo stores information that is used for symbolic resolution.
 // Currently, it stores all instructions (defined by LineInfo::is_instr)
-// that have been converted to their numerical form by the wasmprinter.
-// These instructions are individually paired with the index of the line
-// in the editor that they correspond with.
+// that have been converted to their numerical forms (see ShadowInstructions).
+// These instructions are each paired with the index of the line
+// in the editor that they correspond to.
 pub struct SymbolicInfo {
     instructions: Vec<(String, usize)>,
 }
