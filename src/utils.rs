@@ -105,7 +105,7 @@ impl SymbolicInfo {
     pub fn build(wasm: Vec<u8>, infos: &impl LineInfos) -> Result<Self> {
         let mut shadow_instructions = ShadowInstructions::new();
         let mut print_config = Config::new();
-        let _ = print_config
+        print_config
             .skip_resolution(true)
             .print(&wasm, &mut shadow_instructions)
             .expect("Could not print the provided binary");
@@ -139,8 +139,7 @@ struct ShadowInstructions {
 
 impl ShadowInstructions {
     pub fn new() -> Self {
-        let mut vec = Vec::new();
-        vec.push(String::new());
+        let vec = vec![String::new()];
         Self { instructions: vec }
     }
 
