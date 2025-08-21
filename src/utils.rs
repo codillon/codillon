@@ -80,7 +80,11 @@ pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
     Ok(parser::parse::<Module>(&ParseBuffer::new(&txt)?)?.encode()?)
 }
 
-// The constructor of the parent takes in the extra stuff and has a build
+// SymbolicInfo stores information that is used for symbolic resolution.
+// Currently, it stores all instructions (defined by LineInfo::is_instr)
+// that have been converted to their numerical form by the wasmprinter.
+// These instructions are individually paired with the index of the line
+// in the editor that they correspond with.
 pub struct SymbolicInfo {
     instructions: Vec<(String, usize)>,
 }
@@ -100,18 +104,15 @@ impl SymbolicInfo {
 
     pub fn build(wasm: Vec<u8>, infos: &impl LineInfos) -> Result<Self> {
         let mut shadow_instructions = ShadowInstructions::new();
-        let print_config = Config::new();
-        let res = print_config
+        let mut print_config = Config::new();
+        let _ = print_config
             .skip_resolution(true)
-            .print(&wasm, &mut shadow_instructions);
-        if res.is_err() {
-            web_sys::console::log_1(&format!("could not print the config: {:?}", res.err()).into());
-        }
+            .print(&wasm, &mut shadow_instructions)
+            .expect("Could not print the provided binary");
 
         let mut line_idx = 0;
         let mut linked_instructions = Vec::new();
         for line in shadow_instructions.get_instrs() {
-            web_sys::console::log_1(&format!("line {:?}", line).into());
             while !infos.get(line_idx).is_instr() {
                 line_idx += 1;
             }
@@ -123,9 +124,16 @@ impl SymbolicInfo {
             instructions: linked_instructions,
         })
     }
+
+    pub fn instructions(&self) -> &Vec<(String, usize)> {
+        &self.instructions
+    }
 }
 
-pub struct ShadowInstructions {
+// The inner structure that implements the wasmprinter Print trait.
+// This structure is used by SymbolicInfo to extract instructions that
+// have been converted to their numerical forms by the wasmprinter.
+struct ShadowInstructions {
     instructions: Vec<String>,
 }
 
@@ -165,8 +173,6 @@ impl Print for ShadowInstructions {
         Ok(())
     }
 }
-
-// implement print for shadowInstructions
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstrInfo {
@@ -745,6 +751,49 @@ mod tests {
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
             output
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_symbolic_info() -> Result<()> {
+        // Create a simple program representation with symbolic identifiers.
+        let global_def_1 = "(global $g (mut i32) (i32.const 0))";
+        let global_def_2 = "(global $h (mut i32) (i32.const 5))";
+        let lines = "global.get $g\n  global.get $h\n  i32.add\n  global.set $g\n ;; This is a comment, ignore me! \ndrop";
+        let func = format!("(module {global_def_1}\n{global_def_2}\n(func {lines}))");
+        let wasm = wat::parse_str(func).expect("failed to parse wat to binary wasm");
+        let infos = [
+            LineInfo::new(InstrInfo::EmptyOrMalformed, true),
+            LineInfo::new(InstrInfo::EmptyOrMalformed, true),
+            LineInfo::new(InstrInfo::Other, true),
+            LineInfo::new(InstrInfo::Other, true),
+            LineInfo::new(InstrInfo::Other, true),
+            LineInfo::new(InstrInfo::Other, true),
+            LineInfo::new(InstrInfo::EmptyOrMalformed, true),
+            LineInfo::new(InstrInfo::Other, true),
+        ];
+        let symbolic_info = SymbolicInfo::build(wasm, &infos);
+        assert!(symbolic_info.is_ok());
+        let symbolic_info = symbolic_info.unwrap();
+        let correct_instrs = [
+            ("global.get 0", 2),
+            ("global.get 1", 3),
+            ("i32.add", 4),
+            ("global.set 0", 5),
+            ("drop", 7),
+        ];
+
+        assert_eq!(correct_instrs.len(), symbolic_info.instructions().len());
+
+        // Verify that the symbolic info instructions use
+        // numerical indices.
+        for i in 0..correct_instrs.len() {
+            let test_elem = symbolic_info.instructions()[i].clone();
+            let correct_elem = correct_instrs[i];
+            assert_eq!(test_elem.0.trim(), correct_elem.0);
+            assert_eq!(test_elem.1, correct_elem.1);
+        }
 
         Ok(())
     }

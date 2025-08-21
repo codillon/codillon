@@ -38,6 +38,6 @@ self_cell = "1.2.0"
 
 [patch.crates-io]
 wasmprinter = { git = "https://github.com/codillon/wasm-tools", branch = "trip/printer-config-no-resolve" }
-web-sys = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
-wasm-bindgen = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
-js-sys = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
+web-sys = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-staticrange" }
+wasm-bindgen = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-staticrange" }
+js-sys = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-staticrange" }
