@@ -785,11 +785,9 @@ mod tests {
 
         assert_eq!(correct_instrs.len(), symbolic_info.instructions().len());
 
-        // Verify that the symbolic info instructions use
-        // numerical indices.
-        for i in 0..correct_instrs.len() {
+        // Verify that the symbolic info instructions use numerical indices.
+        for (i, correct_elem) in correct_instrs.iter().enumerate() {
             let test_elem = symbolic_info.instructions()[i].clone();
-            let correct_elem = correct_instrs[i];
             assert_eq!(test_elem.0.trim(), correct_elem.0);
             assert_eq!(test_elem.1, correct_elem.1);
         }
