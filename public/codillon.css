@@ -28,4 +28,8 @@ div.textentry:focus {
 }
 
 .grey-text { color: grey; }
+.inactive-text { 
+    color: grey;
+    text-decoration: line-through; 
+}
 .black-text { color: black; }
