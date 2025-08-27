@@ -26,3 +26,6 @@ div.textentry:focus {
     outline: none;
     box-shadow: none;
 }
+
+.grey-text { color: grey; }
+.black-text { color: black; }

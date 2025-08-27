@@ -30,7 +30,7 @@ impl Default for OkModule {
 
 impl OkModule {
     //assumes only one function
-    pub fn build(wasm_bin: Vec<u8>, infos: &impl LineInfos) -> Result<Self> {
+    pub fn build(wasm_bin: Vec<u8>, infos: &impl LineInfos, synthetic_ends: usize) -> Result<Self> {
         OkModule::try_new(wasm_bin, |wasm_bin| {
             //first, collect all operators
             let parser = Parser::new(0);
@@ -54,7 +54,7 @@ impl OkModule {
                 while line_idx < infos.len() && !infos.get(line_idx).is_instr() {
                     line_idx += 1;
                 }
-                if line_idx >= infos.len() {
+                if line_idx >= infos.len() + synthetic_ends {
                     bail!("not enough instructions");
                 }
                 ops_with_indices.push((op?, line_idx));
@@ -526,7 +526,7 @@ mod tests {
             LineInfo::new(InstrInfo::End, true),
             LineInfo::new(InstrInfo::Other, true),
         ];
-        let module = OkModule::build(wasm_bin, &infos)?;
+        let module = OkModule::build(wasm_bin, &infos, 0)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
             output
@@ -554,7 +554,7 @@ mod tests {
             LineInfo::new(InstrInfo::End, true),
             LineInfo::new(InstrInfo::Other, true),
         ];
-        let module = OkModule::build(wasm_bin, &infos)?;
+        let module = OkModule::build(wasm_bin, &infos, 0)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
             output
@@ -595,7 +595,7 @@ mod tests {
             LineInfo::new(InstrInfo::End, true),
             LineInfo::new(InstrInfo::Other, true),
         ];
-        let module = OkModule::build(wasm_bin, &infos)?;
+        let module = OkModule::build(wasm_bin, &infos, 0)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
             output
@@ -636,7 +636,7 @@ mod tests {
             LineInfo::new(InstrInfo::End, true),
             LineInfo::new(InstrInfo::Other, true),
         ];
-        let module = OkModule::build(wasm_bin, &infos)?;
+        let module = OkModule::build(wasm_bin, &infos, 0)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
             output
@@ -651,7 +651,7 @@ mod tests {
             LineInfo::new(InstrInfo::OtherStructured, true),
             LineInfo::new(InstrInfo::End, true),
         ];
-        let module = OkModule::build(wasm_bin, &infos)?;
+        let module = OkModule::build(wasm_bin, &infos, 0)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
             output

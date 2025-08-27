@@ -263,8 +263,10 @@ impl Editor {
         let text = self
             .instructions_as_text()
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
+        web_sys::console::log_1(&format!("instructions: {:?}", text,).into());
         let bin = str_to_binary(text).expect("wasm binary");
-        self.0.borrow_mut().module = OkModule::build(bin, self).expect("OkModule");
+        let synthetic_ends = self.0.borrow().synthetic_ends;
+        self.0.borrow_mut().module = OkModule::build(bin, self, synthetic_ends).expect("OkModule");
 
         // log instruction types (TODO: integrate into OkModule)
         web_sys::console::log_1(
@@ -277,6 +279,24 @@ impl Editor {
             )
             .into(),
         );
+
+        //grey out empty, malformed, and inactive instructions
+        {
+            let mut editor = self.0.borrow_mut();
+            for car in editor.component.iter_mut() {
+                let class = match car.borrow_sidecar().info {
+                    InstrInfo::EmptyOrMalformed => "grey-text",
+                    _ => {
+                        if !car.borrow_sidecar().active {
+                            "grey-text"
+                        } else {
+                            "black-text"
+                        }
+                    }
+                };
+                car.borrow_component_mut().set_attribute("class", class);
+            }
+        }
 
         #[cfg(debug_assertions)]
         {
