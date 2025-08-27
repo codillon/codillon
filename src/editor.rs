@@ -285,9 +285,7 @@ impl Editor {
             let mut editor = self.0.borrow_mut();
             for line in editor.component.iter_mut() {
                 let class = match line.borrow_sidecar().info {
-                    InstrInfo::EmptyOrMalformed => {
-                        "grey-text"
-                    },
+                    InstrInfo::EmptyOrMalformed => "grey-text",
                     _ => {
                         if !line.borrow_sidecar().active {
                             "inactive-text"
