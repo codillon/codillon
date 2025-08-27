@@ -283,18 +283,18 @@ impl Editor {
         //grey out empty, malformed, and inactive instructions
         {
             let mut editor = self.0.borrow_mut();
-            for car in editor.component.iter_mut() {
-                let class = match car.borrow_sidecar().info {
+            for line in editor.component.iter_mut() {
+                let class = match line.borrow_sidecar().info {
                     InstrInfo::EmptyOrMalformed => "grey-text",
                     _ => {
-                        if !car.borrow_sidecar().active {
+                        if !line.borrow_sidecar().active {
                             "grey-text"
                         } else {
                             "black-text"
                         }
                     }
                 };
-                car.borrow_component_mut().set_attribute("class", class);
+                line.borrow_component_mut().set_attribute("class", class);
             }
         }
 
