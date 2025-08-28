@@ -377,7 +377,7 @@ mod tests {
             &mut self[index]
         }
 
-        fn set_attribute(&mut self, index: usize, name: &str, value: &str) {}
+        fn set_attribute(&mut self, _index: usize, _name: &str, _value: &str) {}
     }
 
     #[test]
