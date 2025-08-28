@@ -96,6 +96,12 @@ impl Editor {
                     active: true,
                 },
             ));
+            let line = component.get_mut(component.len() - 1).expect("DomSidecar");
+            let class = match line.borrow_sidecar().info {
+                InstrInfo::EmptyOrMalformed => "grey-text",
+                _ => "black-text",
+            };
+            line.borrow_component_mut().set_attribute("class", class);
         }
         self.on_change();
     }
@@ -133,7 +139,21 @@ impl Editor {
             active: true,
         };
 
-        *self.line_mut(start_line_index).borrow_sidecar_mut() = new_info;
+        {
+            let mut editor = self.0.borrow_mut();
+            let line = &mut editor
+                .component
+                .get_mut(start_line_index)
+                .expect("DomSidecar");
+
+            *line.borrow_sidecar_mut() = new_info;
+
+            let class = match line.borrow_sidecar().info {
+                InstrInfo::EmptyOrMalformed => "grey-text",
+                _ => "black-text",
+            };
+            line.borrow_component_mut().set_attribute("class", class);
+        }
 
         set_cursor_position(&*self.line_text(start_line_index), new_cursor_pos);
 
@@ -263,10 +283,8 @@ impl Editor {
         let text = self
             .instructions_as_text()
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
-        web_sys::console::log_1(&format!("instructions: {:?}", text,).into());
         let bin = str_to_binary(text).expect("wasm binary");
-        let synthetic_ends = self.0.borrow().synthetic_ends;
-        self.0.borrow_mut().module = OkModule::build(bin, self, synthetic_ends).expect("OkModule");
+        self.0.borrow_mut().module = OkModule::build(bin, self).expect("OkModule");
 
         // log instruction types (TODO: integrate into OkModule)
         web_sys::console::log_1(
@@ -279,24 +297,6 @@ impl Editor {
             )
             .into(),
         );
-
-        //grey out empty, malformed, and inactive instructions
-        {
-            let mut editor = self.0.borrow_mut();
-            for line in editor.component.iter_mut() {
-                let class = match line.borrow_sidecar().info {
-                    InstrInfo::EmptyOrMalformed => "grey-text",
-                    _ => {
-                        if !line.borrow_sidecar().active {
-                            "inactive-text"
-                        } else {
-                            "black-text"
-                        }
-                    }
-                };
-                line.borrow_component_mut().set_attribute("class", class);
-            }
-        }
 
         #[cfg(debug_assertions)]
         {
@@ -344,11 +344,25 @@ impl LineInfos for Editor {
     fn get(&self, index: usize) -> impl std::ops::Deref<Target = LineInfo> {
         Ref::map(self.line(index), |c| c.borrow_sidecar())
     }
+
+    fn synthetic_ends(&self) -> usize {
+        self.0.borrow().synthetic_ends
+    }
 }
 
 impl LineInfosMut for Editor {
     fn get_mut(&mut self, index: usize) -> impl std::ops::DerefMut<Target = LineInfo> {
         RefMut::map(self.line_mut(index), |c| c.borrow_sidecar_mut())
+    }
+
+    fn set_attribute(&mut self, index: usize, name: &str, value: &str) {
+        self.0
+            .borrow_mut()
+            .component
+            .get_mut(index)
+            .expect("DomSidecar")
+            .borrow_component_mut()
+            .set_attribute(name, value);
     }
 }
 
