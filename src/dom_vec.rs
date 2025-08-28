@@ -38,6 +38,7 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         pub fn is_empty(&self) -> bool;
         pub fn get(&self, index: usize) -> Option<&Child>;
         pub fn get_mut(&mut self, index: usize) -> Option<&mut Child>;
+        pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Child>;
     pub fn binary_search_by<'a, F>(&'a self, f: F) -> Result<usize, usize>
     where
             F: FnMut(&'a Child) -> std::cmp::Ordering;

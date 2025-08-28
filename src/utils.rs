@@ -54,7 +54,7 @@ impl OkModule {
                 while line_idx < infos.len() && !infos.get(line_idx).is_instr() {
                     line_idx += 1;
                 }
-                if line_idx >= infos.len() {
+                if line_idx >= infos.len() + infos.synthetic_ends() {
                     bail!("not enough instructions");
                 }
                 ops_with_indices.push((op?, line_idx));
@@ -241,15 +241,20 @@ pub trait LineInfos {
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
     fn get(&self, index: usize) -> impl std::ops::Deref<Target = LineInfo>;
+    fn synthetic_ends(&self) -> usize;
 }
 
 pub trait LineInfosMut: LineInfos {
     fn get_mut(&mut self, index: usize) -> impl std::ops::DerefMut<Target = LineInfo>;
+    fn set_attribute(&mut self, index: usize, name: &str, value: &str);
 }
 
 pub fn fix_frames(instrs: &mut impl LineInfosMut) -> usize {
     // Use stacks as memory of frame begining borders.
     let mut frame_stack = Vec::new();
+
+    let mut deactivate = Vec::new();
+    let mut activate = Vec::new();
 
     for i in 0..instrs.len() {
         let mut line = instrs.get_mut(i);
@@ -262,19 +267,31 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) -> usize {
                 {
                     frame_stack.pop();
                     frame_stack.push(line.info);
+                    activate.push(i);
                 } else {
                     line.active = false;
+                    deactivate.push(i);
                 }
             }
             InstrInfo::End => {
                 if frame_stack.is_empty() {
                     line.active = false;
+                    deactivate.push(i);
                 } else {
                     frame_stack.pop();
+                    activate.push(i);
                 }
             }
             InstrInfo::Other | InstrInfo::EmptyOrMalformed => (),
         }
+    }
+
+    for idx in deactivate {
+        instrs.set_attribute(idx, "class", "inactive-text");
+    }
+
+    for idx in activate {
+        instrs.set_attribute(idx, "class", "black-text");
     }
 
     frame_stack.len()
@@ -349,12 +366,18 @@ mod tests {
         fn get(&self, index: usize) -> impl std::ops::Deref<Target = LineInfo> {
             &self[index]
         }
+
+        fn synthetic_ends(&self) -> usize {
+            0
+        }
     }
 
     impl<const N: usize> LineInfosMut for [LineInfo; N] {
         fn get_mut(&mut self, index: usize) -> impl std::ops::DerefMut<Target = LineInfo> {
             &mut self[index]
         }
+
+        fn set_attribute(&mut self, _index: usize, _name: &str, _value: &str) {}
     }
 
     #[test]
