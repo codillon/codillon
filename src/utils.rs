@@ -80,7 +80,7 @@ pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InstrInfo {
+pub enum InstrKind {
     If,
     Else,
     End,
@@ -89,19 +89,19 @@ pub enum InstrInfo {
     EmptyOrMalformed,
 }
 
-impl From<Instruction<'_>> for InstrInfo {
+impl From<Instruction<'_>> for InstrKind {
     fn from(instr: Instruction<'_>) -> Self {
         match instr {
-            Instruction::If(_) => InstrInfo::If,
-            Instruction::Else(_) => InstrInfo::Else,
-            Instruction::End(_) => InstrInfo::End,
+            Instruction::If(_) => InstrKind::If,
+            Instruction::Else(_) => InstrKind::Else,
+            Instruction::End(_) => InstrKind::End,
             Instruction::Block(_) | Instruction::Loop(_) | Instruction::TryTable(_) => {
-                InstrInfo::OtherStructured
+                InstrKind::OtherStructured
             }
             Instruction::Try(_) | Instruction::Catch(_) | Instruction::CatchAll => {
                 panic!("legacy-exceptions not supported");
             }
-            _ => InstrInfo::Other,
+            _ => InstrKind::Other,
         }
     }
 }
@@ -115,8 +115,8 @@ impl From<Instruction<'_>> for InstrInfo {
 /// s: A string slice representing a Wasm instruction
 ///
 /// # Returns
-/// InstrInfo: instruction (or malformed "instruction") of given category
-pub fn parse_instr(s: &str) -> InstrInfo {
+/// InstrKind: instruction (or malformed "instruction") of given category
+pub fn parse_instr(s: &str) -> InstrKind {
     //get rid of comments and spaces (clippy says not to use nth...)
     let s = s
         .split(";;")
@@ -125,13 +125,13 @@ pub fn parse_instr(s: &str) -> InstrInfo {
         .trim();
     if s.is_empty() {
         // is there an instruction on this line?
-        InstrInfo::EmptyOrMalformed
+        InstrKind::EmptyOrMalformed
     } else if let Ok(buf) = ParseBuffer::new(s)
         && let Ok(instr) = parser::parse::<Instruction>(&buf)
     {
         instr.into()
     } else {
-        InstrInfo::EmptyOrMalformed
+        InstrKind::EmptyOrMalformed
     }
 }
 
@@ -259,21 +259,21 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) -> usize {
     for i in 0..instrs.len() {
         let mut line = instrs.get_mut(i);
         line.active = true;
-        match line.info {
-            InstrInfo::If | InstrInfo::OtherStructured => frame_stack.push(line.info),
-            InstrInfo::Else => {
+        match line.kind {
+            InstrKind::If | InstrKind::OtherStructured => frame_stack.push(line.kind),
+            InstrKind::Else => {
                 if let Some(frame_entry) = frame_stack.last()
-                    && *frame_entry == InstrInfo::If
+                    && *frame_entry == InstrKind::If
                 {
                     frame_stack.pop();
-                    frame_stack.push(line.info);
+                    frame_stack.push(line.kind);
                     activate.push(i);
                 } else {
                     line.active = false;
                     deactivate.push(i);
                 }
             }
-            InstrInfo::End => {
+            InstrKind::End => {
                 if frame_stack.is_empty() {
                     line.active = false;
                     deactivate.push(i);
@@ -282,7 +282,7 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) -> usize {
                     activate.push(i);
                 }
             }
-            InstrInfo::Other | InstrInfo::EmptyOrMalformed => (),
+            InstrKind::Other | InstrKind::EmptyOrMalformed => (),
         }
     }
 
@@ -301,19 +301,19 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) -> usize {
 ///
 /// ### Panics
 /// When the input has unmatched frames
-pub fn match_frames(instrs: &[InstrInfo]) -> Vec<Frame> {
+pub fn match_frames(instrs: &[InstrKind]) -> Vec<Frame> {
     let mut frames = Vec::new();
     // Use stacks as memory of frame begining borders.
     let mut frame_border_stack = Vec::new();
 
     for (idx, instr) in instrs.iter().enumerate() {
         match instr {
-            InstrInfo::If | InstrInfo::OtherStructured => {
+            InstrKind::If | InstrKind::OtherStructured => {
                 frame_border_stack.push((instr, idx));
             }
-            InstrInfo::Else => {
+            InstrKind::Else => {
                 if let Some((prev, last_span_start)) = frame_border_stack.pop()
-                    && matches!(prev, InstrInfo::If)
+                    && matches!(prev, InstrKind::If)
                 {
                     let last_span_end = idx - 1;
                     frames.push(last_span_start..=last_span_end);
@@ -322,7 +322,7 @@ pub fn match_frames(instrs: &[InstrInfo]) -> Vec<Frame> {
                 }
                 frame_border_stack.push((instr, idx));
             }
-            InstrInfo::End => {
+            InstrKind::End => {
                 if let Some((_, last_span_start)) = frame_border_stack.pop() {
                     frames.push(last_span_start..=idx);
                 } else {
@@ -383,34 +383,34 @@ mod tests {
     #[test]
     fn test_is_well_formed_instr() -> Result<()> {
         //well-formed instructions
-        assert!(parse_instr("i32.add") == InstrInfo::Other);
-        assert!(parse_instr("i32.const 5") == InstrInfo::Other);
+        assert!(parse_instr("i32.add") == InstrKind::Other);
+        assert!(parse_instr("i32.const 5") == InstrKind::Other);
         //not well-formed "instructions"
-        assert!(parse_instr("i32.bogus") == InstrInfo::EmptyOrMalformed);
-        assert!(parse_instr("i32.const") == InstrInfo::EmptyOrMalformed);
-        assert!(parse_instr("i32.const x") == InstrInfo::EmptyOrMalformed);
+        assert!(parse_instr("i32.bogus") == InstrKind::EmptyOrMalformed);
+        assert!(parse_instr("i32.const") == InstrKind::EmptyOrMalformed);
+        assert!(parse_instr("i32.const x") == InstrKind::EmptyOrMalformed);
         //not well-formed "instructions": multiple instructions per line, folded instructions
-        assert!(parse_instr("i32.const 4 i32.const 5") == InstrInfo::EmptyOrMalformed);
-        assert!(parse_instr("(i32.const 4)") == InstrInfo::EmptyOrMalformed);
+        assert!(parse_instr("i32.const 4 i32.const 5") == InstrKind::EmptyOrMalformed);
+        assert!(parse_instr("(i32.const 4)") == InstrKind::EmptyOrMalformed);
         assert!(
-            parse_instr("(i32.add (i32.const 4) (i32.const 5))") == InstrInfo::EmptyOrMalformed
+            parse_instr("(i32.add (i32.const 4) (i32.const 5))") == InstrKind::EmptyOrMalformed
         );
         //spaces before and after, comments, and empty lines are well-formed
-        assert!(parse_instr("    i32.const 5") == InstrInfo::Other);
-        assert!(parse_instr("    i32.const 5 ;; hello ") == InstrInfo::Other);
-        assert!(parse_instr("i32.const 5     ") == InstrInfo::Other);
-        assert!(parse_instr(";;Hello") == InstrInfo::EmptyOrMalformed);
-        assert!(parse_instr("   ;; Hello ") == InstrInfo::EmptyOrMalformed);
-        assert!(parse_instr("i32.const 5   ;;this is a const") == InstrInfo::Other);
-        assert!(parse_instr("") == InstrInfo::EmptyOrMalformed);
-        assert!(parse_instr("   ") == InstrInfo::EmptyOrMalformed);
-        assert!(parse_instr("if") == InstrInfo::If);
-        assert!(parse_instr("if (result i32)") == InstrInfo::If);
-        assert!(parse_instr("   else   ") == InstrInfo::Else);
-        assert!(parse_instr("   end   ") == InstrInfo::End);
-        assert!(parse_instr("   block   ") == InstrInfo::OtherStructured);
-        assert!(parse_instr("   loop   ") == InstrInfo::OtherStructured);
-        assert!(parse_instr("   try_table   ") == InstrInfo::OtherStructured);
+        assert!(parse_instr("    i32.const 5") == InstrKind::Other);
+        assert!(parse_instr("    i32.const 5 ;; hello ") == InstrKind::Other);
+        assert!(parse_instr("i32.const 5     ") == InstrKind::Other);
+        assert!(parse_instr(";;Hello") == InstrKind::EmptyOrMalformed);
+        assert!(parse_instr("   ;; Hello ") == InstrKind::EmptyOrMalformed);
+        assert!(parse_instr("i32.const 5   ;;this is a const") == InstrKind::Other);
+        assert!(parse_instr("") == InstrKind::EmptyOrMalformed);
+        assert!(parse_instr("   ") == InstrKind::EmptyOrMalformed);
+        assert!(parse_instr("if") == InstrKind::If);
+        assert!(parse_instr("if (result i32)") == InstrKind::If);
+        assert!(parse_instr("   else   ") == InstrKind::Else);
+        assert!(parse_instr("   end   ") == InstrKind::End);
+        assert!(parse_instr("   block   ") == InstrKind::OtherStructured);
+        assert!(parse_instr("   loop   ") == InstrKind::OtherStructured);
+        assert!(parse_instr("   try_table   ") == InstrKind::OtherStructured);
         Ok(())
     }
     #[test]
@@ -542,12 +542,12 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let infos = [
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::OtherStructured, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::End, true),
-            LineInfo::new(InstrInfo::Other, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::OtherStructured, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::End, true),
+            LineInfo::new(InstrKind::Other, true),
         ];
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(
@@ -569,13 +569,13 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let infos = [
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::If, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::Else, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::End, true),
-            LineInfo::new(InstrInfo::Other, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::If, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::Else, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::End, true),
+            LineInfo::new(InstrKind::Other, true),
         ];
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(
@@ -609,14 +609,14 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let infos = [
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::OtherStructured, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::End, true),
-            LineInfo::new(InstrInfo::Other, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::OtherStructured, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::End, true),
+            LineInfo::new(InstrKind::Other, true),
         ];
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(
@@ -649,15 +649,15 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let infos = [
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::OtherStructured, true),
-            LineInfo::new(InstrInfo::If, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::Else, true),
-            LineInfo::new(InstrInfo::Other, true),
-            LineInfo::new(InstrInfo::End, true),
-            LineInfo::new(InstrInfo::End, true),
-            LineInfo::new(InstrInfo::Other, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::OtherStructured, true),
+            LineInfo::new(InstrKind::If, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::Else, true),
+            LineInfo::new(InstrKind::Other, true),
+            LineInfo::new(InstrKind::End, true),
+            LineInfo::new(InstrKind::End, true),
+            LineInfo::new(InstrKind::Other, true),
         ];
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(
@@ -671,8 +671,8 @@ mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let infos = [
-            LineInfo::new(InstrInfo::OtherStructured, true),
-            LineInfo::new(InstrInfo::End, true),
+            LineInfo::new(InstrKind::OtherStructured, true),
+            LineInfo::new(InstrKind::End, true),
         ];
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(

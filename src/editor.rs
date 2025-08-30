@@ -6,7 +6,7 @@ use crate::{
     dom_text::DomText,
     dom_vec::DomVec,
     utils::{
-        FmtError, InstrInfo, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames,
+        FmtError, InstrKind, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames,
         parse_instr, str_to_binary,
     },
     web_support::{
@@ -29,17 +29,17 @@ type ComponentType = DomVec<LineWithInfo, HtmlDivElement>;
 
 #[derive(Copy, Clone)]
 pub struct LineInfo {
-    pub info: InstrInfo,
+    pub kind: InstrKind,
     pub active: bool,
 }
 
 impl LineInfo {
-    pub fn new(info: InstrInfo, active: bool) -> Self {
-        Self { info, active }
+    pub fn new(kind: InstrKind, active: bool) -> Self {
+        Self { kind, active }
     }
 
     pub fn is_instr(&self) -> bool {
-        self.info != InstrInfo::EmptyOrMalformed && self.active
+        self.kind != InstrKind::EmptyOrMalformed && self.active
     }
 }
 
@@ -92,13 +92,13 @@ impl Editor {
                     factory.span(),
                 ),
                 LineInfo {
-                    info: parse_instr(string),
+                    kind: parse_instr(string),
                     active: true,
                 },
             ));
             let line = component.get_mut(component.len() - 1).expect("DomSidecar");
-            let class = match line.borrow_sidecar().info {
-                InstrInfo::EmptyOrMalformed => "grey-text",
+            let class = match line.borrow_sidecar().kind {
+                InstrKind::EmptyOrMalformed => "grey-text",
                 _ => "black-text",
             };
             line.borrow_component_mut().set_attribute("class", class);
@@ -135,7 +135,7 @@ impl Editor {
         )?;
 
         let new_info = LineInfo {
-            info: parse_instr(self.line_text(start_line_index).get_contents()),
+            kind: parse_instr(self.line_text(start_line_index).get_contents()),
             active: true,
         };
 
@@ -148,8 +148,8 @@ impl Editor {
 
             *line.borrow_sidecar_mut() = new_info;
 
-            let class = match line.borrow_sidecar().info {
-                InstrInfo::EmptyOrMalformed => "grey-text",
+            let class = match line.borrow_sidecar().kind {
+                InstrKind::EmptyOrMalformed => "grey-text",
                 _ => "black-text",
             };
             line.borrow_component_mut().set_attribute("class", class);
