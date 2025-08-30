@@ -23,8 +23,8 @@ use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement, Text, console::log
 
 type DomBr = DomStruct<(), HtmlBrElement>;
 type LineContents = (DomText, (DomBr, ()));
-type Line = DomStruct<LineContents, HtmlSpanElement>;
-type LineWithInfo = DomSidecar<Line, LineInfo>;
+type LineSpan = DomStruct<LineContents, HtmlSpanElement>;
+type LineWithInfo = DomSidecar<LineSpan, LineInfo>;
 type ComponentType = DomVec<LineWithInfo, HtmlDivElement>;
 
 #[derive(Copy, Clone)]
@@ -87,7 +87,7 @@ impl Editor {
             let mut editor = self.0.borrow_mut();
             let component = &mut editor.component;
             component.push(DomSidecar::new(
-                Line::new(
+                LineSpan::new(
                     (DomText::new(string), (DomBr::new((), factory.br()), ())),
                     factory.span(),
                 ),
