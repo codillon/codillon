@@ -26,3 +26,10 @@ div.textentry:focus {
     outline: none;
     box-shadow: none;
 }
+
+.grey-text { color: grey; }
+.inactive-text { 
+    color: grey;
+    text-decoration: line-through; 
+}
+.black-text { color: black; }

@@ -169,6 +169,10 @@ impl<T: AnyElement> ElementHandle<T> {
         self.elem.element().set_attribute(name, value).unwrap();
     }
 
+    pub fn get_attribute(&self, name: &str) -> Option<&String> {
+        self.attributes.get(name)
+    }
+
     pub fn audit(&self) {
         for (key, value) in &self.attributes {
             if let Some(dom_value) = self.elem.element().get_attribute(key) {
