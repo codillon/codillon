@@ -6,3 +6,4 @@ pub mod utils;
 pub mod web_support;
 
 pub mod editor;
+pub mod line;

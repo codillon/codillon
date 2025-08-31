@@ -1,4 +1,4 @@
-use crate::editor::LineInfo;
+use crate::line::LineInfo;
 use anyhow::{Result, anyhow, bail};
 use self_cell::self_cell;
 use std::ops::RangeInclusive;
@@ -51,7 +51,7 @@ impl OkModule {
             let mut ops_with_indices = Vec::new();
             let mut line_idx = 0;
             for op in ops {
-                while line_idx < infos.len() && !infos.get(line_idx).is_instr() {
+                while line_idx < infos.len() && !infos.info(line_idx).is_instr() {
                     line_idx += 1;
                 }
                 if line_idx >= infos.len() + infos.synthetic_ends() {
@@ -233,68 +233,52 @@ pub fn collect_operands<'a>(wasm_bin: &[u8], ops: &Vec<(Operator<'a>, usize)>) -
 /// The start number begins at 0.
 pub type Frame = RangeInclusive<usize>;
 
-/// Fix frames by deactivated unmatched instrs and append **end** after the last instruction
-///
-/// ### Returns
-/// The number of **end** instructions needed to close all open frames
 pub trait LineInfos {
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
-    fn get(&self, index: usize) -> impl std::ops::Deref<Target = LineInfo>;
+    fn info(&self, index: usize) -> LineInfo;
     fn synthetic_ends(&self) -> usize;
 }
 
 pub trait LineInfosMut: LineInfos {
-    fn get_mut(&mut self, index: usize) -> impl std::ops::DerefMut<Target = LineInfo>;
-    fn set_attribute(&mut self, index: usize, name: &str, value: &str);
+    fn set_active_status(&mut self, index: usize, is_active: bool);
+    fn set_synthetic_ends(&mut self, num: usize);
 }
 
-pub fn fix_frames(instrs: &mut impl LineInfosMut) -> usize {
+/// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
+pub fn fix_frames(instrs: &mut impl LineInfosMut) {
     // Use stacks as memory of frame begining borders.
     let mut frame_stack = Vec::new();
 
-    let mut deactivate = Vec::new();
-    let mut activate = Vec::new();
-
     for i in 0..instrs.len() {
-        let mut line = instrs.get_mut(i);
-        line.active = true;
-        match line.kind {
-            InstrKind::If | InstrKind::OtherStructured => frame_stack.push(line.kind),
+        let kind = instrs.info(i).kind;
+        let mut is_active: bool = true;
+        match kind {
+            InstrKind::If | InstrKind::OtherStructured => frame_stack.push(kind),
             InstrKind::Else => {
                 if let Some(frame_entry) = frame_stack.last()
                     && *frame_entry == InstrKind::If
                 {
                     frame_stack.pop();
-                    frame_stack.push(line.kind);
-                    activate.push(i);
+                    frame_stack.push(kind);
                 } else {
-                    line.active = false;
-                    deactivate.push(i);
+                    is_active = false;
                 }
             }
             InstrKind::End => {
                 if frame_stack.is_empty() {
-                    line.active = false;
-                    deactivate.push(i);
+                    is_active = false;
                 } else {
                     frame_stack.pop();
-                    activate.push(i);
                 }
             }
             InstrKind::Other | InstrKind::EmptyOrMalformed => (),
         }
+
+        instrs.set_active_status(i, is_active);
     }
 
-    for idx in deactivate {
-        instrs.set_attribute(idx, "class", "inactive-text");
-    }
-
-    for idx in activate {
-        instrs.set_attribute(idx, "class", "black-text");
-    }
-
-    frame_stack.len()
+    instrs.set_synthetic_ends(frame_stack.len())
 }
 
 /// Match frames for (Instruction or empty).
@@ -354,7 +338,7 @@ mod tests {
     use super::*;
     use anyhow::Result;
 
-    impl<const N: usize> LineInfos for [LineInfo; N] {
+    impl<const N: usize> LineInfos for ([LineInfo; N], usize) {
         fn is_empty(&self) -> bool {
             N == 0
         }
@@ -363,8 +347,8 @@ mod tests {
             N
         }
 
-        fn get(&self, index: usize) -> impl std::ops::Deref<Target = LineInfo> {
-            &self[index]
+        fn info(&self, index: usize) -> LineInfo {
+            self.0[index]
         }
 
         fn synthetic_ends(&self) -> usize {
@@ -372,12 +356,14 @@ mod tests {
         }
     }
 
-    impl<const N: usize> LineInfosMut for [LineInfo; N] {
-        fn get_mut(&mut self, index: usize) -> impl std::ops::DerefMut<Target = LineInfo> {
-            &mut self[index]
+    impl<const N: usize> LineInfosMut for ([LineInfo; N], usize) {
+        fn set_active_status(&mut self, index: usize, is_active: bool) {
+            self.0[index].active = is_active;
         }
 
-        fn set_attribute(&mut self, _index: usize, _name: &str, _value: &str) {}
+        fn set_synthetic_ends(&mut self, num: usize) {
+            self.1 = num;
+        }
     }
 
     #[test]
@@ -443,12 +429,15 @@ mod tests {
     #[test]
     fn test_fix_frames() {
         let instrs1 = ["block", "i32.const 42", "drop"];
-        let mut infos1 = instrs1.map(|x| LineInfo {
-            info: parse_instr(x),
-            active: false,
-        });
-        let appended = fix_frames(&mut infos1);
-        assert!(appended == 1 && infos1.iter().all(|x| x.active));
+        let mut infos1 = (
+            instrs1.map(|x| LineInfo {
+                kind: parse_instr(x),
+                active: false,
+            }),
+            0,
+        );
+        fix_frames(&mut infos1);
+        assert!(infos1.1 == 1 && infos1.0.iter().all(|x| x.active));
 
         let instrs2 = [
             "if",    // 0
@@ -456,26 +445,26 @@ mod tests {
             "else",  // 2
             "end",   // 3
         ];
-        let mut infos2 = instrs2.map(|x| LineInfo {
-            info: parse_instr(x),
-            active: false,
-        });
-        let appended = fix_frames(&mut infos2);
-        assert!(
-            appended == 1
-                && infos2[0].active
-                && infos2[1].active
-                && !infos2[2].active
-                && infos2[3].active,
+        let mut infos2 = (
+            instrs2.map(|x| LineInfo {
+                kind: parse_instr(x),
+                active: false,
+            }),
+            0,
         );
+        fix_frames(&mut infos2);
+        assert!(infos2.1 == 1 && infos2.0.map(|x| x.active) == [true, true, false, true]);
 
         let instrs3 = ["end"];
-        let mut infos3 = instrs3.map(|x| LineInfo {
-            info: parse_instr(x),
-            active: false,
-        });
-        let appended = fix_frames(&mut infos3);
-        assert!(appended == 0 && !infos3[0].active);
+        let mut infos3 = (
+            instrs3.map(|x| LineInfo {
+                kind: parse_instr(x),
+                active: false,
+            }),
+            0,
+        );
+        fix_frames(&mut infos3);
+        assert!(infos3.1 == 0 && !infos3.0[0].active);
     }
 
     #[test]
@@ -541,14 +530,17 @@ mod tests {
             "i32.const 1\ni32.const 2\nblock (param i32 i32) (result i32)\ni32.add\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = [
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::OtherStructured, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::End, true),
-            LineInfo::new(InstrKind::Other, true),
-        ];
+        let infos = (
+            [
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::OtherStructured, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::End, true),
+                LineInfo::new(InstrKind::Other, true),
+            ],
+            0,
+        );
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
@@ -568,15 +560,18 @@ mod tests {
         let lines = "i32.const 1\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = [
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::If, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::Else, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::End, true),
-            LineInfo::new(InstrKind::Other, true),
-        ];
+        let infos = (
+            [
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::If, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::Else, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::End, true),
+                LineInfo::new(InstrKind::Other, true),
+            ],
+            0,
+        );
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
@@ -608,16 +603,19 @@ mod tests {
         let lines = "i32.const 10\nloop (param i32) (result i32)\ni32.const 1\ni32.sub\nbr_if 1\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = [
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::OtherStructured, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::End, true),
-            LineInfo::new(InstrKind::Other, true),
-        ];
+        let infos = (
+            [
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::OtherStructured, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::End, true),
+                LineInfo::new(InstrKind::Other, true),
+            ],
+            0,
+        );
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
@@ -648,17 +646,20 @@ mod tests {
         let lines = "i32.const 10\nblock (param i32) (result i32)\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = [
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::OtherStructured, true),
-            LineInfo::new(InstrKind::If, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::Else, true),
-            LineInfo::new(InstrKind::Other, true),
-            LineInfo::new(InstrKind::End, true),
-            LineInfo::new(InstrKind::End, true),
-            LineInfo::new(InstrKind::Other, true),
-        ];
+        let infos = (
+            [
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::OtherStructured, true),
+                LineInfo::new(InstrKind::If, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::Else, true),
+                LineInfo::new(InstrKind::Other, true),
+                LineInfo::new(InstrKind::End, true),
+                LineInfo::new(InstrKind::End, true),
+                LineInfo::new(InstrKind::Other, true),
+            ],
+            0,
+        );
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,
@@ -670,10 +671,13 @@ mod tests {
         let lines = "block\nend";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = [
-            LineInfo::new(InstrKind::OtherStructured, true),
-            LineInfo::new(InstrKind::End, true),
-        ];
+        let infos = (
+            [
+                LineInfo::new(InstrKind::OtherStructured, true),
+                LineInfo::new(InstrKind::End, true),
+            ],
+            0,
+        );
         let module = OkModule::build(wasm_bin, &infos)?;
         assert_eq!(
             collect_operands(module.borrow_binary(), module.borrow_ops())?,

@@ -1,13 +1,11 @@
-// The Codillon code editor (doesn't do much, but does capture beforeinput and logs to console)
+// The Codillon code editor
 
 use crate::{
-    dom_sidecar::DomSidecar,
-    dom_struct::DomStruct,
     dom_text::DomText,
     dom_vec::DomVec,
+    line::{CodeLine, LineInfo},
     utils::{
-        FmtError, InstrKind, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames,
-        parse_instr, str_to_binary,
+        FmtError, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames, str_to_binary,
     },
     web_support::{
         AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
@@ -19,29 +17,9 @@ use std::{
     cell::{Ref, RefCell, RefMut},
     rc::Rc,
 };
-use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement, Text, console::log_1};
+use web_sys::{HtmlDivElement, HtmlSpanElement, Text, console::log_1};
 
-type DomBr = DomStruct<(), HtmlBrElement>;
-type LineContents = (DomText, (DomBr, ()));
-type LineSpan = DomStruct<LineContents, HtmlSpanElement>;
-type LineWithInfo = DomSidecar<LineSpan, LineInfo>;
-type ComponentType = DomVec<LineWithInfo, HtmlDivElement>;
-
-#[derive(Copy, Clone)]
-pub struct LineInfo {
-    pub kind: InstrKind,
-    pub active: bool,
-}
-
-impl LineInfo {
-    pub fn new(kind: InstrKind, active: bool) -> Self {
-        Self { kind, active }
-    }
-
-    pub fn is_instr(&self) -> bool {
-        self.kind != InstrKind::EmptyOrMalformed && self.active
-    }
-}
+type ComponentType = DomVec<CodeLine, HtmlDivElement>;
 
 struct _Editor {
     module: OkModule,
@@ -86,22 +64,7 @@ impl Editor {
         {
             let mut editor = self.0.borrow_mut();
             let component = &mut editor.component;
-            component.push(DomSidecar::new(
-                LineSpan::new(
-                    (DomText::new(string), (DomBr::new((), factory.br()), ())),
-                    factory.span(),
-                ),
-                LineInfo {
-                    kind: parse_instr(string),
-                    active: true,
-                },
-            ));
-            let line = component.get_mut(component.len() - 1).expect("DomSidecar");
-            let class = match line.borrow_sidecar().kind {
-                InstrKind::EmptyOrMalformed => "grey-text",
-                _ => "black-text",
-            };
-            line.borrow_component_mut().set_attribute("class", class);
+            component.push(CodeLine::new(string, factory));
         }
         self.on_change();
     }
@@ -128,32 +91,11 @@ impl Editor {
             );
         }
 
-        let new_cursor_pos = self.line_text_mut(start_line_index).replace_range(
+        let new_cursor_pos = self.line_mut(start_line_index).replace_range(
             start_pos_in_line,
             end_pos_in_line,
             new_str,
         )?;
-
-        let new_info = LineInfo {
-            kind: parse_instr(self.line_text(start_line_index).get_contents()),
-            active: true,
-        };
-
-        {
-            let mut editor = self.0.borrow_mut();
-            let line = &mut editor
-                .component
-                .get_mut(start_line_index)
-                .expect("DomSidecar");
-
-            *line.borrow_sidecar_mut() = new_info;
-
-            let class = match line.borrow_sidecar().kind {
-                InstrKind::EmptyOrMalformed => "grey-text",
-                _ => "black-text",
-            };
-            line.borrow_component_mut().set_attribute("class", class);
-        }
 
         set_cursor_position(&*self.line_text(start_line_index), new_cursor_pos);
 
@@ -245,22 +187,16 @@ impl Editor {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component)
     }
 
-    fn line(&self, idx: usize) -> Ref<'_, LineWithInfo> {
+    fn line(&self, idx: usize) -> Ref<'_, CodeLine> {
         Ref::map(self.component(), |c| &c[idx])
     }
 
-    fn line_mut(&mut self, idx: usize) -> RefMut<'_, LineWithInfo> {
+    fn line_mut(&mut self, idx: usize) -> RefMut<'_, CodeLine> {
         RefMut::map(self.component_mut(), |c| &mut c[idx])
     }
 
     fn line_text(&self, idx: usize) -> Ref<'_, DomText> {
-        Ref::map(self.line(idx), |c| &c.borrow_component().get().0)
-    }
-
-    fn line_text_mut(&mut self, idx: usize) -> RefMut<'_, DomText> {
-        RefMut::map(self.line_mut(idx), |c| {
-            &mut c.borrow_component_mut().get_mut().0
-        })
+        Ref::map(self.line(idx), |c| c.text())
     }
 
     // get the "instructions" (active, well-formed lines) as text
@@ -277,7 +213,7 @@ impl Editor {
 
     fn on_change(&mut self) {
         // repair syntax
-        self.0.borrow_mut().synthetic_ends = fix_frames(self);
+        fix_frames(self);
 
         // update module
         let text = self
@@ -315,14 +251,13 @@ impl<'a> Iterator for InstructionTextIterator<'a> {
     type Item = Ref<'a, str>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.index < self.editor.len() && !self.editor[self.index].borrow_sidecar().is_instr()
-        {
+        while self.index < self.editor.len() && !self.editor[self.index].info().is_instr() {
             self.index += 1;
         }
 
         if self.index < self.editor.len() {
             let ret = Some(Ref::map(Ref::clone(&self.editor), |x| {
-                x[self.index].borrow_component().get().0.get_contents()
+                x[self.index].text().get_contents()
             }));
             self.index += 1;
             ret
@@ -341,8 +276,8 @@ impl LineInfos for Editor {
         self.component().len()
     }
 
-    fn get(&self, index: usize) -> impl std::ops::Deref<Target = LineInfo> {
-        Ref::map(self.line(index), |c| c.borrow_sidecar())
+    fn info(&self, index: usize) -> LineInfo {
+        self.line(index).info()
     }
 
     fn synthetic_ends(&self) -> usize {
@@ -351,18 +286,12 @@ impl LineInfos for Editor {
 }
 
 impl LineInfosMut for Editor {
-    fn get_mut(&mut self, index: usize) -> impl std::ops::DerefMut<Target = LineInfo> {
-        RefMut::map(self.line_mut(index), |c| c.borrow_sidecar_mut())
+    fn set_active_status(&mut self, index: usize, is_active: bool) {
+        self.line_mut(index).set_active_status(is_active)
     }
 
-    fn set_attribute(&mut self, index: usize, name: &str, value: &str) {
-        self.0
-            .borrow_mut()
-            .component
-            .get_mut(index)
-            .expect("DomSidecar")
-            .borrow_component_mut()
-            .set_attribute(name, value);
+    fn set_synthetic_ends(&mut self, num: usize) {
+        self.0.borrow_mut().synthetic_ends = num;
     }
 }
 
