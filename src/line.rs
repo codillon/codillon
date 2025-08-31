@@ -61,8 +61,10 @@ impl CodeLine {
     fn class(&self) -> &'static str {
         if self.info.is_instr() {
             "black-text"
+        } else if !self.info.active {
+            "inactive-text"
         } else {
-            "gray-text"
+            "grey-text"
         }
     }
 
