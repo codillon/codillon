@@ -59,11 +59,11 @@ impl Component for CodeLine {
 impl CodeLine {
     fn class(&self) -> &'static str {
         if self.info.is_instr() {
-            "black-text"
+            "good-line"
         } else if !self.info.active {
-            "inactive-text"
+            "inactive-line"
         } else {
-            "grey-text"
+            "malformed-line"
         }
     }
 
