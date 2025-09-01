@@ -15,6 +15,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::{
     cell::{Ref, RefCell, RefMut},
+    ops::Deref,
     rc::Rc,
 };
 use web_sys::{HtmlDivElement, HtmlSpanElement, Text, console::log_1};
@@ -276,8 +277,8 @@ impl LineInfos for Editor {
         self.component().len()
     }
 
-    fn info(&self, index: usize) -> LineInfo {
-        self.line(index).info()
+    fn info(&self, index: usize) -> impl Deref<Target = LineInfo> {
+        Ref::map(self.line(index), |x| x.info())
     }
 
     fn synthetic_ends(&self) -> usize {

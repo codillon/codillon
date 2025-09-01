@@ -1,7 +1,7 @@
 use crate::line::LineInfo;
 use anyhow::{Result, anyhow, bail};
 use self_cell::self_cell;
-use std::ops::RangeInclusive;
+use std::ops::{Deref, RangeInclusive};
 use wasm_tools::parse_binary_wasm;
 use wasmparser::{Operator, Parser, Payload, ValType, ValidPayload, Validator};
 use wast::{
@@ -236,7 +236,7 @@ pub type Frame = RangeInclusive<usize>;
 pub trait LineInfos {
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
-    fn info(&self, index: usize) -> LineInfo;
+    fn info(&self, index: usize) -> impl Deref<Target = LineInfo>;
     fn synthetic_ends(&self) -> usize;
 }
 
@@ -347,8 +347,9 @@ mod tests {
             N
         }
 
-        fn info(&self, index: usize) -> LineInfo {
-            self.0[index]
+        #[allow(refining_impl_trait)]
+        fn info(&self, index: usize) -> &LineInfo {
+            &self.0[index]
         }
 
         fn synthetic_ends(&self) -> usize {

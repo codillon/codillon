@@ -16,7 +16,6 @@ type DomBr = DomStruct<(), HtmlBrElement>;
 type LineContents = (DomText, (DomBr, ()));
 type LineSpan = DomStruct<LineContents, HtmlSpanElement>;
 
-#[derive(Copy, Clone)]
 pub struct LineInfo {
     pub kind: InstrKind,
     pub active: bool,
@@ -127,7 +126,7 @@ impl CodeLine {
         Ok(pos)
     }
 
-    pub fn info(&self) -> LineInfo {
-        self.info
+    pub fn info(&self) -> &LineInfo {
+        &self.info
     }
 }
