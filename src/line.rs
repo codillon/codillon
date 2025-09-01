@@ -27,7 +27,7 @@ impl LineInfo {
     }
 
     pub fn is_instr(&self) -> bool {
-        self.kind != InstrKind::EmptyOrMalformed && self.active
+        self.active && !matches!(self.kind, InstrKind::Empty | InstrKind::Malformed(_))
     }
 }
 
