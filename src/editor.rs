@@ -161,11 +161,11 @@ impl Editor {
             .fmt_err()?;
 
         // If the position is "in" the span element, make sure the offset matches expectations
-        // (either 0 for the beginning of it, or 1 or 2 for the end).
+        // (either 0 for the beginning of it, or 1-3 for the end).
         if node.is_a::<HtmlSpanElement>() {
             return Ok(match offset {
                 0 => (line_idx, 0),
-                1 | 2 => (line_idx, self.line_text(line_idx).len_utf16()),
+                1 | 2 | 3 => (line_idx, self.line_text(line_idx).len_utf16()),
                 _ => bail!("unexpected offset {offset} when cursor in span"),
             });
         }

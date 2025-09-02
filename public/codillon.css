@@ -41,7 +41,6 @@ div.textentry:focus {
 
 .malformed-line::before {
     counter-increment: codelines;
-    content: counter(codelines);
     font-size: 20pt;
     color: darkred;
     display: inline-block;
@@ -53,7 +52,6 @@ div.textentry:focus {
 
 .inactive-line::before {
     counter-increment: codelines;
-    content: counter(codelines);
     font-size: 20pt;
     color: gray;
     display: inline-block;
@@ -65,7 +63,6 @@ div.textentry:focus {
 
 .good-line::before {
     counter-increment: codelines;
-    content: counter(codelines);
     font-size: 20pt;
     color: gray;
     display: inline-block;
@@ -73,4 +70,13 @@ div.textentry:focus {
     text-align: right;
 
     content: counter(codelines) "   ";
+}
+
+span.malformed-line span.commentary::before {
+    font-size: 12pt;
+    color: darkred;
+    float: right;
+    text-align: right;
+
+    content: attr(data-commentary);
 }
