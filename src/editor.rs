@@ -160,13 +160,13 @@ impl Editor {
             .binary_search_by(|probe| compare_document_position(probe, &node))
             .fmt_err()?;
 
-        // If the position is "in" the span element, make sure the offset matches expectations
-        // (either 0 for the beginning of it, or 1-3 for the end).
+        // If the position is "in" the span element, the offset counts nodes
+        // within the span. "0" is the beginning of text, and map anything else
+        // (before commentary, before br, after br) to the end of text.
         if node.is_a::<HtmlSpanElement>() {
             return Ok(match offset {
                 0 => (line_idx, 0),
-                1 | 2 | 3 => (line_idx, self.line_text(line_idx).len_utf16()),
-                _ => bail!("unexpected offset {offset} when cursor in span"),
+                _ => (line_idx, self.line_text(line_idx).len_utf16()),
             });
         }
 
