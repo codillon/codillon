@@ -37,6 +37,9 @@ div.textentry:focus {
     text-decoration-style: wavy;
     text-decoration-color: gray;
 }
+.empty-line {
+    color: gray;
+}
 .good-line { color: black; }
 
 .malformed-line::before {
@@ -51,6 +54,17 @@ div.textentry:focus {
 }
 
 .inactive-line::before {
+    counter-increment: codelines;
+    font-size: 20pt;
+    color: gray;
+    display: inline-block;
+    width: 2em;
+    text-align: right;
+
+    content: "   ";
+}
+
+.empty-line::before {
     counter-increment: codelines;
     font-size: 20pt;
     color: gray;

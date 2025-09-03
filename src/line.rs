@@ -74,10 +74,12 @@ impl CodeLine {
     fn class(&self) -> &'static str {
         if !self.info.active {
             "inactive-line"
-        } else if matches!(self.info.kind, InstrKind::Malformed(_)) {
-            "malformed-line"
         } else {
-            "good-line"
+            match self.info.kind {
+                InstrKind::Empty => "empty-line",
+                InstrKind::Malformed(_) => "malformed-line",
+                _ => "good-line",
+            }
         }
     }
 
