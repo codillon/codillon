@@ -13,10 +13,10 @@ use anyhow::Result;
 use web_sys::{HtmlBrElement, HtmlSpanElement};
 
 type DomBr = DomStruct<(), HtmlBrElement>;
-type LineContents = (DomText, (DomBr, ()));
+type Commentary = DomStruct<(), HtmlSpanElement>;
+type LineContents = (DomText, (Commentary, (DomBr, ())));
 type LineSpan = DomStruct<LineContents, HtmlSpanElement>;
 
-#[derive(Copy, Clone)]
 pub struct LineInfo {
     pub kind: InstrKind,
     pub active: bool,
@@ -28,7 +28,7 @@ impl LineInfo {
     }
 
     pub fn is_instr(&self) -> bool {
-        self.kind != InstrKind::EmptyOrMalformed && self.active
+        self.active && !matches!(self.kind, InstrKind::Empty | InstrKind::Malformed(_))
     }
 }
 
@@ -53,34 +53,60 @@ impl Component for CodeLine {
             parse_instr(self.contents.get().0.get_contents())
         );
         assert_eq!(self.contents.get_attribute("class").unwrap(), self.class());
+        assert_eq!(
+            self.contents.get().1.0.get_attribute("data-commentary"),
+            Some(
+                if let InstrKind::Malformed(reason) = &self.info.kind {
+                    reason
+                } else {
+                    ""
+                }
+                .to_string()
+            )
+            .as_ref()
+        );
+
         self.contents.audit();
     }
 }
 
 impl CodeLine {
     fn class(&self) -> &'static str {
-        if self.info.is_instr() {
-            "black-text"
-        } else if !self.info.active {
-            "inactive-text"
+        if !self.info.active {
+            "inactive-line"
         } else {
-            "grey-text"
+            match self.info.kind {
+                InstrKind::Empty => "empty-line",
+                InstrKind::Malformed(_) => "malformed-line",
+                _ => "good-line",
+            }
         }
     }
 
     pub fn new(contents: &str, factory: &ElementFactory) -> Self {
         let mut ret = Self {
             contents: LineSpan::new(
-                (DomText::new(contents), (DomBr::new((), factory.br()), ())),
+                (
+                    DomText::new(contents),
+                    (
+                        Commentary::new((), factory.span()),
+                        (DomBr::new((), factory.br()), ()),
+                    ),
+                ),
                 factory.span(),
             ),
             info: LineInfo {
-                kind: parse_instr(contents),
+                kind: InstrKind::Empty,
                 active: true,
             },
         };
 
-        ret.conform_activity();
+        ret.contents
+            .get_mut()
+            .1
+            .0
+            .set_attribute("class", "commentary");
+        ret.conform_to_text();
 
         ret
     }
@@ -91,10 +117,22 @@ impl CodeLine {
         self.contents.set_attribute("class", self.class());
     }
 
+    fn conform_commentary(&mut self) {
+        self.contents.get_mut().1.0.set_attribute(
+            "data-commentary",
+            if let InstrKind::Malformed(reason) = &self.info.kind {
+                reason
+            } else {
+                ""
+            },
+        )
+    }
+
     // Make the kind and CSS presentation consistent with the text contents.
     // This needs to happen when the text changes.
     fn conform_to_text(&mut self) {
         self.info.kind = parse_instr(self.contents.get().0.get_contents());
+        self.conform_commentary();
         self.conform_activity();
     }
 
@@ -127,7 +165,7 @@ impl CodeLine {
         Ok(pos)
     }
 
-    pub fn info(&self) -> LineInfo {
-        self.info
+    pub fn info(&self) -> &LineInfo {
+        &self.info
     }
 }

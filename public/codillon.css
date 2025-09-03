@@ -20,6 +20,7 @@ div.textentry {
     user-select: none;
     margin-left: 20pt;
     white-space: pre;
+    counter-reset: codelines;
 }
 
 div.textentry:focus {
@@ -27,9 +28,69 @@ div.textentry:focus {
     box-shadow: none;
 }
 
-.grey-text { color: grey; }
-.inactive-text { 
-    color: grey;
-    text-decoration: line-through; 
+.malformed-line {
+    color: gray;
 }
-.black-text { color: black; }
+.inactive-line { 
+    color: gray;
+    text-decoration: underline;
+    text-decoration-style: wavy;
+    text-decoration-color: gray;
+}
+.empty-line {
+    color: gray;
+}
+.good-line { color: black; }
+
+.malformed-line::before {
+    counter-increment: codelines;
+    font-size: 20pt;
+    color: darkred;
+    display: inline-block;
+    width: 2em;
+    text-align: right;
+
+    content: "\1d11e    ";
+}
+
+.inactive-line::before {
+    counter-increment: codelines;
+    font-size: 20pt;
+    color: gray;
+    display: inline-block;
+    width: 2em;
+    text-align: right;
+
+    content: "   ";
+}
+
+.empty-line::before {
+    counter-increment: codelines;
+    font-size: 20pt;
+    color: gray;
+    display: inline-block;
+    width: 2em;
+    text-align: right;
+
+    content: "   ";
+}
+
+.good-line::before {
+    counter-increment: codelines;
+    font-size: 20pt;
+    color: gray;
+    display: inline-block;
+    width: 2em;
+    text-align: right;
+
+    content: counter(codelines) "   ";
+}
+
+span.malformed-line span.commentary::before {
+    font-size: 12pt;
+    color: darkred;
+    float: right;
+    text-align: right;
+
+    content: attr(data-commentary);
+}

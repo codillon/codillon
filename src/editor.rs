@@ -15,6 +15,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::{
     cell::{Ref, RefCell, RefMut},
+    ops::Deref,
     rc::Rc,
 };
 use web_sys::{HtmlDivElement, HtmlSpanElement, Text, console::log_1};
@@ -159,13 +160,13 @@ impl Editor {
             .binary_search_by(|probe| compare_document_position(probe, &node))
             .fmt_err()?;
 
-        // If the position is "in" the span element, make sure the offset matches expectations
-        // (either 0 for the beginning of it, or 1 or 2 for the end).
+        // If the position is "in" the span element, the offset counts nodes
+        // within the span. "0" is the beginning of text, and map anything else
+        // (before commentary, before br, after br) to the end of text.
         if node.is_a::<HtmlSpanElement>() {
             return Ok(match offset {
                 0 => (line_idx, 0),
-                1 | 2 => (line_idx, self.line_text(line_idx).len_utf16()),
-                _ => bail!("unexpected offset {offset} when cursor in span"),
+                _ => (line_idx, self.line_text(line_idx).len_utf16()),
             });
         }
 
@@ -276,8 +277,8 @@ impl LineInfos for Editor {
         self.component().len()
     }
 
-    fn info(&self, index: usize) -> LineInfo {
-        self.line(index).info()
+    fn info(&self, index: usize) -> impl Deref<Target = LineInfo> {
+        Ref::map(self.line(index), |x| x.info())
     }
 
     fn synthetic_ends(&self) -> usize {

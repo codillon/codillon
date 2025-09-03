@@ -1,7 +1,7 @@
 use crate::line::LineInfo;
 use anyhow::{Result, anyhow, bail};
 use self_cell::self_cell;
-use std::ops::RangeInclusive;
+use std::ops::{Deref, RangeInclusive};
 use wasm_tools::parse_binary_wasm;
 use wasmparser::{Operator, Parser, Payload, ValType, ValidPayload, Validator};
 use wast::{
@@ -79,14 +79,15 @@ pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
     Ok(parser::parse::<Module>(&ParseBuffer::new(&txt)?)?.encode()?)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum InstrKind {
     If,
     Else,
     End,
     OtherStructured, // block, loop, or try_table
     Other,           // any other instruction
-    EmptyOrMalformed,
+    Empty,
+    Malformed(String), // explanation
 }
 
 impl From<Instruction<'_>> for InstrKind {
@@ -106,6 +107,12 @@ impl From<Instruction<'_>> for InstrKind {
     }
 }
 
+impl From<wast::Error> for InstrKind {
+    fn from(e: wast::Error) -> Self {
+        InstrKind::Malformed(format!("{e}").lines().next().unwrap_or_default().into())
+    }
+}
+
 /// Parse one code line as instruction
 /// (only accepts plain instructions)
 ///
@@ -117,21 +124,17 @@ impl From<Instruction<'_>> for InstrKind {
 /// # Returns
 /// InstrKind: instruction (or malformed "instruction") of given category
 pub fn parse_instr(s: &str) -> InstrKind {
-    //get rid of comments and spaces (clippy says not to use nth...)
-    let s = s
-        .split(";;")
-        .next()
-        .expect("split produced empty iterator")
-        .trim();
+    let s = s.split(";;").next().unwrap().trim(); // get rid of comments and spaces
     if s.is_empty() {
-        // is there an instruction on this line?
-        InstrKind::EmptyOrMalformed
-    } else if let Ok(buf) = ParseBuffer::new(s)
-        && let Ok(instr) = parser::parse::<Instruction>(&buf)
-    {
-        instr.into()
+        InstrKind::Empty // no instruction on this line
     } else {
-        InstrKind::EmptyOrMalformed
+        match ParseBuffer::new(s) {
+            Ok(buf) => match parser::parse::<Instruction>(&buf) {
+                Ok(instr) => instr.into(),
+                Err(e) => e.into(),
+            },
+            Err(e) => e.into(),
+        }
     }
 }
 
@@ -236,7 +239,7 @@ pub type Frame = RangeInclusive<usize>;
 pub trait LineInfos {
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
-    fn info(&self, index: usize) -> LineInfo;
+    fn info(&self, index: usize) -> impl Deref<Target = LineInfo>;
     fn synthetic_ends(&self) -> usize;
 }
 
@@ -248,19 +251,19 @@ pub trait LineInfosMut: LineInfos {
 /// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
 pub fn fix_frames(instrs: &mut impl LineInfosMut) {
     // Use stacks as memory of frame begining borders.
-    let mut frame_stack = Vec::new();
+    let mut frame_stack: Vec<InstrKind> = Vec::new();
 
     for i in 0..instrs.len() {
-        let kind = instrs.info(i).kind;
         let mut is_active: bool = true;
-        match kind {
-            InstrKind::If | InstrKind::OtherStructured => frame_stack.push(kind),
+        match instrs.info(i).kind {
+            InstrKind::If => frame_stack.push(InstrKind::If),
+            InstrKind::OtherStructured => frame_stack.push(InstrKind::OtherStructured),
             InstrKind::Else => {
                 if let Some(frame_entry) = frame_stack.last()
                     && *frame_entry == InstrKind::If
                 {
                     frame_stack.pop();
-                    frame_stack.push(kind);
+                    frame_stack.push(InstrKind::Else);
                 } else {
                     is_active = false;
                 }
@@ -272,7 +275,7 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
                     frame_stack.pop();
                 }
             }
-            InstrKind::Other | InstrKind::EmptyOrMalformed => (),
+            InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => (),
         }
 
         instrs.set_active_status(i, is_active);
@@ -347,8 +350,9 @@ mod tests {
             N
         }
 
-        fn info(&self, index: usize) -> LineInfo {
-            self.0[index]
+        #[allow(refining_impl_trait)]
+        fn info(&self, index: usize) -> &LineInfo {
+            &self.0[index]
         }
 
         fn synthetic_ends(&self) -> usize {
@@ -366,37 +370,54 @@ mod tests {
         }
     }
 
+    fn malf(s: &str) -> InstrKind {
+        InstrKind::Malformed(String::from(s))
+    }
+
     #[test]
     fn test_is_well_formed_instr() -> Result<()> {
         //well-formed instructions
-        assert!(parse_instr("i32.add") == InstrKind::Other);
-        assert!(parse_instr("i32.const 5") == InstrKind::Other);
+        assert_eq!(parse_instr("i32.add"), InstrKind::Other);
+        assert_eq!(parse_instr("i32.const 5"), InstrKind::Other);
         //not well-formed "instructions"
-        assert!(parse_instr("i32.bogus") == InstrKind::EmptyOrMalformed);
-        assert!(parse_instr("i32.const") == InstrKind::EmptyOrMalformed);
-        assert!(parse_instr("i32.const x") == InstrKind::EmptyOrMalformed);
+        assert_eq!(
+            parse_instr("i32.bogus"),
+            malf("unknown operator or unexpected token")
+        );
+        assert_eq!(parse_instr("i32.const"), malf("expected a i32"));
+        assert_eq!(parse_instr("i32.const x"), malf("expected a i32"));
         //not well-formed "instructions": multiple instructions per line, folded instructions
-        assert!(parse_instr("i32.const 4 i32.const 5") == InstrKind::EmptyOrMalformed);
-        assert!(parse_instr("(i32.const 4)") == InstrKind::EmptyOrMalformed);
-        assert!(
-            parse_instr("(i32.add (i32.const 4) (i32.const 5))") == InstrKind::EmptyOrMalformed
+        assert_eq!(
+            parse_instr("i32.const 4 i32.const 5"),
+            malf("extra tokens remaining after parse")
+        );
+        assert_eq!(
+            parse_instr("(i32.const 4)"),
+            malf("expected an instruction")
+        );
+        assert_eq!(
+            parse_instr("(i32.add (i32.const 4) (i32.const 5))"),
+            malf("expected an instruction")
         );
         //spaces before and after, comments, and empty lines are well-formed
-        assert!(parse_instr("    i32.const 5") == InstrKind::Other);
-        assert!(parse_instr("    i32.const 5 ;; hello ") == InstrKind::Other);
-        assert!(parse_instr("i32.const 5     ") == InstrKind::Other);
-        assert!(parse_instr(";;Hello") == InstrKind::EmptyOrMalformed);
-        assert!(parse_instr("   ;; Hello ") == InstrKind::EmptyOrMalformed);
-        assert!(parse_instr("i32.const 5   ;;this is a const") == InstrKind::Other);
-        assert!(parse_instr("") == InstrKind::EmptyOrMalformed);
-        assert!(parse_instr("   ") == InstrKind::EmptyOrMalformed);
-        assert!(parse_instr("if") == InstrKind::If);
-        assert!(parse_instr("if (result i32)") == InstrKind::If);
-        assert!(parse_instr("   else   ") == InstrKind::Else);
-        assert!(parse_instr("   end   ") == InstrKind::End);
-        assert!(parse_instr("   block   ") == InstrKind::OtherStructured);
-        assert!(parse_instr("   loop   ") == InstrKind::OtherStructured);
-        assert!(parse_instr("   try_table   ") == InstrKind::OtherStructured);
+        assert_eq!(parse_instr("    i32.const 5"), InstrKind::Other);
+        assert_eq!(parse_instr("    i32.const 5 ;; hello "), InstrKind::Other);
+        assert_eq!(parse_instr("i32.const 5     "), InstrKind::Other);
+        assert_eq!(parse_instr(";;Hello"), InstrKind::Empty);
+        assert_eq!(parse_instr("   ;; Hello "), InstrKind::Empty);
+        assert_eq!(
+            parse_instr("i32.const 5   ;;this is a const"),
+            InstrKind::Other
+        );
+        assert_eq!(parse_instr(""), InstrKind::Empty);
+        assert_eq!(parse_instr("   "), InstrKind::Empty);
+        assert_eq!(parse_instr("if"), InstrKind::If);
+        assert_eq!(parse_instr("if (result i32)"), InstrKind::If);
+        assert_eq!(parse_instr("   else   "), InstrKind::Else);
+        assert_eq!(parse_instr("   end   "), InstrKind::End);
+        assert_eq!(parse_instr("   block   "), InstrKind::OtherStructured);
+        assert_eq!(parse_instr("   loop   "), InstrKind::OtherStructured);
+        assert_eq!(parse_instr("   try_table   "), InstrKind::OtherStructured);
         Ok(())
     }
     #[test]
