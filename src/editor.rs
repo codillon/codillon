@@ -8,7 +8,7 @@ use crate::{
     },
     web_support::{
         AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
-        StaticRangeHandle, WithElement, compare_document_position,
+        StaticRangeHandle, WithElement, compare_document_position, get_selection,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -25,16 +25,18 @@ struct _Editor {
     module: OkModule,
     synthetic_ends: usize,
     component: ComponentType,
+    factory: ElementFactory,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
 
 impl Editor {
-    pub fn new(factory: &ElementFactory) -> Self {
+    pub fn new(factory: ElementFactory) -> Self {
         let mut inner = _Editor {
             module: OkModule::default(),
             synthetic_ends: 0,
             component: DomVec::new(factory.div()),
+            factory,
         };
 
         inner.component.set_attribute("class", "textentry");
@@ -50,29 +52,31 @@ impl Editor {
                 .expect("input handler")
         });
 
-        ret.push_line(factory, "i32.const 5");
-        ret.push_line(factory, "i32.const 6");
-        ret.push_line(factory, "i32.add");
-        ret.push_line(factory, "drop");
+        let editor_ref = Rc::clone(&ret.0);
+        ret.component_mut().set_onkeydown(move |ev| {
+            Editor(editor_ref.clone())
+                .handle_keydown(ev)
+                .expect("keydown handler")
+        });
 
-        ret.on_change();
+        ret.push_line("i32.const 5");
+        ret.push_line("i32.const 6");
+        ret.push_line("i32.add");
+        ret.push_line("drop");
 
         ret
     }
 
-    fn push_line(&mut self, factory: &ElementFactory, string: &str) {
-        {
-            let mut editor = self.0.borrow_mut();
-            let component = &mut editor.component;
-            component.push(CodeLine::new(string, factory));
-        }
+    fn push_line(&mut self, string: &str) {
+        let newline = CodeLine::new(string, &self.0.borrow().factory);
+        self.component_mut().push(newline);
         self.on_change();
     }
 
     // Replace a given range (currently within a single line) with new text
     fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
-        if new_str.chars().any(|x| x.is_control()) {
-            bail!("unhandled: control char [e.g. carriage return] in input");
+        if new_str.chars().any(|x| x.is_control() && x != '\n') {
+            bail!("unhandled control char in input");
         }
 
         let (start_line_index, start_pos_in_line) = self.find_idx_and_utf16_pos(
@@ -85,23 +89,66 @@ impl Editor {
             target_range.end_offset().fmt_err()?,
         )?;
 
-        if start_line_index != end_line_index {
-            bail!("unhandled: multi-line target range");
+        let mut new_cursor_pos = if start_line_index == end_line_index {
+            // Single-line edit
+            self.line_mut(start_line_index).replace_range(
+                start_pos_in_line,
+                end_pos_in_line,
+                new_str,
+            )?
+        } else if start_line_index < end_line_index {
+            // Multi-line edit.
+
+            // Step 1: Add surviving portion of end line to the start line.
+            let end_pos = self.line(start_line_index).end_position();
+            let s = self.line(end_line_index).suffix(end_pos_in_line)?;
+            self.line_mut(start_line_index)
+                .replace_range(start_pos_in_line, end_pos, &s)?;
+
+            // Step 2: Remove all lines after the start.
+            self.0
+                .borrow_mut()
+                .component
+                .remove_range(start_line_index + 1, end_line_index + 1);
+
+            // Step 3: Insert the new text into the (remaining) start line.
+            self.line_mut(start_line_index).replace_range(
+                start_pos_in_line,
+                start_pos_in_line,
+                new_str,
+            )?
+        } else {
+            bail!(
+                "unhandled reversed target range {start_line_index}@{:?} .. {end_line_index}@{:?}",
+                start_pos_in_line,
+                end_pos_in_line
+            )
+        };
+
+        // Split the start line if it contains newline chars.
+        let mut fixup_line = start_line_index;
+        loop {
+            let pos: Option<Position> = self.line(fixup_line).first_newline()?;
+            match pos {
+                None => break,
+                Some(pos) => {
+                    let rest = self.line(fixup_line).suffix(pos)?;
+                    let end_pos = self.line(fixup_line).end_position();
+                    self.line_mut(fixup_line).replace_range(pos, end_pos, "")?;
+                    let newline = CodeLine::new(&rest[1..], &self.0.borrow().factory);
+                    new_cursor_pos = Position::begin();
+                    fixup_line += 1;
+                    self.component_mut().insert(fixup_line, newline);
+                }
+            }
         }
 
-        let new_cursor_pos = self.line_mut(start_line_index).replace_range(
-            start_pos_in_line,
-            end_pos_in_line,
-            new_str,
-        )?;
-
-        self.line(start_line_index)
-            .set_cursor_position(new_cursor_pos);
+        self.line(fixup_line).set_cursor_position(new_cursor_pos);
 
         Ok(())
     }
 
-    // The input handler. Currently only handles single-line insert/delete events.
+    // The input handler.
     fn handle_input(&mut self, ev: InputEventHandle) -> Result<()> {
         ev.prevent_default();
 
@@ -119,6 +166,7 @@ impl Editor {
             "deleteContentBackward" | "deleteContentForward" => {
                 self.replace_range(target_range, "")
             }
+            "insertParagraph" | "insertLineBreak" => self.replace_range(target_range, "\n"),
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
@@ -131,6 +179,64 @@ impl Editor {
         Ok(())
     }
 
+    // Keydown helpers. Firefox has trouble advancing to the next line if there is an ::after pseudo-element
+    // later in the line. It also has trouble deleting if the cursor position is at the end of the surrounding
+    // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
+    fn handle_keydown(&mut self, ev: web_sys::KeyboardEvent) -> Result<()> {
+        match ev.key().as_str() {
+            "ArrowRight" => {
+                let selection = get_selection();
+                if selection.collapsed() {
+                    let (line_idx, pos) = self.find_idx_and_utf16_pos(
+                        selection.start_container()?,
+                        selection.start_offset()?,
+                    )?;
+                    if line_idx + 1 < self.component().len()
+                        && pos == self.line(line_idx).end_position()
+                    {
+                        ev.prevent_default();
+                        self.line(line_idx + 1)
+                            .set_cursor_position(Position::begin());
+                    }
+                }
+            }
+
+            "ArrowDown" => {
+                let selection = get_selection();
+                if selection.collapsed() {
+                    let (line_idx, _) = self.find_idx_and_utf16_pos(
+                        selection.start_container()?,
+                        selection.start_offset()?,
+                    )?;
+                    if line_idx + 1 == self.component().len() {
+                        ev.prevent_default();
+                        self.line(line_idx)
+                            .set_cursor_position(self.line(line_idx).end_position());
+                    }
+                }
+            }
+
+            "ArrowLeft" => {
+                let selection = get_selection();
+                if selection.collapsed() {
+                    let (line_idx, pos) = self.find_idx_and_utf16_pos(
+                        selection.start_container()?,
+                        selection.start_offset()?,
+                    )?;
+                    if line_idx > 0 && pos == Position::begin() {
+                        ev.prevent_default();
+                        self.line(line_idx - 1)
+                            .set_cursor_position(self.line(line_idx - 1).end_position());
+                    }
+                }
+            }
+
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     // Given a node and offset, find the line index and (UTF-16) position within that line.
     // There are several possibilities for the node (e.g. the div element, the span element,
     // or the text node).
@@ -139,15 +245,17 @@ impl Editor {
 
         // If the position is "in" the div element, make sure the offset matches expectations
         // (either 0 for the very beginning, or #lines for the very end).
-        if node.is_a::<HtmlDivElement>() {
+        if node.is_same_node(&*self.component()) {
             let line_count = self.component().len();
             return Ok(if offset == 0 {
-                (0, CodeLine::begin_position())
+                (0, Position::begin())
+            } else if offset < line_count {
+                (offset, Position::begin())
             } else if offset == line_count {
                 let last_line_idx = line_count.checked_sub(1).context("last line idx")?;
                 (last_line_idx, self.line(last_line_idx).end_position())
             } else {
-                bail!("unexpected offset in textentry div")
+                bail!("unexpected offset {offset} in textentry div")
             });
         }
 
@@ -202,15 +310,9 @@ impl Editor {
         self.0.borrow_mut().module = OkModule::build(bin, self).expect("OkModule");
 
         // log instruction types (TODO: integrate into OkModule)
-        web_sys::console::log_1(
-            &format!(
-                "instruction types: {:?}",
-                collect_operands(
-                    self.0.borrow().module.borrow_binary(),
-                    self.0.borrow().module.borrow_ops()
-                ),
-            )
-            .into(),
+        let _ = collect_operands(
+            self.0.borrow().module.borrow_binary(),
+            self.0.borrow().module.borrow_ops(),
         );
 
         #[cfg(debug_assertions)]
@@ -236,7 +338,7 @@ impl<'a> Iterator for InstructionTextIterator<'a> {
 
         if self.index < self.editor.len() {
             let ret = Some(Ref::map(Ref::clone(&self.editor), |x| {
-                x[self.index].instr().get_contents()
+                x[self.index].instr().get()
             }));
             self.index += 1;
             ret

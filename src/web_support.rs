@@ -12,7 +12,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::{HtmlBodyElement, wasm_bindgen::JsCast};
+use web_sys::{HtmlBodyElement, KeyboardEvent, wasm_bindgen::JsCast};
 
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the web_support module.
@@ -116,10 +116,11 @@ impl TextHandle {
     }
 }
 
-// Event handlers on an element (currently only `beforeinput` is represented).
+// Event handlers on an element
 #[derive(Default)]
 struct Handlers {
     beforeinput: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
+    keydown: Option<Closure<dyn Fn(web_sys::KeyboardEvent)>>,
 }
 
 // Wrapper for a DOM Element, allowing access to and modification of its attributes
@@ -153,6 +154,24 @@ impl<T: AnyElement> ElementHandle<T> {
         )
     }
 
+    pub fn insert_node(&self, idx: usize, child: &impl WithNode) {
+        let reference = self
+            .elem
+            .element()
+            .child_nodes()
+            .item(idx.try_into().expect("idx -> u32"))
+            .expect("valid idx");
+        child.with_node(
+            |child_node| {
+                self.elem
+                    .element()
+                    .insert_before(child_node, Some(&reference))
+                    .unwrap();
+            },
+            TOKEN,
+        );
+    }
+
     pub fn attach_node(&self, child: &impl WithNode) {
         child.with_node(
             |node| self.elem.element().replace_children_with_node_1(node),
@@ -167,6 +186,11 @@ impl<T: AnyElement> ElementHandle<T> {
     pub fn set_attribute(&mut self, name: &str, value: &str) {
         self.attributes.insert(name.to_string(), value.to_string());
         self.elem.element().set_attribute(name, value).unwrap();
+    }
+
+    pub fn remove_attribute(&mut self, name: &str) {
+        self.attributes.remove(name);
+        self.elem.element().remove_attribute(name).unwrap();
     }
 
     pub fn get_attribute(&self, name: &str) -> Option<&String> {
@@ -195,6 +219,16 @@ impl<T: AnyElement> ElementHandle<T> {
             (None, Some(_)) => panic!("unexpected event handler"),
             (None, None) => (),
         }
+
+        match (
+            &self.event_handlers.keydown,
+            self.elem.element().onkeydown(),
+        ) {
+            (Some(expect), Some(actual)) => assert_eq!(actual, *expect.as_ref().unchecked_ref()),
+            (Some(_), None) => panic!("missing event handler"),
+            (None, Some(_)) => panic!("unexpected event handler"),
+            (None, None) => (),
+        }
     }
 
     pub fn get_child_node_list(&self) -> NodeListHandle {
@@ -212,6 +246,27 @@ impl<T: AnyElement> ElementHandle<T> {
                 .as_ref()
                 .unchecked_ref(),
         ));
+    }
+
+    pub fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F) {
+        self.event_handlers.keydown = Some(Closure::new(handler));
+        self.elem.element().set_onkeydown(Some(
+            self.event_handlers
+                .keydown
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unchecked_ref(),
+        ));
+    }
+
+    pub fn scroll_into_view(&self) {
+        let opts = web_sys::ScrollIntoViewOptions::new();
+        opts.set_behavior(web_sys::ScrollBehavior::Smooth);
+        opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
+        self.elem
+            .element()
+            .scroll_into_view_with_scroll_into_view_options(&opts);
     }
 }
 
@@ -462,6 +517,19 @@ pub fn set_cursor_position(node: &impl WithNode, offset: usize) {
                 .expect("set position with offset")
         },
         TOKEN,
+    )
+}
+
+// Get the selection
+pub fn get_selection() -> StaticRangeHandle {
+    StaticRangeHandle(
+        web_sys::window()
+            .expect("window")
+            .get_selection()
+            .expect("selection error")
+            .expect("selection not found")
+            .get_range_at(0)
+            .expect("first range"),
     )
 }
 

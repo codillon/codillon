@@ -12,7 +12,8 @@ thread_local! {
 fn setup() -> Result<()> {
     DOCUMENT.with_borrow_mut(|doc| {
         let factory = doc.element_factory();
-        doc.set_body(Body::new((Editor::new(&factory), ()), factory.body()));
+        let body = factory.body();
+        doc.set_body(Body::new((Editor::new(factory), ()), body));
         doc.audit();
     });
 
