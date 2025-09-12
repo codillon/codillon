@@ -113,6 +113,17 @@ impl From<wast::Error> for InstrKind {
     }
 }
 
+// Find the line comment separator in these string slices.
+pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
+    if let Some(idx) = s1.find(";;") {
+        Some(idx)
+    } else if s1.bytes().last() == Some(b';') && s2.as_bytes().first() == Some(&b';') {
+        Some(s1.len() - 1)
+    } else {
+        s2.find(";;").map(|idx| s1.len() + idx)
+    }
+}
+
 /// Parse one code line as instruction
 /// (only accepts plain instructions)
 ///
@@ -124,7 +135,7 @@ impl From<wast::Error> for InstrKind {
 /// # Returns
 /// InstrKind: instruction (or malformed "instruction") of given category
 pub fn parse_instr(s: &str) -> InstrKind {
-    let s = s.split(";;").next().unwrap().trim(); // get rid of comments and spaces
+    let s = s.trim(); // get rid of spaces
     if s.is_empty() {
         InstrKind::Empty // no instruction on this line
     } else {
@@ -403,8 +414,8 @@ mod tests {
         assert_eq!(parse_instr("    i32.const 5"), InstrKind::Other);
         assert_eq!(parse_instr("    i32.const 5 ;; hello "), InstrKind::Other);
         assert_eq!(parse_instr("i32.const 5     "), InstrKind::Other);
-        assert_eq!(parse_instr(";;Hello"), InstrKind::Empty);
-        assert_eq!(parse_instr("   ;; Hello "), InstrKind::Empty);
+        assert_eq!(parse_instr(";;Hello"), malf("expected an instruction"));
+        assert_eq!(parse_instr("   ;; Hello "), malf("expected an instruction"));
         assert_eq!(
             parse_instr("i32.const 5   ;;this is a const"),
             InstrKind::Other
@@ -420,6 +431,23 @@ mod tests {
         assert_eq!(parse_instr("   try_table   "), InstrKind::OtherStructured);
         Ok(())
     }
+
+    #[test]
+    fn test_find_comment() {
+        assert_eq!(find_comment("abc", "def"), None);
+        assert_eq!(find_comment("abc", ";;def"), Some(3));
+        assert_eq!(find_comment(";;abc", ";;def"), Some(0));
+        assert_eq!(find_comment(";;abc", "def"), Some(0));
+        assert_eq!(find_comment(";", "def"), None);
+        assert_eq!(find_comment(";", ";def"), Some(0));
+        assert_eq!(find_comment("abc;", ";def"), Some(3));
+        assert_eq!(find_comment("abc;;", ""), Some(3));
+        assert_eq!(find_comment("abc;;", ";"), Some(3));
+        assert_eq!(find_comment("abc;", ";"), Some(3));
+        assert_eq!(find_comment("abc; ", ";"), None);
+        assert_eq!(find_comment("abc; ", "; ;;"), Some(7));
+    }
+
     #[test]
     fn test_is_well_formed_func() {
         //well-formed function

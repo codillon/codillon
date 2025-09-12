@@ -1,15 +1,14 @@
 // The Codillon code editor
 
 use crate::{
-    dom_text::DomText,
     dom_vec::DomVec,
-    line::{CodeLine, LineInfo},
+    line::{CodeLine, LineInfo, Position},
     utils::{
         FmtError, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames, str_to_binary,
     },
     web_support::{
         AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
-        StaticRangeHandle, WithElement, compare_document_position, set_cursor_position,
+        StaticRangeHandle, WithElement, compare_document_position,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -18,7 +17,7 @@ use std::{
     ops::Deref,
     rc::Rc,
 };
-use web_sys::{HtmlDivElement, HtmlSpanElement, Text, console::log_1};
+use web_sys::{HtmlDivElement, console::log_1};
 
 type ComponentType = DomVec<CodeLine, HtmlDivElement>;
 
@@ -87,9 +86,7 @@ impl Editor {
         )?;
 
         if start_line_index != end_line_index {
-            bail!(
-                "unhandled: multi-line target range {start_line_index}/{start_pos_in_line}..{end_line_index}/{end_pos_in_line}"
-            );
+            bail!("unhandled: multi-line target range");
         }
 
         let new_cursor_pos = self.line_mut(start_line_index).replace_range(
@@ -98,7 +95,8 @@ impl Editor {
             new_str,
         )?;
 
-        set_cursor_position(&*self.line_text(start_line_index), new_cursor_pos);
+        self.line(start_line_index)
+            .set_cursor_position(new_cursor_pos);
 
         Ok(())
     }
@@ -136,7 +134,7 @@ impl Editor {
     // Given a node and offset, find the line index and (UTF-16) position within that line.
     // There are several possibilities for the node (e.g. the div element, the span element,
     // or the text node).
-    fn find_idx_and_utf16_pos(&self, node: NodeRef, offset: u32) -> Result<(usize, usize)> {
+    fn find_idx_and_utf16_pos(&self, node: NodeRef, offset: u32) -> Result<(usize, Position)> {
         let offset = offset as usize;
 
         // If the position is "in" the div element, make sure the offset matches expectations
@@ -144,10 +142,10 @@ impl Editor {
         if node.is_a::<HtmlDivElement>() {
             let line_count = self.component().len();
             return Ok(if offset == 0 {
-                (0, 0)
+                (0, CodeLine::begin_position())
             } else if offset == line_count {
                 let last_line_idx = line_count.checked_sub(1).context("last line idx")?;
-                (last_line_idx, self.line_text(last_line_idx).len_utf16())
+                (last_line_idx, self.line(last_line_idx).end_position())
             } else {
                 bail!("unexpected offset in textentry div")
             });
@@ -160,23 +158,7 @@ impl Editor {
             .binary_search_by(|probe| compare_document_position(probe, &node))
             .fmt_err()?;
 
-        // If the position is "in" the span element, the offset counts nodes
-        // within the span. "0" is the beginning of text, and map anything else
-        // (before commentary, before br, after br) to the end of text.
-        if node.is_a::<HtmlSpanElement>() {
-            return Ok(match offset {
-                0 => (line_idx, 0),
-                _ => (line_idx, self.line_text(line_idx).len_utf16()),
-            });
-        }
-
-        // Otherwise, it must be in the text node. Make sure offset is
-        // a sensible UTF-16 position, and return it.
-        debug_assert!(node.is_a::<Text>());
-        if offset > self.line_text(line_idx).len_utf16() {
-            bail!("invalid offset in line {line_idx}");
-        }
-        Ok((line_idx, offset))
+        Ok((line_idx, self.line(line_idx).get_position(node, offset)?))
     }
 
     // Accessors for the component and for a particular line of code
@@ -194,10 +176,6 @@ impl Editor {
 
     fn line_mut(&mut self, idx: usize) -> RefMut<'_, CodeLine> {
         RefMut::map(self.component_mut(), |c| &mut c[idx])
-    }
-
-    fn line_text(&self, idx: usize) -> Ref<'_, DomText> {
-        Ref::map(self.line(idx), |c| c.text())
     }
 
     // get the "instructions" (active, well-formed lines) as text
@@ -258,7 +236,7 @@ impl<'a> Iterator for InstructionTextIterator<'a> {
 
         if self.index < self.editor.len() {
             let ret = Some(Ref::map(Ref::clone(&self.editor), |x| {
-                x[self.index].text().get_contents()
+                x[self.index].instr().get_contents()
             }));
             self.index += 1;
             ret

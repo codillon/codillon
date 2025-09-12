@@ -23,9 +23,19 @@ impl DomText {
         self.text_node.append_data(string);
     }
 
+    pub fn set_data_owned(&mut self, string: String) {
+        self.contents = string;
+        self.text_node.set_data(&self.contents);
+    }
+
     pub fn set_data(&mut self, string: &str) {
         self.contents = string.to_string();
         self.text_node.set_data(string);
+    }
+
+    pub fn take(&mut self) -> String {
+        self.text_node.set_data("");
+        std::mem::take(&mut self.contents)
     }
 
     pub fn insert_at_char(&mut self, char_idx: usize, string: &str) -> Result<usize> {
@@ -47,12 +57,33 @@ impl DomText {
         Ok(byte_idx)
     }
 
+    fn safe_byte_idx_to_utf16(&self, byte_idx: usize) -> Result<usize> {
+        let utf16_idx = str_indices::utf16::from_byte_idx(&self.contents, byte_idx);
+
+        if byte_idx != str_indices::utf16::to_byte_idx(&self.contents, utf16_idx) {
+            bail!("invalid byte position (not at UTF-16 boundary)");
+        }
+
+        Ok(utf16_idx)
+    }
+
     pub fn insert_at_utf16_pos(&mut self, utf16_idx: usize, string: &str) -> Result<usize> {
         let byte_idx = self.safe_utf16_to_byte_idx(utf16_idx)?;
         self.contents.insert_str(byte_idx, string);
         self.text_node.insert_data(utf16_idx.try_into()?, string);
         let utf16_inserted = str_indices::utf16::count(string);
         Ok(utf16_idx + utf16_inserted)
+    }
+
+    pub fn replace_range_bytes(
+        &mut self,
+        byte_start_idx: usize,
+        byte_end_idx: usize,
+        string: &str,
+    ) -> Result<usize> {
+        let utf16_start_idx = self.safe_byte_idx_to_utf16(byte_start_idx)?;
+        let utf16_end_idx = self.safe_byte_idx_to_utf16(byte_end_idx)?;
+        self.replace_range(utf16_start_idx, utf16_end_idx, string)
     }
 
     pub fn replace_range(

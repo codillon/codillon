@@ -1,12 +1,19 @@
 @font-face {
-   font-family: 'MLModern12-Regular';
+   font-family: 'MLMRoman12-Regular';
    src: url('/fonts/mlmr12.woff2') format('woff2'),
    font-weight: normal;
    font-style: normal;
 }
 
+@font-face {
+   font-family: 'MLMSansDemiCond10-Regular';
+   src: url('/fonts/mlmssdc10.woff2') format('woff2'),
+   font-weight: normal;
+   font-style: normal;
+}
+
 body {
-    font-family: 'MLModern12-Regular';
+    font-family: 'MLMRoman12-Regular';
     font-size: 24pt;
     background-color: #fffff0;
 }
@@ -86,11 +93,20 @@ div.textentry:focus {
     content: counter(codelines) "   ";
 }
 
-span.malformed-line span.commentary::before {
+span.comment {
+    color: darkblue;
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 18pt;
+}
+
+span.malformed-line span.comment::after {
+    font-family: 'MLMRoman10-Regular';
     font-size: 12pt;
     color: darkred;
     float: right;
     text-align: right;
+    border: 1px solid darkred;
+    padding: 4px;
 
     content: attr(data-commentary);
 }
