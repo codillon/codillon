@@ -6,15 +6,18 @@
 use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
-    utils::{InstrKind, parse_instr},
-    web_support::{AccessToken, Component, ElementAsNode, ElementFactory, WithElement},
+    utils::{InstrKind, find_comment, parse_instr},
+    web_support::{
+        AccessToken, Component, ElementAsNode, ElementFactory, NodeRef, WithElement,
+        set_cursor_position,
+    },
 };
-use anyhow::Result;
-use web_sys::{HtmlBrElement, HtmlSpanElement};
+use anyhow::{Result, bail};
+use web_sys::{HtmlBrElement, HtmlSpanElement, Text};
 
 type DomBr = DomStruct<(), HtmlBrElement>;
-type Commentary = DomStruct<(), HtmlSpanElement>;
-type LineContents = (DomText, (Commentary, (DomBr, ())));
+type Comment = DomStruct<(DomText, ()), HtmlSpanElement>;
+type LineContents = (DomText, (Comment, (DomBr, ())));
 type LineSpan = DomStruct<LineContents, HtmlSpanElement>;
 
 pub struct LineInfo {
@@ -46,6 +49,11 @@ impl WithElement for CodeLine {
 
 impl ElementAsNode for CodeLine {}
 
+pub enum Position {
+    Instr(usize),
+    Comment(usize),
+}
+
 impl Component for CodeLine {
     fn audit(&self) {
         assert_eq!(
@@ -71,14 +79,88 @@ impl Component for CodeLine {
 }
 
 impl CodeLine {
+    pub fn instr(&self) -> &DomText {
+        &self.contents.get().0
+    }
+
+    fn instr_mut(&mut self) -> &mut DomText {
+        &mut self.contents.get_mut().0
+    }
+
+    fn comment(&self) -> &DomText {
+        &self.contents.get().1.0.get().0
+    }
+
+    fn comment_mut(&mut self) -> &mut DomText {
+        &mut self.contents.get_mut().1.0.get_mut().0
+    }
+
+    pub fn begin_position() -> Position {
+        Position::Instr(0)
+    }
+
+    pub fn end_position(&self) -> Position {
+        if self.comment().is_empty() {
+            Position::Instr(self.instr().len_utf16())
+        } else {
+            Position::Comment(self.comment().len_utf16())
+        }
+    }
+
+    pub fn get_position(&self, node: NodeRef, offset: usize) -> Result<Position> {
+        use Position::*;
+
+        let instr_end = Instr(self.instr().len_utf16());
+
+        // If the position is in the top-level span element, the offset counts nodes
+        // within the span.
+        if node.is_same_node(&self.contents) {
+            debug_assert!(node.is_a::<HtmlSpanElement>());
+            return Ok(match offset {
+                0 => Self::begin_position(),
+                1 => instr_end,
+                _ => self.end_position(),
+            });
+        }
+
+        // Position in "instruction" or "comment" text nodes.
+        if node.is_same_node(self.instr()) {
+            debug_assert!(node.is_a::<Text>());
+            if offset > self.instr().len_utf16() {
+                bail!("invalid offset");
+            }
+            return Ok(Instr(offset));
+        } else if node.is_same_node(self.comment()) {
+            debug_assert!(node.is_a::<Text>());
+            if offset > self.comment().len_utf16() {
+                bail!("invalid offset");
+            }
+            return match offset {
+                0 => Ok(instr_end),
+                _ => Ok(Comment(offset)),
+            };
+        }
+
+        // Position in the "comment" span.
+        if node.is_same_node(&self.contents.get().1.0) {
+            debug_assert!(node.is_a::<HtmlSpanElement>());
+            return Ok(match offset {
+                0 => instr_end,
+                _ => self.end_position(),
+            });
+        }
+
+        bail!("position in unknown node");
+    }
+
     fn class(&self) -> &'static str {
         if !self.info.active {
-            "inactive-line"
+            "line inactive-line"
         } else {
             match self.info.kind {
-                InstrKind::Empty => "empty-line",
-                InstrKind::Malformed(_) => "malformed-line",
-                _ => "good-line",
+                InstrKind::Empty => "line empty-line",
+                InstrKind::Malformed(_) => "line malformed-line",
+                _ => "line good-line",
             }
         }
     }
@@ -89,7 +171,7 @@ impl CodeLine {
                 (
                     DomText::new(contents),
                     (
-                        Commentary::new((), factory.span()),
+                        Comment::new((DomText::default(), ()), factory.span()),
                         (DomBr::new((), factory.br()), ()),
                     ),
                 ),
@@ -101,11 +183,7 @@ impl CodeLine {
             },
         };
 
-        ret.contents
-            .get_mut()
-            .1
-            .0
-            .set_attribute("class", "commentary");
+        ret.contents.get_mut().1.0.set_attribute("class", "comment");
         ret.conform_to_text();
 
         ret
@@ -128,10 +206,23 @@ impl CodeLine {
         )
     }
 
-    // Make the kind and CSS presentation consistent with the text contents.
+    // Make the instr/comment split, the kind, and the CSS presentation consistent with the text contents.
     // This needs to happen when the text changes.
     fn conform_to_text(&mut self) {
-        self.info.kind = parse_instr(self.contents.get().0.get_contents());
+        match find_comment(self.instr().get_contents(), self.comment().get_contents()) {
+            None if self.comment().is_empty() => {}
+            None => {
+                let comment = self.comment_mut().take();
+                self.instr_mut().push_str(&comment);
+            }
+            Some(x) if x == self.instr().len_bytes() => {}
+            Some(x) => {
+                let concat = self.instr().get_contents().to_owned() + self.comment().get_contents();
+                self.instr_mut().set_data(&concat[0..x]);
+                self.comment_mut().set_data(&concat[x..]);
+            }
+        }
+        self.info.kind = parse_instr(self.instr().get_contents());
         self.conform_commentary();
         self.conform_activity();
     }
@@ -144,25 +235,45 @@ impl CodeLine {
         }
     }
 
-    pub fn text(&self) -> &DomText {
-        &self.contents.get().0
-    }
-
     // Modify the contents. This calls replace_range on the inner DomText, then
     // makes the kind and CSS presentation consistent with the new contents.
     pub fn replace_range(
         &mut self,
-        utf16_start_idx: usize,
-        utf16_end_idx: usize,
+        start_pos: Position,
+        end_pos: Position,
         string: &str,
-    ) -> Result<usize> {
-        let pos =
-            self.contents
-                .get_mut()
-                .0
-                .replace_range(utf16_start_idx, utf16_end_idx, string)?;
+    ) -> Result<Position> {
+        use Position::*;
+        let total_pos = match (start_pos, end_pos) {
+            (Instr(a), Instr(b)) => self.instr_mut().replace_range(a, b, string)?,
+            (Comment(a), Comment(b)) => {
+                self.instr().len_utf16() + self.comment_mut().replace_range(a, b, string)?
+            }
+            (Instr(a), Comment(b)) | (Comment(b), Instr(a)) => {
+                self.comment_mut().replace_range(0, b, "")?;
+                let instr_len = self.instr().len_utf16();
+                self.instr_mut().replace_range(a, instr_len, string)?
+            }
+        };
+
         self.conform_to_text();
-        Ok(pos)
+
+        Ok(if total_pos <= self.instr().len_utf16() {
+            Instr(total_pos)
+        } else {
+            let comment_pos = total_pos - self.instr().len_utf16();
+            debug_assert!(comment_pos <= self.comment().len_utf16());
+            Comment(comment_pos)
+        })
+    }
+
+    pub fn set_cursor_position(&self, pos: Position) {
+        use Position::*;
+
+        match pos {
+            Instr(offset) => set_cursor_position(self.instr(), offset),
+            Comment(offset) => set_cursor_position(self.comment(), offset),
+        }
     }
 
     pub fn info(&self) -> &LineInfo {

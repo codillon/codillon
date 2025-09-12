@@ -366,6 +366,12 @@ impl NodeRef {
     pub fn is_a<T: wasm_bindgen::JsCast>(&self) -> bool {
         self.0.dyn_ref::<T>().is_some()
     }
+
+    pub fn is_same_node<T: WithNode>(&self, other: &T) -> bool {
+        let mut is_same = false;
+        other.with_node(|node| is_same = self.0.is_same_node(Some(node)), TOKEN);
+        is_same
+    }
 }
 
 // Wrapper for a StaticRange (giving access to its start and end nodes as NodeRefs)

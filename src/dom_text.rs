@@ -23,9 +23,19 @@ impl DomText {
         self.text_node.append_data(string);
     }
 
+    pub fn set_data_owned(&mut self, string: String) {
+        self.contents = string;
+        self.text_node.set_data(&self.contents);
+    }
+
     pub fn set_data(&mut self, string: &str) {
         self.contents = string.to_string();
         self.text_node.set_data(string);
+    }
+
+    pub fn take(&mut self) -> String {
+        self.text_node.set_data("");
+        std::mem::take(&mut self.contents)
     }
 
     pub fn insert_at_char(&mut self, char_idx: usize, string: &str) -> Result<usize> {

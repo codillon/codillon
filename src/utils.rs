@@ -113,6 +113,16 @@ impl From<wast::Error> for InstrKind {
     }
 }
 
+pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
+    if let Some(idx) = s1.find(";;") {
+        Some(idx)
+    } else if s1.bytes().last() == Some(b';') && s2.as_bytes().first() == Some(&b';') {
+        Some(s1.len() - 1)
+    } else {
+        s2.find(";;").map(|idx| s1.len() + idx)
+    }
+}
+
 /// Parse one code line as instruction
 /// (only accepts plain instructions)
 ///
@@ -124,7 +134,7 @@ impl From<wast::Error> for InstrKind {
 /// # Returns
 /// InstrKind: instruction (or malformed "instruction") of given category
 pub fn parse_instr(s: &str) -> InstrKind {
-    let s = s.split(";;").next().unwrap().trim(); // get rid of comments and spaces
+    let s = s.trim(); // get rid of spaces
     if s.is_empty() {
         InstrKind::Empty // no instruction on this line
     } else {

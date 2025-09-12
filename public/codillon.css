@@ -86,7 +86,11 @@ div.textentry:focus {
     content: counter(codelines) "   ";
 }
 
-span.malformed-line span.commentary::before {
+span.comment {
+    color: gray;
+}
+
+span.malformed-line span.comment::after {
     font-size: 12pt;
     color: darkred;
     float: right;
