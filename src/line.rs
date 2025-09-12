@@ -184,7 +184,7 @@ impl CodeLine {
         };
 
         ret.contents.get_mut().1.0.set_attribute("class", "comment");
-        ret.conform_to_text();
+        ret.conform_to_text().unwrap();
 
         ret
     }
@@ -207,8 +207,8 @@ impl CodeLine {
     }
 
     // Make the instr/comment split, the kind, and the CSS presentation consistent with the text contents.
-    // This needs to happen when the text changes.
-    fn conform_to_text(&mut self) {
+    // This needs to happen when the text changes. Returns number of whitespace bytes trimmed from start.
+    fn conform_to_text(&mut self) -> Result<usize> {
         match find_comment(self.instr().get_contents(), self.comment().get_contents()) {
             None if self.comment().is_empty() => {}
             None => {
@@ -222,9 +222,14 @@ impl CodeLine {
                 self.comment_mut().set_data(&concat[x..]);
             }
         }
+        let ws_bytes = self.instr().len_bytes() - self.instr().get_contents().trim_start().len();
+        if ws_bytes != 0 {
+            self.instr_mut().replace_range_bytes(0, ws_bytes, "")?;
+        }
         self.info.kind = parse_instr(self.instr().get_contents());
         self.conform_commentary();
         self.conform_activity();
+        Ok(ws_bytes)
     }
 
     // Activate or deactivate the line.
@@ -244,7 +249,8 @@ impl CodeLine {
         string: &str,
     ) -> Result<Position> {
         use Position::*;
-        let total_pos = match (start_pos, end_pos) {
+
+        let mut total_pos = match (start_pos, end_pos) {
             (Instr(a), Instr(b)) => self.instr_mut().replace_range(a, b, string)?,
             (Comment(a), Comment(b)) => {
                 self.instr().len_utf16() + self.comment_mut().replace_range(a, b, string)?
@@ -256,7 +262,7 @@ impl CodeLine {
             }
         };
 
-        self.conform_to_text();
+        total_pos = total_pos.saturating_sub(self.conform_to_text()?);
 
         Ok(if total_pos <= self.instr().len_utf16() {
             Instr(total_pos)
