@@ -113,6 +113,7 @@ impl From<wast::Error> for InstrKind {
     }
 }
 
+// Find the line comment separator in these string slices.
 pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     if let Some(idx) = s1.find(";;") {
         Some(idx)
