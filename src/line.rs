@@ -240,8 +240,8 @@ impl CodeLine {
         }
     }
 
-    // Modify the contents. This calls replace_range on the inner DomText, then
-    // makes the kind and CSS presentation consistent with the new contents.
+    // Modify the contents. This calls replace_range on one of the inner DomTexts (or both), then
+    // makes the comment split, kind, and CSS presentation consistent with the new contents.
     pub fn replace_range(
         &mut self,
         start_pos: Position,
