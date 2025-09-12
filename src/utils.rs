@@ -414,8 +414,8 @@ mod tests {
         assert_eq!(parse_instr("    i32.const 5"), InstrKind::Other);
         assert_eq!(parse_instr("    i32.const 5 ;; hello "), InstrKind::Other);
         assert_eq!(parse_instr("i32.const 5     "), InstrKind::Other);
-        assert_eq!(parse_instr(";;Hello"), InstrKind::Empty);
-        assert_eq!(parse_instr("   ;; Hello "), InstrKind::Empty);
+        assert_eq!(parse_instr(";;Hello"), malf("expected an instruction"));
+        assert_eq!(parse_instr("   ;; Hello "), malf("expected an instruction"));
         assert_eq!(
             parse_instr("i32.const 5   ;;this is a const"),
             InstrKind::Other
@@ -431,6 +431,23 @@ mod tests {
         assert_eq!(parse_instr("   try_table   "), InstrKind::OtherStructured);
         Ok(())
     }
+
+    #[test]
+    fn test_find_comment() {
+        assert_eq!(find_comment("abc", "def"), None);
+        assert_eq!(find_comment("abc", ";;def"), Some(3));
+        assert_eq!(find_comment(";;abc", ";;def"), Some(0));
+        assert_eq!(find_comment(";;abc", "def"), Some(0));
+        assert_eq!(find_comment(";", "def"), None);
+        assert_eq!(find_comment(";", ";def"), Some(0));
+        assert_eq!(find_comment("abc;", ";def"), Some(3));
+        assert_eq!(find_comment("abc;;", ""), Some(3));
+        assert_eq!(find_comment("abc;;", ";"), Some(3));
+        assert_eq!(find_comment("abc;", ";"), Some(3));
+        assert_eq!(find_comment("abc; ", ";"), None);
+        assert_eq!(find_comment("abc; ", "; ;;"), Some(7));
+    }
+
     #[test]
     fn test_is_well_formed_func() {
         //well-formed function
