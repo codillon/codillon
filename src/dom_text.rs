@@ -23,11 +23,6 @@ impl DomText {
         self.text_node.append_data(string);
     }
 
-    pub fn set_data_owned(&mut self, string: String) {
-        self.contents = string;
-        self.text_node.set_data(&self.contents);
-    }
-
     pub fn set_data(&mut self, string: &str) {
         self.contents = string.to_string();
         self.text_node.set_data(string);
@@ -57,7 +52,7 @@ impl DomText {
         Ok(byte_idx)
     }
 
-    fn safe_byte_idx_to_utf16(&self, byte_idx: usize) -> Result<usize> {
+    pub fn safe_byte_idx_to_utf16(&self, byte_idx: usize) -> Result<usize> {
         let utf16_idx = str_indices::utf16::from_byte_idx(&self.contents, byte_idx);
 
         if byte_idx != str_indices::utf16::to_byte_idx(&self.contents, utf16_idx) {
@@ -121,8 +116,13 @@ impl DomText {
         self.contents.is_empty()
     }
 
-    pub fn get_contents(&self) -> &str {
+    pub fn get(&self) -> &str {
         &self.contents
+    }
+
+    pub fn suffix_utf16(&self, utf16_start_idx: usize) -> Result<&str> {
+        let byte_start_idx = self.safe_utf16_to_byte_idx(utf16_start_idx)?;
+        Ok(&self.contents[byte_start_idx..])
     }
 }
 

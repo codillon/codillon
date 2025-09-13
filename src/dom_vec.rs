@@ -23,8 +23,23 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         self.elem.append_node(self.contents.last().unwrap());
     }
 
+    pub fn insert(&mut self, index: usize, elem: Child) {
+        if index == self.contents.len() {
+            self.push(elem)
+        } else if index < self.contents.len() {
+            self.contents.insert(index, elem);
+            self.elem.insert_node(index, &self.contents[index]);
+        } else {
+            panic!("index > len");
+        }
+    }
+
     pub fn remove(&mut self, index: usize) -> Child {
         self.contents.remove(index)
+    }
+
+    pub fn remove_range(&mut self, begin: usize, end: usize) {
+        self.contents.drain(begin..end);
     }
 
     pub fn set_contents(&mut self, elem: Child) {
@@ -44,8 +59,12 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
             F: FnMut(&'a Child) -> std::cmp::Ordering;
     }
     to self.elem {
-        pub fn set_attribute(&mut self, name: &str, value: &str);
+    pub fn set_attribute(&mut self, name: &str, value: &str);
+    pub fn remove_attribute(&mut self, name: &str);
+    pub fn get_attribute(&self, name: &str) -> Option<&String>;
     pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
+    pub fn set_onkeydown<F: Fn(web_sys::KeyboardEvent) + 'static>(&mut self, handler: F);
+    pub fn scroll_into_view(&self);
     }
     }
 }
