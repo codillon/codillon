@@ -1,7 +1,8 @@
 // A Codillon DOM "vector": a variable-length collection of Components of the same type
 
 use crate::web_support::{
-    AccessToken, AnyElement, Component, ElementAsNode, ElementHandle, InputEventHandle, WithElement,
+    AccessToken, AnyElement, Component, ElementAsNode, ElementHandle, InputEventHandle,
+    MouseEventHandle, WithElement,
 };
 use delegate::delegate;
 
@@ -64,6 +65,7 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
     pub fn get_attribute(&self, name: &str) -> Option<&String>;
     pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
     pub fn set_onkeydown<F: Fn(web_sys::KeyboardEvent) + 'static>(&mut self, handler: F);
+    pub fn set_onmousedown<F: Fn(MouseEventHandle) + 'static>(&mut self, handler: F);
     pub fn scroll_into_view(&self);
     }
     }

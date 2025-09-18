@@ -7,8 +7,9 @@ use crate::{
         FmtError, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames, str_to_binary,
     },
     web_support::{
-        AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
-        StaticRangeHandle, WithElement, compare_document_position, get_selection,
+        AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, MouseEventHandle,
+        NodeRef, StaticRangeHandle, WithElement, compare_document_position, get_selection,
+        set_cursor_range, set_selection,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -22,7 +23,7 @@ use web_sys::{HtmlDivElement, console::log_1};
 type ComponentType = DomVec<CodeLine, HtmlDivElement>;
 
 struct _Editor {
-    module: OkModule,
+    module: MaybeModule,
     synthetic_ends: usize,
     component: ComponentType,
     factory: ElementFactory,
@@ -30,10 +31,15 @@ struct _Editor {
 
 pub struct Editor(Rc<RefCell<_Editor>>);
 
+enum MaybeModule {
+    Module(OkModule),
+    Failure(usize), // culprit line idx
+}
+
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
         let mut inner = _Editor {
-            module: OkModule::default(),
+            module: MaybeModule::Module(OkModule::default()),
             synthetic_ends: 0,
             component: DomVec::new(factory.div()),
             factory,
@@ -47,18 +53,26 @@ impl Editor {
 
         let editor_ref = Rc::clone(&ret.0);
         ret.component_mut().set_onbeforeinput(move |ev| {
-            Editor(editor_ref.clone())
+            let _ = Editor(editor_ref.clone())
                 .handle_input(ev)
-                .expect("input handler")
+                .map_err(|e| log_1(&format!("{e}").into()));
         });
 
         let editor_ref = Rc::clone(&ret.0);
         ret.component_mut().set_onkeydown(move |ev| {
-            Editor(editor_ref.clone())
+            let _ = Editor(editor_ref.clone())
                 .handle_keydown(ev)
-                .expect("keydown handler")
+                .map_err(|e| log_1(&format!("{e}").into()));
         });
 
+        let editor_ref = Rc::clone(&ret.0);
+        ret.component_mut().set_onmousedown(move |ev| {
+            let _ = Editor(editor_ref.clone())
+                .handle_mousedown(ev)
+                .map_err(|e| log_1(&format!("{e}").into()));
+        });
+
+        // demo contents
         ret.push_line("i32.const 5");
         ret.push_line("i32.const 6");
         ret.push_line("i32.add");
@@ -68,9 +82,10 @@ impl Editor {
     }
 
     fn push_line(&mut self, string: &str) {
+        let idx = self.component().len();
         let newline = CodeLine::new(string, &self.0.borrow().factory);
         self.component_mut().push(newline);
-        self.on_change();
+        self.on_change(idx);
     }
 
     // Replace a given range (currently within a single line) with new text
@@ -89,34 +104,37 @@ impl Editor {
             target_range.end_offset().fmt_err()?,
         )?;
 
+        if let Some(locked_to_line) = self.locked_line()
+            && new_str.chars().any(|x| x == '\n')
+        {
+            bail!("tried to add newline, but editing is locked to {locked_to_line}");
+        }
+
         let mut new_cursor_pos = if start_line_index == end_line_index {
             // Single-line edit
-            self.line_mut(start_line_index).replace_range(
-                start_pos_in_line,
-                end_pos_in_line,
-                new_str,
-            )?
+            self.modify_line(start_line_index, |line| {
+                line.replace_range(start_pos_in_line, end_pos_in_line, new_str)
+            })?
         } else if start_line_index < end_line_index {
-            // Multi-line edit.
+            // Multi-line edit. Try to make sure the removal happens, even if the
+            // resulting line will break the module.
 
-            // Step 1: Add surviving portion of end line to the start line.
+            // Step 1: Save surviving portion of end line to add to the start line.
             let end_pos = self.line(start_line_index).end_position();
             let s = self.line(end_line_index).suffix(end_pos_in_line)?;
-            self.line_mut(start_line_index)
-                .replace_range(start_pos_in_line, end_pos, &s)?;
 
             // Step 2: Remove all lines after the start.
-            self.0
-                .borrow_mut()
-                .component
-                .remove_range(start_line_index + 1, end_line_index + 1);
+            self.remove_lines(start_line_index + 1, end_line_index + 1)?;
+
+            // Step 3: Add surviving portion of end line to the start line
+            self.modify_line(start_line_index, |line| {
+                line.replace_range(start_pos_in_line, end_pos, &s)
+            })?;
 
             // Step 3: Insert the new text into the (remaining) start line.
-            self.line_mut(start_line_index).replace_range(
-                start_pos_in_line,
-                start_pos_in_line,
-                new_str,
-            )?
+            self.modify_line(start_line_index, |line| {
+                line.replace_range(start_pos_in_line, start_pos_in_line, new_str)
+            })?
         } else {
             bail!(
                 "unhandled reversed target range {start_line_index}@{:?} .. {end_line_index}@{:?}",
@@ -134,11 +152,11 @@ impl Editor {
                 Some(pos) => {
                     let rest = self.line(fixup_line).suffix(pos)?;
                     let end_pos = self.line(fixup_line).end_position();
-                    self.line_mut(fixup_line).replace_range(pos, end_pos, "")?;
+                    self.modify_line(fixup_line, |line| line.replace_range(pos, end_pos, ""))?;
                     let newline = CodeLine::new(&rest[1..], &self.0.borrow().factory);
                     new_cursor_pos = Position::begin();
                     fixup_line += 1;
-                    self.component_mut().insert(fixup_line, newline);
+                    self.insert_line(fixup_line, newline)?;
                 }
             }
         }
@@ -174,8 +192,6 @@ impl Editor {
             )),
         }?;
 
-        self.on_change();
-
         Ok(())
     }
 
@@ -183,13 +199,16 @@ impl Editor {
     // later in the line. It also has trouble deleting if the cursor position is at the end of the surrounding
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
     fn handle_keydown(&mut self, ev: web_sys::KeyboardEvent) -> Result<()> {
+        if self.locked_line().is_some() {
+            return Ok(());
+        }
         match ev.key().as_str() {
             "ArrowRight" => {
                 let selection = get_selection();
-                if selection.collapsed() {
+                if selection.is_collapsed() {
                     let (line_idx, pos) = self.find_idx_and_utf16_pos(
-                        selection.start_container()?,
-                        selection.start_offset()?,
+                        selection.focus_node().expect("focus"),
+                        selection.focus_offset(),
                     )?;
                     if line_idx + 1 < self.component().len()
                         && pos == self.line(line_idx).end_position()
@@ -203,10 +222,10 @@ impl Editor {
 
             "ArrowDown" => {
                 let selection = get_selection();
-                if selection.collapsed() {
+                if selection.is_collapsed() {
                     let (line_idx, _) = self.find_idx_and_utf16_pos(
-                        selection.start_container()?,
-                        selection.start_offset()?,
+                        selection.focus_node().expect("focus"),
+                        selection.focus_offset(),
                     )?;
                     if line_idx + 1 == self.component().len() {
                         ev.prevent_default();
@@ -218,10 +237,10 @@ impl Editor {
 
             "ArrowLeft" => {
                 let selection = get_selection();
-                if selection.collapsed() {
+                if selection.is_collapsed() {
                     let (line_idx, pos) = self.find_idx_and_utf16_pos(
-                        selection.start_container()?,
-                        selection.start_offset()?,
+                        selection.focus_node().expect("focus"),
+                        selection.focus_offset(),
                     )?;
                     if line_idx > 0 && pos == Position::begin() {
                         ev.prevent_default();
@@ -232,6 +251,18 @@ impl Editor {
             }
 
             _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn handle_mousedown(&mut self, ev: MouseEventHandle) -> Result<()> {
+        if let Some(locked_to_line) = self.locked_line() {
+            let (line_idx, _) = self.find_idx_and_utf16_pos(ev.target(), 0)?;
+            if line_idx != locked_to_line {
+                ev.prevent_default();
+                self.component_mut()[locked_to_line].shake_culprit();
+            }
         }
 
         Ok(())
@@ -278,12 +309,58 @@ impl Editor {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component)
     }
 
+    fn module(&self) -> Ref<'_, MaybeModule> {
+        Ref::map(self.0.borrow(), |c| &c.module)
+    }
+
+    fn module_mut(&self) -> RefMut<'_, MaybeModule> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.module)
+    }
+
     fn line(&self, idx: usize) -> Ref<'_, CodeLine> {
         Ref::map(self.component(), |c| &c[idx])
     }
 
-    fn line_mut(&mut self, idx: usize) -> RefMut<'_, CodeLine> {
-        RefMut::map(self.component_mut(), |c| &mut c[idx])
+    fn modify_line<T>(&mut self, idx: usize, f: impl Fn(&mut CodeLine) -> Result<T>) -> Result<T> {
+        if let Some(locked_to_line) = self.locked_line()
+            && idx != locked_to_line
+        {
+            bail!("tried to modify line {idx} but editing is locked to line {locked_to_line}");
+        }
+
+        let function_res = f(&mut self.component_mut()[idx]);
+        self.on_change(idx);
+        function_res
+    }
+
+    fn remove_lines(&mut self, start_idx: usize, end_idx: usize) -> Result<()> {
+        if let Some(locked_to_line) = self.locked_line()
+            && (start_idx != locked_to_line || end_idx != locked_to_line + 1)
+        {
+            bail!(
+                "tried to remove lines {start_idx}..{end_idx} but editing is locked to line {locked_to_line}"
+            );
+        }
+
+        for i in (start_idx..end_idx).rev() {
+            self.modify_line(i, |line| {
+                line.clear();
+                Ok(())
+            })?;
+        }
+        self.component_mut().remove_range(start_idx, end_idx);
+        Ok(())
+    }
+
+    fn insert_line(&mut self, idx: usize, line: CodeLine) -> Result<()> {
+        if let Some(locked_to_line) = self.locked_line() {
+            bail!("cannot insert line because editing is locked to {locked_to_line}");
+        }
+
+        self.component_mut().insert(idx, line);
+        self.on_change(idx);
+
+        Ok(())
     }
 
     // get the "instructions" (active, well-formed lines) as text
@@ -298,7 +375,15 @@ impl Editor {
         )
     }
 
-    fn on_change(&mut self) {
+    fn locked_line(&self) -> Option<usize> {
+        if let MaybeModule::Failure(locked_to_line) = *self.module() {
+            Some(locked_to_line)
+        } else {
+            None
+        }
+    }
+
+    fn on_change(&mut self, line_idx: usize) {
         // repair syntax
         fix_frames(self);
 
@@ -306,14 +391,37 @@ impl Editor {
         let text = self
             .instructions_as_text()
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
-        let bin = str_to_binary(text).expect("wasm binary");
-        self.0.borrow_mut().module = OkModule::build(bin, self).expect("OkModule");
+        match str_to_binary(text) {
+            Ok(bin) => {
+                if let Some(locked_to_line) = self.locked_line() {
+                    let selection = get_selection();
+                    self.component_mut()
+                        .set_attribute("contenteditable", "true");
+                    self.component_mut()[locked_to_line].clear_culprit();
+                    // Chrome seems to have a bug in preserving the cursor position in this case,
+                    // unless selection is set to something different than where it is.
+                    set_cursor_range(&*self.component(), 0, &*self.component(), 0);
+                    set_selection(&selection);
+                }
 
-        // log instruction types (TODO: integrate into OkModule)
-        let _ = collect_operands(
-            self.0.borrow().module.borrow_binary(),
-            self.0.borrow().module.borrow_ops(),
-        );
+                *self.module_mut() =
+                    MaybeModule::Module(OkModule::build(bin, self).expect("OkModule"));
+
+                let MaybeModule::Module(ref module) = *self.module() else {
+                    panic!("");
+                };
+
+                // log instruction types (TODO: integrate into OkModule)
+                let _ = collect_operands(module.borrow_binary(), module.borrow_ops());
+            }
+            Err(e) => {
+                let reason = format!("{e}");
+                self.component_mut()[line_idx].set_culprit(&reason);
+                self.0.borrow_mut().module = MaybeModule::Failure(line_idx);
+                self.component_mut()
+                    .set_attribute("contenteditable", "false");
+            }
+        };
 
         #[cfg(debug_assertions)]
         {
@@ -368,7 +476,7 @@ impl LineInfos for Editor {
 
 impl LineInfosMut for Editor {
     fn set_active_status(&mut self, index: usize, is_active: bool) {
-        self.line_mut(index).set_active_status(is_active)
+        self.component_mut()[index].set_active_status(is_active)
     }
 
     fn set_synthetic_ends(&mut self, num: usize) {
@@ -387,6 +495,6 @@ impl ElementAsNode for Editor {}
 
 impl Component for Editor {
     fn audit(&self) {
-        self.component().audit()
+        self.component().audit();
     }
 }

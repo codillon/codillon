@@ -30,7 +30,7 @@ div.textentry {
     counter-reset: codelines;
 }
 
-div.textentry:focus {
+:focus {
     outline: none;
     box-shadow: none;
 }
@@ -38,6 +38,43 @@ div.textentry:focus {
 .malformed-line {
     color: gray;
 }
+
+.culprit-line {
+    color: darkred;
+    border: 0.5px dashed darkred;
+    margin: -0.5px;
+}
+
+.culprit-line-a {
+    color: darkred;
+    border: 0.5px dashed darkred;
+    margin: -0.5px;
+    animation: shake-a 0.25s;
+}
+
+.culprit-line-b {
+    color: darkred;
+    border: 0.5px dashed darkred;
+    margin: -0.5px;
+    animation: shake-b 0.25s;
+}
+
+@keyframes shake-a {
+ 0% { transform: translateX(0) }
+ 25% { transform: translateX(5px) }
+ 50% { transform: translateX(-5px) }
+ 75% { transform: translateX(5px) }
+ 100% { transform: translateX(0) }
+}
+
+@keyframes shake-b {
+ 0% { transform: translateX(0) }
+ 25% { transform: translateX(5px) }
+ 50% { transform: translateX(-5px) }
+ 75% { transform: translateX(5px) }
+ 100% { transform: translateX(0) }
+}
+
 .inactive-line { 
     color: gray;
     text-decoration: underline;
@@ -50,6 +87,16 @@ div.textentry:focus {
 .good-line {
     color: black;
     counter-increment: codelines;
+}
+
+.culprit-line::before {
+    font-size: 20pt;
+    color: darkred;
+    display: inline-block;
+    width: 2em;
+    text-align: right;
+
+    content: "\1d11e    ";
 }
 
 .malformed-line::before {
@@ -99,6 +146,19 @@ span.comment {
 }
 
 div.malformed-line span.comment::after {
+    font-family: 'MLMRoman10-Regular';
+    font-size: 12pt;
+    color: darkred;
+    float: right;
+    text-align: right;
+    border: 1px solid darkred;
+    padding: 4px;
+    margin-top: 10px;
+
+    content: attr(data-commentary);
+}
+
+div.culprit-line span.comment::after {
     font-family: 'MLMRoman10-Regular';
     font-size: 12pt;
     color: darkred;

@@ -9,7 +9,7 @@ use crate::{
     utils::{InstrKind, find_comment, parse_instr},
     web_support::{
         AccessToken, Component, ElementAsNode, ElementFactory, NodeRef, WithElement,
-        set_cursor_position,
+        set_cursor_range,
     },
 };
 use anyhow::{Result, bail};
@@ -37,6 +37,8 @@ impl LineInfo {
 pub struct CodeLine {
     contents: LinePara,
     info: LineInfo,
+    culprit: Option<String>,
+    animation_state: u8,
 }
 
 impl WithElement for CodeLine {
@@ -66,7 +68,9 @@ impl Component for CodeLine {
         assert_eq!(self.contents.get_attribute("class").unwrap(), self.class());
         assert_eq!(
             self.contents.get().1.0.get_attribute("data-commentary"),
-            if let InstrKind::Malformed(reason) = &self.info.kind {
+            if let Some(reason) = &self.culprit {
+                Some(reason)
+            } else if let InstrKind::Malformed(reason) = &self.info.kind {
                 Some(reason)
             } else {
                 None
@@ -142,11 +146,18 @@ impl CodeLine {
             });
         }
 
-        bail!("position in unknown node");
+        // Otherwise, give final offset.
+        Ok(self.end_position())
     }
 
     fn class(&self) -> &'static str {
-        if !self.info.active {
+        if self.culprit.is_some() {
+            match self.animation_state {
+                1 => "culprit-line culprit-line-a",
+                2 => "culprit-line culprit-line-b",
+                _ => "culprit-line",
+            }
+        } else if !self.info.active {
             "inactive-line"
         } else {
             match self.info.kind {
@@ -173,6 +184,8 @@ impl CodeLine {
                 kind: InstrKind::Empty,
                 active: true,
             },
+            culprit: None,
+            animation_state: 0,
         };
 
         ret.contents.get_mut().1.0.set_attribute("class", "comment");
@@ -188,18 +201,27 @@ impl CodeLine {
     }
 
     fn conform_commentary(&mut self) {
-        if let InstrKind::Malformed(reason) = &self.info.kind {
+        if let Some(reason) = &self.culprit {
             self.contents
                 .get_mut()
                 .1
                 .0
                 .set_attribute("data-commentary", reason);
+            self.contents.set_attribute("contenteditable", "true");
+        } else if let InstrKind::Malformed(reason) = &self.info.kind {
+            self.contents
+                .get_mut()
+                .1
+                .0
+                .set_attribute("data-commentary", reason);
+            self.contents.remove_attribute("contenteditable");
         } else {
             self.contents
                 .get_mut()
                 .1
                 .0
                 .remove_attribute("data-commentary");
+            self.contents.remove_attribute("contenteditable");
         }
     }
 
@@ -243,6 +265,27 @@ impl CodeLine {
             self.info.active = is_active;
             self.conform_activity();
         }
+    }
+
+    pub fn set_culprit(&mut self, reason: &str) {
+        self.culprit = Some(reason.into());
+        self.animation_state = 0;
+        self.conform_commentary();
+        self.conform_activity();
+    }
+
+    pub fn clear_culprit(&mut self) {
+        self.culprit = None;
+        self.conform_commentary();
+        self.conform_activity();
+    }
+
+    pub fn shake_culprit(&mut self) {
+        self.animation_state = match self.animation_state {
+            1 => 2,
+            _ => 1,
+        };
+        self.conform_activity();
     }
 
     pub fn suffix(&self, pos: Position) -> Result<String> {
@@ -299,14 +342,27 @@ impl CodeLine {
         })
     }
 
-    pub fn set_cursor_position(&self, pos: Position) {
-        use Position::*;
+    pub fn clear(&mut self) {
+        self.instr_mut().set_data("");
+        self.comment_mut().set_data("");
+        self.conform_to_text().unwrap();
+    }
 
+    fn to_node_and_offset(&self, pos: Position) -> (&DomText, usize) {
         match pos {
-            Instr(offset) => set_cursor_position(self.instr(), offset),
-            Comment(offset) => set_cursor_position(self.comment(), offset),
+            Position::Instr(offset) => (self.instr(), offset),
+            Position::Comment(offset) => (self.comment(), offset),
         }
+    }
 
+    pub fn set_cursor_position(&self, pos: Position) {
+        self.set_cursor_range(pos, pos);
+    }
+
+    pub fn set_cursor_range(&self, anchor_pos: Position, focus_pos: Position) {
+        let (anchor_node, anchor_offset) = self.to_node_and_offset(anchor_pos);
+        let (focus_node, focus_offset) = self.to_node_and_offset(focus_pos);
+        set_cursor_range(anchor_node, anchor_offset, focus_node, focus_offset);
         self.contents.scroll_into_view();
     }
 

@@ -3,7 +3,7 @@
 
 use crate::web_support::{
     AccessToken, AnyElement, ArrayHandle, Component, ElementAsNode, ElementHandle,
-    InputEventHandle, NodeListHandle, WithElement,
+    InputEventHandle, MouseEventHandle, NodeListHandle, WithElement,
 };
 use delegate::delegate;
 
@@ -78,6 +78,7 @@ impl<Child: Structure, Element: AnyElement> DomStruct<Child, Element> {
     pub fn get_attribute(&self, name: &str) -> Option<&String>;
     pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
     pub fn set_onkeydown<F: Fn(web_sys::KeyboardEvent) + 'static>(&mut self, handler: F);
+    pub fn set_onmousedown<F: Fn(MouseEventHandle) + 'static>(&mut self, handler: F);
     pub fn scroll_into_view(&self);
     }
     }

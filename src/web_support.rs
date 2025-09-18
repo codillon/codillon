@@ -12,7 +12,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::{HtmlBodyElement, KeyboardEvent, wasm_bindgen::JsCast};
+use web_sys::{HtmlBodyElement, wasm_bindgen::JsCast};
 
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the web_support module.
@@ -121,6 +121,7 @@ impl TextHandle {
 struct Handlers {
     beforeinput: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
     keydown: Option<Closure<dyn Fn(web_sys::KeyboardEvent)>>,
+    mousedown: Option<Closure<dyn Fn(web_sys::MouseEvent)>>,
 }
 
 // Wrapper for a DOM Element, allowing access to and modification of its attributes
@@ -135,6 +136,18 @@ impl<T: AnyElement> WithElement for ElementHandle<T> {
     type Element = T;
     fn with_element(&self, mut f: impl FnMut(&T), _g: AccessToken) {
         f(&self.elem.0)
+    }
+}
+
+fn audit_handler<EventType>(
+    expected: &Option<Closure<dyn Fn(EventType)>>,
+    actual: Option<::js_sys::Function>,
+) {
+    match (expected, actual) {
+        (Some(expected), Some(actual)) => assert_eq!(actual, *expected.as_ref().unchecked_ref()),
+        (Some(_), None) => panic!("missing event handler"),
+        (None, Some(_)) => panic!("unexpected event handler"),
+        (None, None) => (),
     }
 }
 
@@ -210,25 +223,20 @@ impl<T: AnyElement> ElementHandle<T> {
             assert!(self.attributes.contains_key(&dom_key.as_string().unwrap()));
         }
 
-        match (
+        audit_handler(
             &self.event_handlers.beforeinput,
             self.elem.element().onbeforeinput(),
-        ) {
-            (Some(expect), Some(actual)) => assert_eq!(actual, *expect.as_ref().unchecked_ref()),
-            (Some(_), None) => panic!("missing event handler"),
-            (None, Some(_)) => panic!("unexpected event handler"),
-            (None, None) => (),
-        }
+        );
 
-        match (
+        audit_handler(
             &self.event_handlers.keydown,
             self.elem.element().onkeydown(),
-        ) {
-            (Some(expect), Some(actual)) => assert_eq!(actual, *expect.as_ref().unchecked_ref()),
-            (Some(_), None) => panic!("missing event handler"),
-            (None, Some(_)) => panic!("unexpected event handler"),
-            (None, None) => (),
-        }
+        );
+
+        audit_handler(
+            &self.event_handlers.mousedown,
+            self.elem.element().onmousedown(),
+        );
     }
 
     pub fn get_child_node_list(&self) -> NodeListHandle {
@@ -248,11 +256,23 @@ impl<T: AnyElement> ElementHandle<T> {
         ));
     }
 
-    pub fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F) {
+    pub fn set_onkeydown<F: Fn(web_sys::KeyboardEvent) + 'static>(&mut self, handler: F) {
         self.event_handlers.keydown = Some(Closure::new(handler));
         self.elem.element().set_onkeydown(Some(
             self.event_handlers
                 .keydown
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unchecked_ref(),
+        ));
+    }
+
+    pub fn set_onmousedown<F: Fn(MouseEventHandle) + 'static>(&mut self, handler: F) {
+        self.event_handlers.mousedown = Some(Closure::new(move |ev| handler(MouseEventHandle(ev))));
+        self.elem.element().set_onmousedown(Some(
+            self.event_handlers
+                .mousedown
                 .as_ref()
                 .unwrap()
                 .as_ref()
@@ -275,6 +295,7 @@ impl<T: AnyElement> ElementHandle<T> {
 pub struct DocumentHandle<BodyType: ElementComponent<Element = HtmlBodyElement>> {
     document: web_sys::Document,
     body: Option<BodyType>,
+    selectionchange_handler: Option<Closure<dyn Fn(web_sys::Event)>>,
 }
 
 impl<BodyType: ElementComponent<Element = HtmlBodyElement>> WithElement
@@ -293,6 +314,7 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> Default for Document
         Self {
             document: web_sys::window().unwrap().document().unwrap(),
             body: None,
+            selectionchange_handler: None,
         }
     }
 }
@@ -317,6 +339,17 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyT
         ElementFactory(self.document.clone())
     }
 
+    pub fn set_onselectionchange<F: Fn(web_sys::Event) + 'static>(&mut self, handler: F) {
+        self.selectionchange_handler = Some(Closure::new(handler));
+        self.document.set_onselectionchange(Some(
+            self.selectionchange_handler
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unchecked_ref(),
+        ));
+    }
+
     pub fn audit(&self) {
         match (&self.body, self.document.body()) {
             (Some(body), Some(dom_body)) => {
@@ -327,6 +360,11 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyT
             (None, Some(_)) => panic!("unexpected body"),
             (None, None) => (),
         }
+
+        audit_handler(
+            &self.selectionchange_handler,
+            self.document.onselectionchange(),
+        );
     }
 }
 
@@ -417,6 +455,12 @@ impl WithNode for NodeRef {
     }
 }
 
+impl From<web_sys::Node> for NodeRef {
+    fn from(node: web_sys::Node) -> Self {
+        Self(node)
+    }
+}
+
 impl NodeRef {
     pub fn is_a<T: wasm_bindgen::JsCast>(&self) -> bool {
         self.0.dyn_ref::<T>().is_some()
@@ -474,6 +518,27 @@ impl InputEventHandle {
     }
 }
 
+// Wrapper for an MouseEvent (giving access to its target as a NodeRef)
+pub struct MouseEventHandle(web_sys::MouseEvent);
+
+impl MouseEventHandle {
+    delegate! {
+    to self.0 {
+        pub fn prevent_default(&self);
+    }
+    }
+
+    pub fn target(&self) -> NodeRef {
+        NodeRef(
+            self.0
+                .target()
+                .unwrap()
+                .dyn_into::<web_sys::Node>()
+                .expect("node"),
+        )
+    }
+}
+
 // Compare the position of two nodes in a document
 pub fn compare_document_position(a: &impl WithNode, b: &impl WithNode) -> std::cmp::Ordering {
     let mut is_same = false;
@@ -504,32 +569,71 @@ pub fn compare_document_position(a: &impl WithNode, b: &impl WithNode) -> std::c
     }
 }
 
-// Set the cursor position
-pub fn set_cursor_position(node: &impl WithNode, offset: usize) {
-    node.with_node(
-        |n| {
-            web_sys::window()
-                .expect("window")
-                .get_selection()
-                .expect("selection error")
-                .expect("selection not found")
-                .set_position_with_offset(Some(n), offset.try_into().expect("offset -> u32"))
-                .expect("set position with offset")
+// Set the cursor position or selection
+pub fn set_cursor_range(
+    anchor: &impl WithNode,
+    anchor_offset: usize,
+    focus: &impl WithNode,
+    focus_offset: usize,
+) {
+    anchor.with_node(
+        |anchor_node| {
+            focus.with_node(
+                |focus_node| {
+                    web_sys::window()
+                        .expect("window")
+                        .get_selection()
+                        .expect("selection error")
+                        .expect("selection not found")
+                        .set_base_and_extent(
+                            anchor_node,
+                            anchor_offset.try_into().expect("offset -> u32"),
+                            focus_node,
+                            focus_offset.try_into().expect("offset -> u32"),
+                        )
+                        .expect("set_base_and_extent")
+                },
+                TOKEN,
+            )
         },
         TOKEN,
     )
 }
 
+pub fn set_selection(sel: &SelectionHandle) {
+    set_cursor_range(
+        &sel.anchor_node().unwrap(),
+        sel.anchor_offset() as usize,
+        &sel.focus_node().unwrap(),
+        sel.focus_offset() as usize,
+    )
+}
+
+// Wrapper for a Selection (giving access to its anchor and focus nodes as NodeRefs)
+pub struct SelectionHandle(web_sys::Selection);
+
+impl SelectionHandle {
+    delegate! {
+        to self.0 {
+        pub fn anchor_offset(&self) -> u32;
+        pub fn focus_offset(&self) -> u32;
+        pub fn is_collapsed(&self) -> bool;
+        #[expr($.map(From::from))]
+        pub fn anchor_node(&self) -> Option<NodeRef>;
+        #[expr($.map(From::from))]
+        pub fn focus_node(&self) -> Option<NodeRef>;
+    }
+    }
+}
+
 // Get the selection
-pub fn get_selection() -> StaticRangeHandle {
-    StaticRangeHandle(
+pub fn get_selection() -> SelectionHandle {
+    SelectionHandle(
         web_sys::window()
             .expect("window")
             .get_selection()
             .expect("selection error")
-            .expect("selection not found")
-            .get_range_at(0)
-            .expect("first range"),
+            .expect("selection not found"),
     )
 }
 
