@@ -9,7 +9,7 @@ use crate::{
     utils::{InstrKind, find_comment, parse_instr},
     web_support::{
         AccessToken, Component, ElementAsNode, ElementFactory, NodeRef, WithElement,
-        set_cursor_position,
+        set_selection_range,
     },
 };
 use anyhow::{Result, bail};
@@ -49,14 +49,28 @@ impl WithElement for CodeLine {
 impl ElementAsNode for CodeLine {}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-pub enum Position {
-    Instr(usize),
-    Comment(usize),
+pub struct Position {
+    pub in_instr: bool,
+    pub offset: usize,
 }
 
 impl Position {
     pub fn begin() -> Position {
-        Position::Instr(0)
+        Position::instr(0)
+    }
+
+    fn instr(offset: usize) -> Position {
+        Position {
+            in_instr: true,
+            offset,
+        }
+    }
+
+    fn comment(offset: usize) -> Position {
+        Position {
+            in_instr: false,
+            offset,
+        }
     }
 }
 
@@ -96,16 +110,14 @@ impl CodeLine {
 
     pub fn end_position(&self) -> Position {
         if self.comment().is_empty() {
-            Position::Instr(self.instr().len_utf16())
+            Position::instr(self.instr().len_utf16())
         } else {
-            Position::Comment(self.comment().len_utf16())
+            Position::comment(self.comment().len_utf16())
         }
     }
 
     pub fn get_position(&self, node: NodeRef, offset: usize) -> Result<Position> {
-        use Position::*;
-
-        let instr_end = Instr(self.instr().len_utf16());
+        let instr_end = Position::instr(self.instr().len_utf16());
 
         // If the position is in the top-level div element, the offset counts nodes
         // within the line.
@@ -122,14 +134,14 @@ impl CodeLine {
             if offset > self.instr().len_utf16() {
                 bail!("invalid offset");
             }
-            return Ok(Instr(offset));
+            return Ok(Position::instr(offset));
         } else if node.is_same_node(self.comment()) {
             if offset > self.comment().len_utf16() {
                 bail!("invalid offset");
             }
             return Ok(match offset {
                 0 => instr_end,
-                _ => Comment(offset),
+                _ => Position::comment(offset),
             });
         }
 
@@ -246,20 +258,19 @@ impl CodeLine {
     }
 
     pub fn suffix(&self, pos: Position) -> Result<String> {
-        use Position::*;
-
-        Ok(match pos {
-            Instr(a) => String::from(self.instr().suffix_utf16(a)?) + self.comment().get(),
-            Comment(b) => self.comment().suffix_utf16(b)?.to_string(),
+        Ok(match pos.in_instr {
+            true => String::from(self.instr().suffix_utf16(pos.offset)?) + self.comment().get(),
+            false => self.comment().suffix_utf16(pos.offset)?.to_string(),
         })
     }
 
     pub fn first_newline(&self) -> Result<Option<Position>> {
-        use Position::*;
         Ok(if let Some(idx) = self.instr().get().find('\n') {
-            Some(Instr(self.instr().safe_byte_idx_to_utf16(idx)?))
+            Some(Position::instr(self.instr().safe_byte_idx_to_utf16(idx)?))
         } else if let Some(idx) = self.comment().get().find('\n') {
-            Some(Comment(self.comment().safe_byte_idx_to_utf16(idx)?))
+            Some(Position::comment(
+                self.comment().safe_byte_idx_to_utf16(idx)?,
+            ))
         } else {
             None
         })
@@ -267,50 +278,50 @@ impl CodeLine {
 
     // Modify the contents. This calls replace_range on one of the inner DomTexts (or both), then
     // makes the comment split, kind, and CSS presentation consistent with the new contents.
-    pub fn replace_range(
-        &mut self,
-        start_pos: Position,
-        end_pos: Position,
-        string: &str,
-    ) -> Result<Position> {
-        use Position::*;
-
-        let mut total_pos = match (start_pos, end_pos) {
-            (Instr(a), Instr(b)) => self.instr_mut().replace_range(a, b, string)?,
-            (Comment(a), Comment(b)) => {
-                self.instr().len_utf16() + self.comment_mut().replace_range(a, b, string)?
+    pub fn replace_range(&mut self, a: Position, b: Position, string: &str) -> Result<Position> {
+        let mut total_pos = match (a.in_instr, b.in_instr) {
+            (true, true) => self.instr_mut().replace_range(a.offset, b.offset, string)?,
+            (false, false) => {
+                self.instr().len_utf16()
+                    + self
+                        .comment_mut()
+                        .replace_range(a.offset, b.offset, string)?
             }
-            (Instr(a), Comment(b)) => {
-                self.comment_mut().replace_range(0, b, "")?;
+            (true, false) => {
+                self.comment_mut().replace_range(0, b.offset, "")?;
                 let instr_len = self.instr().len_utf16();
-                self.instr_mut().replace_range(a, instr_len, string)?
+                self.instr_mut()
+                    .replace_range(a.offset, instr_len, string)?
             }
-            (Comment(_), Instr(_)) => bail!("unhandled comment -> instr range"),
+            (false, true) => bail!("unhandled comment -> instr range"),
         };
 
         total_pos = total_pos.saturating_sub(self.conform_to_text()?);
 
         Ok(if total_pos <= self.instr().len_utf16() {
-            Instr(total_pos)
+            Position::instr(total_pos)
         } else {
             let comment_pos = total_pos - self.instr().len_utf16();
             debug_assert!(comment_pos <= self.comment().len_utf16());
-            Comment(comment_pos)
+            Position::comment(comment_pos)
         })
     }
 
     pub fn set_cursor_position(&self, pos: Position) {
-        use Position::*;
-
-        match pos {
-            Instr(offset) => set_cursor_position(self.instr(), offset),
-            Comment(offset) => set_cursor_position(self.comment(), offset),
-        }
-
+        let node = self.position_to_node(pos);
+        let offset = pos.offset.try_into().expect("offset -> u32");
+        set_selection_range(node, offset, node, offset);
         self.contents.scroll_into_view();
     }
 
     pub fn info(&self) -> &LineInfo {
         &self.info
+    }
+
+    pub fn position_to_node(&self, pos: Position) -> &DomText {
+        match pos.in_instr {
+            true => self.instr(),
+            false => self.comment(),
+        }
     }
 }
