@@ -37,6 +37,7 @@ impl LineInfo {
 pub struct CodeLine {
     contents: LinePara,
     info: LineInfo,
+    animation_state: u8,
 }
 
 impl WithElement for CodeLine {
@@ -77,7 +78,7 @@ impl Position {
 impl Component for CodeLine {
     fn audit(&self) {
         assert_eq!(self.info.kind, parse_instr(self.contents.get().0.get()));
-        assert_eq!(self.contents.get_attribute("class").unwrap(), self.class());
+        assert_eq!(self.contents.get_attribute("class").unwrap(), &self.class());
         assert_eq!(
             self.contents.get().1.0.get_attribute("data-commentary"),
             if let InstrKind::Malformed(reason) = &self.info.kind {
@@ -157,8 +158,8 @@ impl CodeLine {
         bail!("position in unknown node");
     }
 
-    fn class(&self) -> &'static str {
-        if !self.info.active {
+    fn class(&self) -> String {
+        let prefix = if !self.info.active {
             "inactive-line"
         } else {
             match self.info.kind {
@@ -167,6 +168,21 @@ impl CodeLine {
                 _ => "good-line",
             }
         }
+        .to_string();
+
+        match self.animation_state {
+            1 => prefix + " strobe-a",
+            2 => prefix + " strobe-b",
+            _ => prefix,
+        }
+    }
+
+    pub fn strobe(&mut self) {
+        self.animation_state = match self.animation_state {
+            1 => 2,
+            _ => 1,
+        };
+        self.conform_activity();
     }
 
     pub fn new(contents: &str, factory: &ElementFactory) -> Self {
@@ -185,6 +201,7 @@ impl CodeLine {
                 kind: InstrKind::Empty,
                 active: true,
             },
+            animation_state: 0,
         };
 
         ret.contents.get_mut().1.0.set_attribute("class", "comment");
@@ -196,7 +213,7 @@ impl CodeLine {
     // Make the element presentation (CSS class) match the "is_instr" status.
     // This needs to happen when the active status changes.
     fn conform_activity(&mut self) {
-        self.contents.set_attribute("class", self.class());
+        self.contents.set_attribute("class", &self.class());
     }
 
     fn conform_commentary(&mut self) {

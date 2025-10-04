@@ -157,7 +157,8 @@ impl Editor {
                 self.component_mut()
                     .remove_range(start_line, fixup_line + 1);
                 for i in 0..backup.len() {
-                    let line = CodeLine::new(&backup[i], &self.0.borrow().factory);
+                    let mut line = CodeLine::new(&backup[i], &self.0.borrow().factory);
+                    line.strobe();
                     self.component_mut().insert(start_line + i, line);
                 }
 
