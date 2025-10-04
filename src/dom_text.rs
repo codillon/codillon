@@ -132,6 +132,12 @@ impl WithNode for DomText {
     }
 }
 
+impl WithNode for &DomText {
+    fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken) {
+        self.text_node.with_node(f, g);
+    }
+}
+
 impl Component for DomText {
     fn audit(&self) {
         assert_eq!(self.contents, self.text_node.data());

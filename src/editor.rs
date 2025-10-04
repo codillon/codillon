@@ -8,7 +8,8 @@ use crate::{
     },
     web_support::{
         AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
-        StaticRangeHandle, WithElement, compare_document_position, get_selection,
+        RangeLike, StaticRangeHandle, WithElement, compare_document_position, get_selection,
+        set_selection_range,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -70,7 +71,20 @@ impl Editor {
     fn push_line(&mut self, string: &str) {
         let newline = CodeLine::new(string, &self.0.borrow().factory);
         self.component_mut().push(newline);
-        self.on_change();
+        self.on_change().expect("well-formed after push_line");
+    }
+
+    fn get_lines_and_positions(
+        &self,
+        range: &impl RangeLike,
+    ) -> Result<(usize, Position, usize, Position)> {
+        let (start_line, start_pos) =
+            self.find_idx_and_utf16_pos(range.node1().unwrap(), range.offset1())?;
+
+        let (end_line, end_pos) =
+            self.find_idx_and_utf16_pos(range.node2().unwrap(), range.offset2())?;
+
+        Ok((start_line, start_pos, end_line, end_pos))
     }
 
     // Replace a given range (currently within a single line) with new text
@@ -79,54 +93,46 @@ impl Editor {
             bail!("unhandled control char in input");
         }
 
-        let (start_line_index, start_pos_in_line) = self.find_idx_and_utf16_pos(
-            target_range.start_container().fmt_err()?,
-            target_range.start_offset().fmt_err()?,
-        )?;
+        let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
 
-        let (end_line_index, end_pos_in_line) = self.find_idx_and_utf16_pos(
-            target_range.end_container().fmt_err()?,
-            target_range.end_offset().fmt_err()?,
-        )?;
+        let (start_line, start_pos, end_line, end_pos) =
+            self.get_lines_and_positions(&target_range)?;
 
-        let mut new_cursor_pos = if start_line_index == end_line_index {
+        let mut backup = Vec::new();
+        for i in start_line..end_line + 1 {
+            backup.push(self.line(i).suffix(Position::begin())?);
+        }
+
+        let mut new_cursor_pos = if start_line == end_line {
             // Single-line edit
-            self.line_mut(start_line_index).replace_range(
-                start_pos_in_line,
-                end_pos_in_line,
-                new_str,
-            )?
-        } else if start_line_index < end_line_index {
+            self.line_mut(start_line)
+                .replace_range(start_pos, end_pos, new_str)?
+        } else if start_line < end_line {
             // Multi-line edit.
 
             // Step 1: Add surviving portion of end line to the start line.
-            let end_pos = self.line(start_line_index).end_position();
-            let s = self.line(end_line_index).suffix(end_pos_in_line)?;
-            self.line_mut(start_line_index)
-                .replace_range(start_pos_in_line, end_pos, &s)?;
+            let end_pos_in_line = self.line(start_line).end_position();
+            let s = self.line(end_line).suffix(end_pos)?;
+            self.line_mut(start_line)
+                .replace_range(start_pos, end_pos_in_line, &s)?;
 
             // Step 2: Remove all lines after the start.
-            self.0
-                .borrow_mut()
-                .component
-                .remove_range(start_line_index + 1, end_line_index + 1);
+            self.component_mut()
+                .remove_range(start_line + 1, end_line + 1);
 
             // Step 3: Insert the new text into the (remaining) start line.
-            self.line_mut(start_line_index).replace_range(
-                start_pos_in_line,
-                start_pos_in_line,
-                new_str,
-            )?
+            self.line_mut(start_line)
+                .replace_range(start_pos, start_pos, new_str)?
         } else {
             bail!(
-                "unhandled reversed target range {start_line_index}@{:?} .. {end_line_index}@{:?}",
-                start_pos_in_line,
-                end_pos_in_line
+                "unhandled reversed target range {start_line}@{:?} .. {end_line}@{:?}",
+                start_pos,
+                end_pos
             )
         };
 
         // Split the start line if it contains newline chars.
-        let mut fixup_line = start_line_index;
+        let mut fixup_line = start_line;
         loop {
             let pos: Option<Position> = self.line(fixup_line).first_newline()?;
             match pos {
@@ -143,7 +149,37 @@ impl Editor {
             }
         }
 
-        self.line(fixup_line).set_cursor_position(new_cursor_pos);
+        // Is the new module well-formed? Otherwise, revert this entire change.
+        match self.on_change() {
+            Ok(()) => self.line(fixup_line).set_cursor_position(new_cursor_pos),
+            Err(_) => {
+                // restore backup
+                self.component_mut()
+                    .remove_range(start_line, fixup_line + 1);
+                for (i, contents) in backup.iter().enumerate() {
+                    let mut line = CodeLine::new(contents, &self.0.borrow().factory);
+                    line.strobe();
+                    self.component_mut().insert(start_line + i, line);
+                }
+
+                self.on_change().expect("well-formed after restore");
+
+                // restore selection
+                let (start_line, start_pos, end_line, end_pos) = saved_selection;
+
+                let start_line = self.line(start_line);
+                let new_start_node = start_line.position_to_node(start_pos);
+                let end_line = self.line(end_line);
+                let new_end_node = end_line.position_to_node(end_pos);
+
+                set_selection_range(
+                    new_start_node,
+                    start_pos.offset.try_into().expect("offset -> u32"),
+                    new_end_node,
+                    end_pos.offset.try_into().expect("offset -> u32"),
+                );
+            }
+        }
 
         Ok(())
     }
@@ -174,8 +210,6 @@ impl Editor {
             )),
         }?;
 
-        self.on_change();
-
         Ok(())
     }
 
@@ -186,10 +220,10 @@ impl Editor {
         match ev.key().as_str() {
             "ArrowRight" => {
                 let selection = get_selection();
-                if selection.collapsed() {
+                if selection.is_collapsed() {
                     let (line_idx, pos) = self.find_idx_and_utf16_pos(
-                        selection.start_container()?,
-                        selection.start_offset()?,
+                        selection.focus_node().context("focus")?,
+                        selection.focus_offset(),
                     )?;
                     if line_idx + 1 < self.component().len()
                         && pos == self.line(line_idx).end_position()
@@ -203,10 +237,10 @@ impl Editor {
 
             "ArrowDown" => {
                 let selection = get_selection();
-                if selection.collapsed() {
+                if selection.is_collapsed() {
                     let (line_idx, _) = self.find_idx_and_utf16_pos(
-                        selection.start_container()?,
-                        selection.start_offset()?,
+                        selection.focus_node().context("focus")?,
+                        selection.focus_offset(),
                     )?;
                     if line_idx + 1 == self.component().len() {
                         ev.prevent_default();
@@ -218,10 +252,10 @@ impl Editor {
 
             "ArrowLeft" => {
                 let selection = get_selection();
-                if selection.collapsed() {
+                if selection.is_collapsed() {
                     let (line_idx, pos) = self.find_idx_and_utf16_pos(
-                        selection.start_container()?,
-                        selection.start_offset()?,
+                        selection.focus_node().context("focus")?,
+                        selection.focus_offset(),
                     )?;
                     if line_idx > 0 && pos == Position::begin() {
                         ev.prevent_default();
@@ -298,7 +332,7 @@ impl Editor {
         )
     }
 
-    fn on_change(&mut self) {
+    fn on_change(&mut self) -> Result<()> {
         // repair syntax
         fix_frames(self);
 
@@ -306,8 +340,7 @@ impl Editor {
         let text = self
             .instructions_as_text()
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
-        let bin = str_to_binary(text).expect("wasm binary");
-        self.0.borrow_mut().module = OkModule::build(bin, self).expect("OkModule");
+        self.0.borrow_mut().module = OkModule::build(str_to_binary(text)?, self)?;
 
         // log instruction types (TODO: integrate into OkModule)
         let _ = collect_operands(
@@ -320,6 +353,8 @@ impl Editor {
             self.audit();
             log_1(&"successful audit".into());
         }
+
+        Ok(())
     }
 }
 

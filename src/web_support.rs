@@ -429,16 +429,22 @@ impl NodeRef {
     }
 }
 
+impl From<web_sys::Node> for NodeRef {
+    fn from(node: web_sys::Node) -> Self {
+        Self(node)
+    }
+}
+
 // Wrapper for a StaticRange (giving access to its start and end nodes as NodeRefs)
 pub struct StaticRangeHandle(web_sys::Range);
 
 impl StaticRangeHandle {
     delegate! {
         to self.0 {
-        #[expr($.fmt_err())]
-        pub fn start_offset(&self) -> Result<u32>;
-        #[expr($.fmt_err())]
-        pub fn end_offset(&self) -> Result<u32>;
+        #[unwrap]
+        pub fn start_offset(&self) -> u32;
+        #[unwrap]
+        pub fn end_offset(&self) -> u32;
         pub fn collapsed(&self) -> bool;
         #[expr(Ok(NodeRef($.fmt_err()?)))]
         pub fn start_container(&self) -> Result<NodeRef>;
@@ -504,33 +510,104 @@ pub fn compare_document_position(a: &impl WithNode, b: &impl WithNode) -> std::c
     }
 }
 
-// Set the cursor position
-pub fn set_cursor_position(node: &impl WithNode, offset: usize) {
-    node.with_node(
-        |n| {
-            web_sys::window()
-                .expect("window")
-                .get_selection()
-                .expect("selection error")
-                .expect("selection not found")
-                .set_position_with_offset(Some(n), offset.try_into().expect("offset -> u32"))
-                .expect("set position with offset")
+// Set the cursor position or selection
+pub fn set_selection_range(
+    anchor: &impl WithNode,
+    anchor_offset: u32,
+    focus: &impl WithNode,
+    focus_offset: u32,
+) {
+    anchor.with_node(
+        |anchor_node| {
+            focus.with_node(
+                |focus_node| {
+                    web_sys::window()
+                        .expect("window")
+                        .get_selection()
+                        .expect("selection error")
+                        .expect("selection not found")
+                        .set_base_and_extent(anchor_node, anchor_offset, focus_node, focus_offset)
+                        .expect("set_base_and_extent")
+                },
+                TOKEN,
+            )
         },
         TOKEN,
     )
 }
 
+pub fn set_selection(sel: &SelectionHandle) {
+    set_selection_range(
+        &sel.anchor_node().unwrap(),
+        sel.anchor_offset(),
+        &sel.focus_node().unwrap(),
+        sel.focus_offset(),
+    )
+}
+
+// Wrapper for a Selection (giving access to its anchor and focus nodes as NodeRefs)
+pub struct SelectionHandle(web_sys::Selection);
+
+impl SelectionHandle {
+    delegate! {
+        to self.0 {
+        pub fn anchor_offset(&self) -> u32;
+        pub fn focus_offset(&self) -> u32;
+        pub fn is_collapsed(&self) -> bool;
+        #[expr($.map(From::from))]
+        pub fn anchor_node(&self) -> Option<NodeRef>;
+        #[expr($.map(From::from))]
+        pub fn focus_node(&self) -> Option<NodeRef>;
+    }
+    }
+}
+
 // Get the selection
-pub fn get_selection() -> StaticRangeHandle {
-    StaticRangeHandle(
+pub fn get_selection() -> SelectionHandle {
+    SelectionHandle(
         web_sys::window()
             .expect("window")
             .get_selection()
             .expect("selection error")
-            .expect("selection not found")
-            .get_range_at(0)
-            .expect("first range"),
+            .expect("selection not found"),
     )
+}
+
+pub trait RangeLike {
+    fn node1(&self) -> Option<NodeRef>;
+    fn node2(&self) -> Option<NodeRef>;
+    fn offset1(&self) -> u32;
+    fn offset2(&self) -> u32;
+}
+
+impl RangeLike for SelectionHandle {
+    fn node1(&self) -> Option<NodeRef> {
+        self.anchor_node()
+    }
+    fn node2(&self) -> Option<NodeRef> {
+        self.focus_node()
+    }
+    fn offset1(&self) -> u32 {
+        self.anchor_offset()
+    }
+    fn offset2(&self) -> u32 {
+        self.focus_offset()
+    }
+}
+
+impl RangeLike for StaticRangeHandle {
+    fn node1(&self) -> Option<NodeRef> {
+        self.start_container().ok()
+    }
+    fn node2(&self) -> Option<NodeRef> {
+        self.end_container().ok()
+    }
+    fn offset1(&self) -> u32 {
+        self.start_offset()
+    }
+    fn offset2(&self) -> u32 {
+        self.end_offset()
+    }
 }
 
 // A trait for a safe "Component", allowing wrapped access to its root Node and audit
