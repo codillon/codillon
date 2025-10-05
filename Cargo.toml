@@ -4,22 +4,17 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-wasm-tools = "1.236.0"
-wasmparser = "0.236.0"
-wast = "236.0.0"
+wasm-tools = "1.239.0"
+wasmparser = "0.239.0"
+wast = "239.0.0"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 console_error_panic_hook = "0.1.7"
-wasmprinter = "0.236.0"
-wat = "1.236.0"
-anyhow = "1.0.98"
+wasmprinter = "0.239.0"
+wat = "1.239.0"
+anyhow = "1.0.100"
 delegate = "0.13.4"
-js-sys = "0.3.77"
+js-sys = "0.3.81"
 str_indices = "0.4.4"
-wasm-bindgen = "0.2.100"
-web-sys = { version = "0.3.77", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition"] }
+wasm-bindgen = "0.2.104"
+web-sys = { version = "0.3.81", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition"] }
 self_cell = "1.2.0"
-
-[patch.crates-io]
-web-sys = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
-wasm-bindgen = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
-js-sys = { git = "https://github.com/codillon/wasm-bindgen", branch = "add-onbeforeinput" }
