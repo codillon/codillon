@@ -75,7 +75,7 @@ impl OkModule {
 }
 
 pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
-    let txt = format!("module (func\n{s})");
+    let txt = format!("module (func (export \"main\")\n{s})");
     Ok(parser::parse::<Module>(&ParseBuffer::new(&txt)?)?.encode()?)
 }
 

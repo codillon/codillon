@@ -18,3 +18,4 @@ str_indices = "0.4.4"
 wasm-bindgen = "0.2.104"
 web-sys = { version = "0.3.81", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition"] }
 self_cell = "1.2.0"
+wasm-bindgen-futures = "0.4.54"

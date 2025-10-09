@@ -246,6 +246,7 @@ dependencies = [
  "self_cell",
  "str_indices",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wasm-tools",
  "wasmparser",
  "wasmprinter",
@@ -1410,6 +1411,19 @@ dependencies = [
  "quote",
  "syn",
  "wasm-bindgen-shared",
+]
+
+[[package]]
+name = "wasm-bindgen-futures"
+version = "0.4.54"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e038d41e478cc73bae0ff9b36c60cff1c98b8f38f8d7e8061e79ee63608ac5c"
+dependencies = [
+ "cfg-if",
+ "js-sys",
+ "once_cell",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]
