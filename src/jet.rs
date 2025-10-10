@@ -121,6 +121,27 @@ struct Handlers {
     keydown: Option<Closure<dyn Fn(web_sys::KeyboardEvent)>>,
 }
 
+impl Handlers {
+    pub fn audit(&self, elem: &impl AsRef<web_sys::HtmlElement>) {
+        audit_handler(&self.beforeinput, elem.as_ref().onbeforeinput());
+        audit_handler(&self.keydown, elem.as_ref().onkeydown());
+
+        fn audit_handler<EventType>(
+            expected: &Option<Closure<dyn Fn(EventType)>>,
+            actual: Option<::js_sys::Function>,
+        ) {
+            match (expected, actual) {
+                (Some(expected), Some(actual)) => {
+                    assert_eq!(actual, *expected.as_ref().unchecked_ref())
+                }
+                (Some(_), None) => panic!("missing event handler"),
+                (None, Some(_)) => panic!("unexpected event handler"),
+                (None, None) => (),
+            }
+        }
+    }
+}
+
 // Wrapper for a DOM Element, allowing access to and modification of its attributes
 // and event handlers, and the ability to set and append to its child nodes.
 pub struct ElementHandle<T: AnyElement> {
@@ -208,25 +229,7 @@ impl<T: AnyElement> ElementHandle<T> {
             assert!(self.attributes.contains_key(&dom_key.as_string().unwrap()));
         }
 
-        match (
-            &self.event_handlers.beforeinput,
-            self.elem.element().onbeforeinput(),
-        ) {
-            (Some(expect), Some(actual)) => assert_eq!(actual, *expect.as_ref().unchecked_ref()),
-            (Some(_), None) => panic!("missing event handler"),
-            (None, Some(_)) => panic!("unexpected event handler"),
-            (None, None) => (),
-        }
-
-        match (
-            &self.event_handlers.keydown,
-            self.elem.element().onkeydown(),
-        ) {
-            (Some(expect), Some(actual)) => assert_eq!(actual, *expect.as_ref().unchecked_ref()),
-            (Some(_), None) => panic!("missing event handler"),
-            (None, Some(_)) => panic!("unexpected event handler"),
-            (None, None) => (),
-        }
+        self.event_handlers.audit(self.elem.element());
     }
 
     pub fn get_child_node_list(&self) -> NodeListHandle {
