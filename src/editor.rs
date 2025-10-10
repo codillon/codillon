@@ -2,14 +2,14 @@
 
 use crate::{
     dom_vec::DomVec,
+    jet::{
+        AccessToken, Component, ElementFactory, InputEventHandle, NodeRef, RangeLike,
+        StaticRangeHandle, WithElement, compare_document_position, get_selection,
+        set_selection_range,
+    },
     line::{CodeLine, LineInfo, Position},
     utils::{
         FmtError, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames, str_to_binary,
-    },
-    web_support::{
-        AccessToken, Component, ElementAsNode, ElementFactory, InputEventHandle, NodeRef,
-        RangeLike, StaticRangeHandle, WithElement, compare_document_position, get_selection,
-        set_selection_range,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -451,8 +451,6 @@ impl WithElement for Editor {
         self.component().with_element(f, g);
     }
 }
-
-impl ElementAsNode for Editor {}
 
 impl Component for Editor {
     fn audit(&self) {

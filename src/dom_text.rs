@@ -2,7 +2,7 @@
 // the interface allows assignment, appending, and inserting into the
 // string, and enforces that the DOM contents will match the Rust contents.
 
-use crate::web_support::{AccessToken, Component, TextHandle, WithNode};
+use crate::jet::{AccessToken, Component, TextHandle, WithNode};
 use anyhow::{Result, bail};
 
 #[derive(Default)]
