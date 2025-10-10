@@ -6,11 +6,8 @@
 use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
+    jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
     utils::{InstrKind, find_comment, parse_instr},
-    web_support::{
-        AccessToken, Component, ElementAsNode, ElementFactory, NodeRef, WithElement,
-        set_selection_range,
-    },
 };
 use anyhow::{Result, bail};
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
@@ -46,8 +43,6 @@ impl WithElement for CodeLine {
         self.contents.with_element(f, g)
     }
 }
-
-impl ElementAsNode for CodeLine {}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Position {

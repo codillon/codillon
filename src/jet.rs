@@ -15,7 +15,7 @@ use wasm_bindgen::closure::Closure;
 use web_sys::{HtmlBodyElement, KeyboardEvent, wasm_bindgen::JsCast};
 
 // Traits that give "raw" access to an underlying node or element,
-// only usable from the web_support module.
+// only usable from the jet (web support) module.
 struct _Private();
 pub struct AccessToken(_Private);
 const TOKEN: AccessToken = AccessToken(_Private());
@@ -38,9 +38,7 @@ pub trait WithElement {
     fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken);
 }
 
-pub trait ElementAsNode {}
-
-impl<T: WithElement + ElementAsNode> WithNode for T {
+impl<T: WithElement> WithNode for T {
     fn with_node(&self, mut f: impl FnMut(&web_sys::Node), g: AccessToken) {
         self.with_element(|elem| f(elem.as_ref()), g);
     }

@@ -1,9 +1,9 @@
 // A Codillon DOM "struct" (product type): a (possibly empty) collection
 // of heterogeneous Components of (possibly) different types.
 
-use crate::web_support::{
-    AccessToken, AnyElement, ArrayHandle, Component, ElementAsNode, ElementHandle,
-    InputEventHandle, NodeListHandle, WithElement,
+use crate::jet::{
+    AccessToken, AnyElement, ArrayHandle, Component, ElementHandle, InputEventHandle,
+    NodeListHandle, WithElement,
 };
 use delegate::delegate;
 
@@ -93,12 +93,10 @@ impl<Child: Structure, Element: AnyElement> Component for DomStruct<Child, Eleme
     }
 }
 
-// Accessors for the parent element (only usable by the web_support module).
+// Accessors for the parent element (only usable by the jet (web support) module).
 impl<Child: Structure, Element: AnyElement> WithElement for DomStruct<Child, Element> {
     type Element = Element;
     fn with_element(&self, f: impl FnMut(&Element), g: AccessToken) {
         self.elem.with_element(f, g);
     }
 }
-
-impl<Child: Structure, Element: AnyElement> ElementAsNode for DomStruct<Child, Element> {}
