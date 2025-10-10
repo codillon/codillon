@@ -13,28 +13,45 @@ use anyhow::{Result, bail};
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
 
 type DomBr = DomStruct<(), HtmlBrElement>;
-type Comment = DomStruct<(DomText, ()), HtmlSpanElement>;
-type LinePara = DomStruct<(DomText, (Comment, (DomBr, ()))), HtmlDivElement>;
+type TextSpan = DomStruct<(DomText, ()), HtmlSpanElement>;
+type LinePara = DomStruct<(TextSpan, (TextSpan, (DomBr, ()))), HtmlDivElement>;
 
+#[derive(Default, Clone)]
 pub struct LineInfo {
     pub kind: InstrKind,
     pub active: bool,
+    pub indent: Option<u16>,
 }
 
 impl LineInfo {
     pub fn new(kind: InstrKind, active: bool) -> Self {
-        Self { kind, active }
+        Self {
+            kind,
+            active,
+            indent: None,
+        }
     }
 
     pub fn is_instr(&self) -> bool {
         self.active && !matches!(self.kind, InstrKind::Empty | InstrKind::Malformed(_))
     }
+
+    pub fn is_structured(&self) -> bool {
+        self.active && matches!(self.kind, InstrKind::If | InstrKind::OtherStructured)
+    }
+}
+
+enum AnimationState {
+    Normal,
+    Shake(bool),
+    Reveal(bool),
+    FlyEnd(bool),
 }
 
 pub struct CodeLine {
     contents: LinePara,
     info: LineInfo,
-    animation_state: u8,
+    animation_state: AnimationState,
 }
 
 impl WithElement for CodeLine {
@@ -72,7 +89,7 @@ impl Position {
 
 impl Component for CodeLine {
     fn audit(&self) {
-        assert_eq!(self.info.kind, parse_instr(self.contents.get().0.get()));
+        assert_eq!(self.info.kind, parse_instr(self.instr().get()));
         assert_eq!(self.contents.get_attribute("class").unwrap(), &self.class());
         assert_eq!(
             self.contents.get().1.0.get_attribute("data-commentary"),
@@ -89,14 +106,14 @@ impl Component for CodeLine {
 
 impl CodeLine {
     pub fn instr(&self) -> &DomText {
-        &self.contents.get().0
+        &self.contents.get().0.get().0
     }
 
     fn instr_mut(&mut self) -> &mut DomText {
-        &mut self.contents.get_mut().0
+        &mut self.contents.get_mut().0.get_mut().0
     }
 
-    fn comment(&self) -> &DomText {
+    pub fn comment(&self) -> &DomText {
         &self.contents.get().1.0.get().0
     }
 
@@ -112,6 +129,11 @@ impl CodeLine {
         }
     }
 
+    pub fn all_whitespace(&self) -> bool {
+        self.instr().get().chars().all(|c| c.is_whitespace())
+            && self.comment().get().chars().all(|c| c.is_whitespace())
+    }
+
     pub fn get_position(&self, node: NodeRef, offset: usize) -> Result<Position> {
         let instr_end = Position::instr(self.instr().len_utf16());
 
@@ -125,7 +147,7 @@ impl CodeLine {
             });
         }
 
-        // Position in instruction, comment, or newline text nodes.
+        // Position in instruction or comment text nodes.
         if node.is_same_node(self.instr()) {
             if offset > self.instr().len_utf16() {
                 bail!("invalid offset");
@@ -141,8 +163,14 @@ impl CodeLine {
             });
         }
 
-        // Position in the "comment" span.
-        if node.is_same_node(&self.contents.get().1.0) {
+        // Position in the instruction or comment spans.
+        if node.is_same_node(&self.contents.get().0) {
+            return Ok(match offset {
+                0 => Position::begin(),
+                1 => instr_end,
+                _ => bail!("unexpected instr span position {offset}"),
+            });
+        } else if node.is_same_node(&self.contents.get().1.0) {
             return Ok(match offset {
                 0 => instr_end,
                 1 => self.end_position(),
@@ -165,17 +193,43 @@ impl CodeLine {
         }
         .to_string();
 
-        match self.animation_state {
-            1 => prefix + " strobe-a",
-            2 => prefix + " strobe-b",
-            _ => prefix,
+        use AnimationState::*;
+        fn ab(x: bool) -> &'static str {
+            if x { "a" } else { "b" }
         }
+
+        prefix
+            + &match self.animation_state {
+                Shake(x) => String::from(" shake-") + ab(x),
+                Reveal(x) => String::from(" reveal-") + ab(x),
+                FlyEnd(x) => String::from(" flyend-") + ab(x),
+                Normal => String::new(),
+            }
     }
 
-    pub fn strobe(&mut self) {
+    pub fn shake(&mut self) {
+        use AnimationState::*;
         self.animation_state = match self.animation_state {
-            1 => 2,
-            _ => 1,
+            Shake(false) => Shake(true),
+            _ => Shake(false),
+        };
+        self.conform_activity();
+    }
+
+    pub fn reveal(&mut self) {
+        use AnimationState::*;
+        self.animation_state = match self.animation_state {
+            Reveal(false) => Reveal(true),
+            _ => Reveal(false),
+        };
+        self.conform_activity();
+    }
+
+    pub fn fly_end(&mut self) {
+        use AnimationState::*;
+        self.animation_state = match self.animation_state {
+            FlyEnd(false) => FlyEnd(true),
+            _ => FlyEnd(false),
         };
         self.conform_activity();
     }
@@ -184,21 +238,19 @@ impl CodeLine {
         let mut ret = Self {
             contents: LinePara::new(
                 (
-                    DomText::new(contents),
+                    TextSpan::new((DomText::new(contents), ()), factory.span()),
                     (
-                        Comment::new((DomText::default(), ()), factory.span()),
+                        TextSpan::new((DomText::default(), ()), factory.span()),
                         (DomBr::new((), factory.br()), ()),
                     ),
                 ),
                 factory.div(),
             ),
-            info: LineInfo {
-                kind: InstrKind::Empty,
-                active: true,
-            },
-            animation_state: 0,
+            info: LineInfo::default(),
+            animation_state: AnimationState::Normal,
         };
 
+        ret.contents.get_mut().0.set_attribute("class", "instr");
         ret.contents.get_mut().1.0.set_attribute("class", "comment");
         ret.conform_to_text().unwrap();
 
@@ -335,5 +387,17 @@ impl CodeLine {
             true => self.instr(),
             false => self.comment(),
         }
+    }
+
+    // Returns whether the indentation of nonempty text was changed (used to trigger animations)
+    pub fn set_indent(&mut self, val: usize) -> bool {
+        let old_indent = self.info.indent;
+        self.info.indent = Some(val.try_into().unwrap_or(u16::MAX));
+        self.contents
+            .get_mut()
+            .0
+            .set_attribute("style", &format!("margin-left: {}px;", val * 25));
+
+        old_indent.is_some() && old_indent != self.info.indent && !self.all_whitespace()
     }
 }

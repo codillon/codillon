@@ -1,13 +1,13 @@
 @font-face {
    font-family: 'MLMRoman12-Regular';
-   src: url('/fonts/mlmr12.woff2') format('woff2'),
+   src: url('/fonts/mlmr12.woff2') format('woff2');
    font-weight: normal;
    font-style: normal;
 }
 
 @font-face {
    font-family: 'MLMSansDemiCond10-Regular';
-   src: url('/fonts/mlmssdc10.woff2') format('woff2'),
+   src: url('/fonts/mlmssdc10.woff2') format('woff2');
    font-weight: normal;
    font-style: normal;
 }
@@ -28,6 +28,8 @@ div.textentry {
     margin-left: 20pt;
     white-space: pre;
     counter-reset: codelines;
+    display: grid;
+    grid-auto-rows: var(--codillon-line-spacing);
 }
 
 div.textentry:focus {
@@ -56,7 +58,7 @@ div.textentry:focus {
     font-size: 20pt;
     color: darkred;
     display: inline-block;
-    width: 2em;
+    width: 50px;
     text-align: right;
 
     content: "\1d11e    ";
@@ -66,7 +68,7 @@ div.textentry:focus {
     font-size: 20pt;
     color: gray;
     display: inline-block;
-    width: 2em;
+    width: 50px;
     text-align: right;
 
     content: "   ";
@@ -76,7 +78,7 @@ div.textentry:focus {
     font-size: 20pt;
     color: gray;
     display: inline-block;
-    width: 2em;
+    width: 50px;
     text-align: right;
 
     content: "   ";
@@ -86,10 +88,14 @@ div.textentry:focus {
     font-size: 20pt;
     color: gray;
     display: inline-block;
-    width: 2em;
+    width: 50px;
     text-align: right;
 
     content: counter(codelines) "   ";
+}
+
+span.instr {
+    transition: 0.2s;
 }
 
 span.comment {
@@ -111,11 +117,11 @@ div.malformed-line span.comment::after {
     content: attr(data-commentary);
 }
 
-.strobe-a {
+.shake-a {
     animation: shake-a 0.25s;
 }
 
-.strobe-b {
+.shake-b {
     animation: shake-b 0.25s;
 }
 
@@ -133,4 +139,62 @@ div.malformed-line span.comment::after {
  50% { transform: translateX(-5px) }
  75% { transform: translateX(5px) }
  100% { transform: translateX(0) }
+}
+
+.reveal-a {
+    animation: reveal-a 0.25s;
+}
+
+.reveal-b {
+    animation: reveal-b 0.25s;
+}
+
+@keyframes reveal-a {
+    0% { transform: scaleY(0%) }
+    100% { transform: scaleY(100%) }
+}
+
+@keyframes reveal-b {
+    0% { transform: scaleY(0%) }
+    100% { transform: scaleY(100%) }
+}
+
+.flyend-a .instr::before {
+    display: inline-block;
+    content: "end";
+    animation: flyend-a 0.25s;
+    transform: translateY(20px) scaleY(0%);
+    width: 0px;
+}
+
+.flyend-b .instr::before {
+    display: inline-block;
+    content: "end";
+    animation: flyend-b 0.25s;
+    transform: translateY(20px) scaleY(0%);
+    width: 0px;
+}
+
+@keyframes flyend-a {
+    0% { transform: translateY(var(--codillon-line-spacing)) scaleY(100%) }
+    100% { transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%) }
+}
+
+@keyframes flyend-b {
+    0% { transform: translateY(var(--codillon-line-spacing)) scaleY(100%) }
+    100% { transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%) }
+}
+
+.annotations {
+    position: absolute;
+}
+
+.animated .annotation {
+    transition: all 0.25s;
+}
+
+.annotation {
+    transform-origin: top;
+    transform-box: fill-box;
+    transform: scaleY(0) translateX(0) translateY(0);
 }
