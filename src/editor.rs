@@ -340,7 +340,9 @@ impl Editor {
         let text = self
             .instructions_as_text()
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
-        self.0.borrow_mut().module = OkModule::build(str_to_binary(text)?, self)?;
+        let wasm_bin = str_to_binary(text)?;
+        Self::execute(&wasm_bin);
+        self.0.borrow_mut().module = OkModule::build(wasm_bin, self)?;
 
         // log instruction types (TODO: integrate into OkModule)
         let _ = collect_operands(
@@ -355,6 +357,38 @@ impl Editor {
         }
 
         Ok(())
+    }
+
+    fn execute(binary: &[u8]) {
+        async fn run_binary(binary: &[u8]) -> Result<String, wasm_bindgen::JsValue> {
+            use js_sys::{Function, Reflect};
+            use wasm_bindgen::JsValue;
+            let promise = js_sys::WebAssembly::instantiate_buffer(binary, &js_sys::Object::new());
+            let js_value = wasm_bindgen_futures::JsFuture::from(promise).await?;
+            let instance = Reflect::get(&js_value, &JsValue::from_str("instance"))
+                .map_err(|_| "failed to get instance")?;
+            let exports = Reflect::get(&instance, &JsValue::from_str("exports"))
+                .map_err(|_| "failed to get exports")?;
+            let main = Reflect::get(&exports, &JsValue::from_str("main"))
+                .map_err(|_| "failed to get main function")?;
+            let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
+                .ok_or("main is not an exported function")?;
+            let res = main.apply(&JsValue::null(), &js_sys::Array::new())?;
+            let string = js_sys::JSON::stringify(&res)?;
+            let string = string
+                .as_string()
+                .ok_or(JsValue::from("stringify did not return string"))?;
+
+            Ok(string)
+        }
+
+        let binary = binary.to_vec();
+        wasm_bindgen_futures::spawn_local(async move {
+            match run_binary(&binary).await {
+                Ok(v) => web_sys::console::log_1(&format!("Ran successfully: {}", v).into()),
+                Err(e) => web_sys::console::log_1(&e),
+            }
+        });
     }
 }
 
