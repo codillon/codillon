@@ -3,9 +3,9 @@
 use crate::{
     dom_vec::DomVec,
     jet::{
-        AccessToken, Component, ElementFactory, InputEventHandle, NodeRef, RangeLike,
-        StaticRangeHandle, WithElement, compare_document_position, get_selection,
-        set_selection_range,
+        AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
+        RangeLike, ReactiveComponent, StaticRangeHandle, WithElement, compare_document_position,
+        get_selection, set_selection_range,
     },
     line::{CodeLine, LineInfo, Position},
     utils::{
@@ -25,7 +25,7 @@ type ComponentType = DomVec<CodeLine, HtmlDivElement>;
 struct _Editor {
     module: OkModule,
     synthetic_ends: usize,
-    component: ComponentType,
+    text: ReactiveComponent<ComponentType>,
     factory: ElementFactory,
 }
 
@@ -36,25 +36,26 @@ impl Editor {
         let mut inner = _Editor {
             module: OkModule::default(),
             synthetic_ends: 0,
-            component: DomVec::new(factory.div()),
+            text: ReactiveComponent::new(DomVec::new(factory.div())),
             factory,
         };
 
-        inner.component.set_attribute("class", "textentry");
-        inner.component.set_attribute("contenteditable", "true");
-        inner.component.set_attribute("spellcheck", "false");
+        let component = inner.text.inner_mut();
+        component.set_attribute("class", "textentry");
+        component.set_attribute("contenteditable", "true");
+        component.set_attribute("spellcheck", "false");
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
 
         let editor_ref = Rc::clone(&ret.0);
-        ret.component_mut().set_onbeforeinput(move |ev| {
+        ret.0.borrow_mut().text.set_onbeforeinput(move |ev| {
             Editor(editor_ref.clone())
                 .handle_input(ev)
                 .expect("input handler")
         });
 
         let editor_ref = Rc::clone(&ret.0);
-        ret.component_mut().set_onkeydown(move |ev| {
+        ret.0.borrow_mut().text.set_onkeydown(move |ev| {
             Editor(editor_ref.clone())
                 .handle_keydown(ev)
                 .expect("keydown handler")
@@ -305,11 +306,11 @@ impl Editor {
 
     // Accessors for the component and for a particular line of code
     fn component(&self) -> Ref<'_, ComponentType> {
-        Ref::map(self.0.borrow(), |c| &c.component)
+        Ref::map(self.0.borrow(), |c| c.text.inner())
     }
 
     fn component_mut(&mut self) -> RefMut<'_, ComponentType> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component)
+        RefMut::map(self.0.borrow_mut(), |c| c.text.inner_mut())
     }
 
     fn line(&self, idx: usize) -> Ref<'_, CodeLine> {
@@ -454,6 +455,6 @@ impl WithElement for Editor {
 
 impl Component for Editor {
     fn audit(&self) {
-        self.component().audit()
+        self.0.borrow().text.audit()
     }
 }

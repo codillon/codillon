@@ -12,7 +12,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::{HtmlBodyElement, KeyboardEvent, wasm_bindgen::JsCast};
+use web_sys::{Element, HtmlBodyElement, HtmlElement, KeyboardEvent, wasm_bindgen::JsCast};
 
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the jet (web support) module.
@@ -25,13 +25,13 @@ pub trait WithNode {
 }
 
 // Any HTML element
-pub trait AnyElement: AsRef<web_sys::HtmlElement> + AsRef<web_sys::Node> {
-    fn element(&self) -> &web_sys::HtmlElement {
+pub trait AnyElement: AsRef<Element> + AsRef<web_sys::Node> {
+    fn element(&self) -> &Element {
         self.as_ref()
     }
 }
 
-impl<T: AsRef<web_sys::HtmlElement> + AsRef<web_sys::Node>> AnyElement for T {}
+impl<T: AsRef<Element> + AsRef<web_sys::Node>> AnyElement for T {}
 
 pub trait WithElement {
     type Element: AnyElement;
@@ -116,13 +116,13 @@ impl TextHandle {
 
 // Event handlers on an element
 #[derive(Default)]
-struct Handlers {
+pub struct Handlers {
     beforeinput: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
     keydown: Option<Closure<dyn Fn(web_sys::KeyboardEvent)>>,
 }
 
 impl Handlers {
-    pub fn audit(&self, elem: &impl AsRef<web_sys::HtmlElement>) {
+    pub fn audit(&self, elem: &impl AsRef<HtmlElement>) {
         audit_handler(&self.beforeinput, elem.as_ref().onbeforeinput());
         audit_handler(&self.keydown, elem.as_ref().onkeydown());
 
@@ -140,6 +140,136 @@ impl Handlers {
             }
         }
     }
+
+    pub fn set_onbeforeinput<E: WithElement, F: Fn(InputEventHandle) + 'static>(
+        &mut self,
+        elem: &mut E,
+        handler: F,
+    ) where
+        E::Element: AsRef<HtmlElement>,
+    {
+        self.beforeinput = Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
+        elem.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onbeforeinput(Some(
+                    self.beforeinput.as_ref().unwrap().as_ref().unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
+
+    pub fn set_onkeydown<E: WithElement, F: Fn(KeyboardEvent) + 'static>(
+        &mut self,
+        elem: &mut E,
+        handler: F,
+    ) where
+        E::Element: AsRef<HtmlElement>,
+    {
+        self.keydown = Some(Closure::new(handler));
+        elem.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onkeydown(Some(
+                    self.keydown.as_ref().unwrap().as_ref().unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
+}
+
+pub struct ReactiveComponent<T: ElementComponent> {
+    component: T,
+    handlers: Handlers,
+}
+
+impl<T: ElementComponent> ReactiveComponent<T>
+where
+    T::Element: AsRef<HtmlElement>,
+{
+    pub fn new(component: T) -> Self {
+        Self {
+            component,
+            handlers: Handlers::default(),
+        }
+    }
+
+    pub fn inner(&self) -> &T {
+        &self.component
+    }
+
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.component
+    }
+}
+
+pub trait ControlHandlers {
+    fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
+    fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F);
+}
+
+impl<T: ElementComponent> ControlHandlers for ReactiveComponent<T>
+where
+    T::Element: AsRef<HtmlElement>,
+{
+    fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F) {
+        self.handlers.beforeinput = Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
+        self.component.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onbeforeinput(Some(
+                    self.handlers
+                        .beforeinput
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
+    fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F) {
+        self.handlers.keydown = Some(Closure::new(handler));
+        self.component.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onkeydown(Some(
+                    self.handlers
+                        .keydown
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
+}
+
+impl<T: ElementComponent> Component for ReactiveComponent<T>
+where
+    T::Element: AsRef<HtmlElement>,
+{
+    fn audit(&self) {
+        self.component.audit();
+        self.component.with_element(
+            |elem| {
+                self.handlers.audit(&elem);
+            },
+            TOKEN,
+        );
+    }
+}
+
+impl<T: ElementComponent> WithElement for ReactiveComponent<T> {
+    type Element = T::Element;
+    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
+        self.component.with_element(f, g)
+    }
 }
 
 // Wrapper for a DOM Element, allowing access to and modification of its attributes
@@ -147,7 +277,6 @@ impl Handlers {
 pub struct ElementHandle<T: AnyElement> {
     elem: AutoRemove<T>,
     attributes: HashMap<String, String>,
-    event_handlers: Handlers,
 }
 
 impl<T: AnyElement> WithElement for ElementHandle<T> {
@@ -162,7 +291,6 @@ impl<T: AnyElement> ElementHandle<T> {
         Self {
             elem: elem.into(),
             attributes: HashMap::default(),
-            event_handlers: Handlers::default(),
         }
     }
 
@@ -228,37 +356,10 @@ impl<T: AnyElement> ElementHandle<T> {
         for dom_key in self.elem.element().get_attribute_names() {
             assert!(self.attributes.contains_key(&dom_key.as_string().unwrap()));
         }
-
-        self.event_handlers.audit(self.elem.element());
     }
 
     pub fn get_child_node_list(&self) -> NodeListHandle {
         NodeListHandle(self.elem.element().child_nodes())
-    }
-
-    pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F) {
-        self.event_handlers.beforeinput =
-            Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
-        self.elem.element().set_onbeforeinput(Some(
-            self.event_handlers
-                .beforeinput
-                .as_ref()
-                .unwrap()
-                .as_ref()
-                .unchecked_ref(),
-        ));
-    }
-
-    pub fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F) {
-        self.event_handlers.keydown = Some(Closure::new(handler));
-        self.elem.element().set_onkeydown(Some(
-            self.event_handlers
-                .keydown
-                .as_ref()
-                .unwrap()
-                .as_ref()
-                .unchecked_ref(),
-        ));
     }
 
     pub fn scroll_into_view(&self) {

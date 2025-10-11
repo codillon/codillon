@@ -1,8 +1,6 @@
 // A Codillon DOM "vector": a variable-length collection of Components of the same type
 
-use crate::jet::{
-    AccessToken, AnyElement, Component, ElementHandle, InputEventHandle, WithElement,
-};
+use crate::jet::{AccessToken, AnyElement, Component, ElementHandle, WithElement};
 use delegate::delegate;
 
 pub struct DomVec<Child: Component, Element: AnyElement> {
@@ -62,8 +60,6 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
     pub fn set_attribute(&mut self, name: &str, value: &str);
     pub fn remove_attribute(&mut self, name: &str);
     pub fn get_attribute(&self, name: &str) -> Option<&String>;
-    pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
-    pub fn set_onkeydown<F: Fn(web_sys::KeyboardEvent) + 'static>(&mut self, handler: F);
     pub fn scroll_into_view(&self);
     }
     }
