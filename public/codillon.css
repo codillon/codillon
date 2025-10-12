@@ -134,3 +134,7 @@ div.malformed-line span.comment::after {
  75% { transform: translateX(5px) }
  100% { transform: translateX(0) }
 }
+
+.annotations {
+    position: absolute;
+}
