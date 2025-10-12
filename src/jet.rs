@@ -441,6 +441,14 @@ impl ElementFactory {
             .unwrap_or_else(|_| panic!("expecting {t} element"))
     }
 
+    fn create_svg_element<T: JsCast>(&self, t: &str) -> T {
+        self.0
+            .create_element_ns(Some("http://www.w3.org/2000/svg"), t)
+            .unwrap()
+            .dyn_into::<T>()
+            .unwrap_or_else(|_| panic!("expecting {t} element"))
+    }
+
     pub fn div(&self) -> ElementHandle<web_sys::HtmlDivElement> {
         ElementHandle::new(self.create_element("div"))
     }
@@ -459,6 +467,10 @@ impl ElementFactory {
 
     pub fn body(&self) -> ElementHandle<web_sys::HtmlBodyElement> {
         ElementHandle::new(self.create_element("body"))
+    }
+
+    pub fn svg(&self) -> ElementHandle<web_sys::SvgElement> {
+        ElementHandle::new(self.create_svg_element("svg"))
     }
 }
 
