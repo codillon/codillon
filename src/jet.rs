@@ -472,6 +472,10 @@ impl ElementFactory {
     pub fn svg(&self) -> ElementHandle<web_sys::SvgElement> {
         ElementHandle::new(self.create_svg_element("svg"))
     }
+
+    pub fn svg_line(&self) -> ElementHandle<web_sys::SvgLineElement> {
+        ElementHandle::new(self.create_svg_element("line"))
+    }
 }
 
 // Wrapper for a DOM NodeList, allowing audit that each entry matches an expected node.
