@@ -79,6 +79,9 @@ impl Editor {
         ret.push_line("i32.add");
         ret.push_line("drop");
 
+        let height = 40 * ret.text().len();
+        ret.image_mut().set_attribute("height", &height.to_string());
+
         ret
     }
 
