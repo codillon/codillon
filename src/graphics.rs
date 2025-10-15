@@ -17,13 +17,12 @@ impl DomImage {
         };
 
         let mut line = factory.svg_line();
-        line.set_attribute("x1", "50");
-        line.set_attribute("x2", "200");
+        line.set_attribute("x1", "70");
+        line.set_attribute("x2", "70");
         line.set_attribute("y1", "50");
-        line.set_attribute("y2", "200");
-        line.set_attribute("stroke", "purple");
-        line.set_attribute("stroke-width", "15");
-        line.set_attribute("stroke-opacity", "20%");
+        line.set_attribute("y2", "120");
+        line.set_attribute("stroke", "darkblue");
+        line.set_attribute("stroke-width", "3");
         ret.lines.push(line);
 
         ret.elem.attach_node(&ret.lines[0]);

@@ -1,13 +1,13 @@
 @font-face {
    font-family: 'MLMRoman12-Regular';
-   src: url('/fonts/mlmr12.woff2') format('woff2'),
+   src: url('/fonts/mlmr12.woff2') format('woff2');
    font-weight: normal;
    font-style: normal;
 }
 
 @font-face {
    font-family: 'MLMSansDemiCond10-Regular';
-   src: url('/fonts/mlmssdc10.woff2') format('woff2'),
+   src: url('/fonts/mlmssdc10.woff2') format('woff2');
    font-weight: normal;
    font-style: normal;
 }
@@ -28,6 +28,8 @@ div.textentry {
     margin-left: 20pt;
     white-space: pre;
     counter-reset: codelines;
+    display: grid;
+    grid-auto-rows: 40px;
 }
 
 div.textentry:focus {
