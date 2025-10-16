@@ -475,6 +475,10 @@ impl LineInfosMut for Editor {
     fn set_synthetic_ends(&mut self, num: usize) {
         self.0.borrow_mut().synthetic_ends = num;
     }
+
+    fn set_indent(&mut self, index: usize, num: u16) {
+        self.line_mut(index).set_indent(num)
+    }
 }
 
 impl WithElement for Editor {

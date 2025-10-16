@@ -331,8 +331,11 @@ impl<T: AnyElement> ElementHandle<T> {
     }
 
     pub fn set_attribute(&mut self, name: &str, value: &str) {
-        self.attributes.insert(name.to_string(), value.to_string());
-        self.elem.element().set_attribute(name, value).unwrap();
+        match self.attributes.insert(name.to_string(), value.to_string()) {
+            None => self.elem.element().set_attribute(name, value).unwrap(),
+            Some(x) if x != value => self.elem.element().set_attribute(name, value).unwrap(),
+            _ => {}
+        }
     }
 
     pub fn remove_attribute(&mut self, name: &str) {

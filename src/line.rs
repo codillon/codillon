@@ -13,8 +13,8 @@ use anyhow::{Result, bail};
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
 
 type DomBr = DomStruct<(), HtmlBrElement>;
-type Comment = DomStruct<(DomText, ()), HtmlSpanElement>;
-type LinePara = DomStruct<(DomText, (Comment, (DomBr, ()))), HtmlDivElement>;
+type TextSpan = DomStruct<(DomText, ()), HtmlSpanElement>;
+type LinePara = DomStruct<(TextSpan, (TextSpan, (DomBr, ()))), HtmlDivElement>;
 
 pub struct LineInfo {
     pub kind: InstrKind,
@@ -35,6 +35,7 @@ pub struct CodeLine {
     contents: LinePara,
     info: LineInfo,
     animation_state: u8,
+    indent: u16,
 }
 
 impl WithElement for CodeLine {
@@ -72,7 +73,7 @@ impl Position {
 
 impl Component for CodeLine {
     fn audit(&self) {
-        assert_eq!(self.info.kind, parse_instr(self.contents.get().0.get()));
+        assert_eq!(self.info.kind, parse_instr(self.instr().get()));
         assert_eq!(self.contents.get_attribute("class").unwrap(), &self.class());
         assert_eq!(
             self.contents.get().1.0.get_attribute("data-commentary"),
@@ -89,11 +90,11 @@ impl Component for CodeLine {
 
 impl CodeLine {
     pub fn instr(&self) -> &DomText {
-        &self.contents.get().0
+        &self.contents.get().0.get().0
     }
 
     fn instr_mut(&mut self) -> &mut DomText {
-        &mut self.contents.get_mut().0
+        &mut self.contents.get_mut().0.get_mut().0
     }
 
     fn comment(&self) -> &DomText {
@@ -125,7 +126,7 @@ impl CodeLine {
             });
         }
 
-        // Position in instruction, comment, or newline text nodes.
+        // Position in instruction or comment text nodes.
         if node.is_same_node(self.instr()) {
             if offset > self.instr().len_utf16() {
                 bail!("invalid offset");
@@ -141,8 +142,14 @@ impl CodeLine {
             });
         }
 
-        // Position in the "comment" span.
-        if node.is_same_node(&self.contents.get().1.0) {
+        // Position in the instruction or comment spans.
+        if node.is_same_node(&self.contents.get().0) {
+            return Ok(match offset {
+                0 => Position::begin(),
+                1 => instr_end,
+                _ => bail!("unexpected instr span position {offset}"),
+            });
+        } else if node.is_same_node(&self.contents.get().1.0) {
             return Ok(match offset {
                 0 => instr_end,
                 1 => self.end_position(),
@@ -184,9 +191,9 @@ impl CodeLine {
         let mut ret = Self {
             contents: LinePara::new(
                 (
-                    DomText::new(contents),
+                    TextSpan::new((DomText::new(contents), ()), factory.span()),
                     (
-                        Comment::new((DomText::default(), ()), factory.span()),
+                        TextSpan::new((DomText::default(), ()), factory.span()),
                         (DomBr::new((), factory.br()), ()),
                     ),
                 ),
@@ -197,8 +204,10 @@ impl CodeLine {
                 active: true,
             },
             animation_state: 0,
+            indent: 0,
         };
 
+        ret.contents.get_mut().0.set_attribute("class", "instr");
         ret.contents.get_mut().1.0.set_attribute("class", "comment");
         ret.conform_to_text().unwrap();
 
@@ -335,5 +344,17 @@ impl CodeLine {
             true => self.instr(),
             false => self.comment(),
         }
+    }
+
+    pub fn indent(&self) -> u16 {
+        self.indent
+    }
+
+    pub fn set_indent(&mut self, val: u16) {
+        self.indent = val;
+        self.contents
+            .get_mut()
+            .0
+            .set_attribute("style", &format!("margin-left: {}px;", self.indent * 25));
     }
 }
