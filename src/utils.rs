@@ -257,6 +257,7 @@ pub trait LineInfos {
 pub trait LineInfosMut: LineInfos {
     fn set_active_status(&mut self, index: usize, is_active: bool);
     fn set_synthetic_ends(&mut self, num: usize);
+    fn set_indent(&mut self, index: usize, num: u16);
 }
 
 /// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
@@ -266,6 +267,7 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
 
     for i in 0..instrs.len() {
         let mut is_active: bool = true;
+        let mut indentation = frame_stack.len();
         match instrs.info(i).kind {
             InstrKind::If => frame_stack.push(InstrKind::If),
             InstrKind::OtherStructured => frame_stack.push(InstrKind::OtherStructured),
@@ -274,6 +276,7 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
                     && *frame_entry == InstrKind::If
                 {
                     frame_stack.pop();
+                    indentation = frame_stack.len();
                     frame_stack.push(InstrKind::Else);
                 } else {
                     is_active = false;
@@ -284,15 +287,17 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
                     is_active = false;
                 } else {
                     frame_stack.pop();
+                    indentation = frame_stack.len();
                 }
             }
             InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => (),
         }
 
         instrs.set_active_status(i, is_active);
+        instrs.set_indent(i, indentation.try_into().unwrap_or(u16::MAX));
     }
 
-    instrs.set_synthetic_ends(frame_stack.len())
+    instrs.set_synthetic_ends(frame_stack.len());
 }
 
 /// Match frames for (Instruction or empty).
