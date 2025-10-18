@@ -117,11 +117,11 @@ div.malformed-line span.comment::after {
     content: attr(data-commentary);
 }
 
-.strobe-a {
+.shake-a {
     animation: shake-a 0.25s;
 }
 
-.strobe-b {
+.shake-b {
     animation: shake-b 0.25s;
 }
 
@@ -139,6 +139,28 @@ div.malformed-line span.comment::after {
  50% { transform: translateX(-5px) }
  75% { transform: translateX(5px) }
  100% { transform: translateX(0) }
+}
+
+.reveal {
+    animation: reveal 0.25s;
+}
+
+@keyframes reveal {
+    0% { transform: scaleY(0%) }
+    100% { transform: scaleY(100%) }
+}
+
+.flyend .instr::before {
+    display: inline-block;
+    content: "end";
+    animation: flyend 0.25s;
+    transform: translateY(20px) scaleY(0%);
+    width: 0px;
+}
+
+@keyframes flyend {
+    0% { transform: translateY(40px) scaleY(100%) }
+    100% { transform: translateY(20px) scaleY(0%) }
 }
 
 .annotations {

@@ -141,7 +141,7 @@ impl Editor {
                 if need_end {
                     let matching_end = CodeLine::new("end", &self.0.borrow().factory);
                     self.text_mut().insert(start_line + 1, matching_end);
-                    self.line_mut(start_line + 1).strobe();
+                    self.line_mut(start_line + 1).reveal();
                 }
             } else if was_structured && !is_structured {
                 // search for "deletable" matching end
@@ -151,7 +151,7 @@ impl Editor {
                     && self.line(start_line + 1).comment().is_empty()
                 {
                     self.text_mut().remove(start_line + 1);
-                    self.line_mut(start_line).strobe();
+                    self.line_mut(start_line).fly_end();
                 }
             }
 
@@ -205,7 +205,7 @@ impl Editor {
                 self.text_mut().remove_range(start_line, fixup_line + 1);
                 for (i, contents) in backup.iter().enumerate() {
                     let mut line = CodeLine::new(contents, &self.0.borrow().factory);
-                    line.strobe();
+                    line.shake();
                     self.text_mut().insert(start_line + i, line);
                 }
 

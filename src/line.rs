@@ -177,17 +177,29 @@ impl CodeLine {
         .to_string();
 
         match self.animation_state {
-            1 => prefix + " strobe-a",
-            2 => prefix + " strobe-b",
+            1 => prefix + " shake-a",
+            2 => prefix + " shake-b",
+            3 => prefix + " reveal",
+            4 => prefix + " flyend",
             _ => prefix,
         }
     }
 
-    pub fn strobe(&mut self) {
+    pub fn shake(&mut self) {
         self.animation_state = match self.animation_state {
             1 => 2,
             _ => 1,
         };
+        self.conform_activity();
+    }
+
+    pub fn reveal(&mut self) {
+        self.animation_state = 3;
+        self.conform_activity();
+    }
+
+    pub fn fly_end(&mut self) {
+        self.animation_state = 4;
         self.conform_activity();
     }
 
@@ -269,6 +281,7 @@ impl CodeLine {
         }
         // Update kind, commentary, and active status
         self.info.kind = parse_instr(self.instr().get());
+        self.animation_state = 0;
         self.conform_commentary();
         self.conform_activity();
         Ok(ws_bytes)
