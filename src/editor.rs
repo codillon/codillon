@@ -11,7 +11,8 @@ use crate::{
     },
     line::{CodeLine, LineInfo, Position},
     utils::{
-        FmtError, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames, str_to_binary,
+        FmtError, InstrKind, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames,
+        str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -121,9 +122,40 @@ impl Editor {
         }
 
         let mut new_cursor_pos = if start_line == end_line {
-            // Single-line edit
-            self.line_mut(start_line)
-                .replace_range(start_pos, end_pos, new_str)?
+            // Single-line edit.
+            // Should we add a "courtesy" end afterwards?
+            let was_structured = self.line(start_line).info().is_structured();
+            let new_pos = self
+                .line_mut(start_line)
+                .replace_range(start_pos, end_pos, new_str)?;
+            let is_structured = self.line(start_line).info().is_structured();
+
+            if !was_structured && is_structured {
+                // search for existing deactivated matching end
+                let mut need_end = true;
+                for i in start_line + 1..self.text().len() {
+                    if self.line(i).info().kind == InstrKind::End && !self.line(i).info().active {
+                        need_end = false;
+                    }
+                }
+                if need_end {
+                    let matching_end = CodeLine::new("end", &self.0.borrow().factory);
+                    self.text_mut().insert(start_line + 1, matching_end);
+                    self.line_mut(start_line + 1).strobe();
+                }
+            } else if was_structured && !is_structured {
+                // search for "deletable" matching end
+                if self.len() > start_line
+                    && self.line(start_line + 1).info().active
+                    && self.line(start_line + 1).info().kind == InstrKind::End
+                    && self.line(start_line + 1).comment().is_empty()
+                {
+                    self.text_mut().remove(start_line + 1);
+                    self.line_mut(start_line).strobe();
+                }
+            }
+
+            new_pos
         } else if start_line < end_line {
             // Multi-line edit.
 

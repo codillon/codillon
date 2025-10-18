@@ -29,6 +29,10 @@ impl LineInfo {
     pub fn is_instr(&self) -> bool {
         self.active && !matches!(self.kind, InstrKind::Empty | InstrKind::Malformed(_))
     }
+
+    pub fn is_structured(&self) -> bool {
+        self.active && matches!(self.kind, InstrKind::If | InstrKind::OtherStructured)
+    }
 }
 
 pub struct CodeLine {
@@ -97,7 +101,7 @@ impl CodeLine {
         &mut self.contents.get_mut().0.get_mut().0
     }
 
-    fn comment(&self) -> &DomText {
+    pub fn comment(&self) -> &DomText {
         &self.contents.get().1.0.get().0
     }
 
