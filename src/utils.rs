@@ -2,6 +2,11 @@ use crate::line::LineInfo;
 use anyhow::{Result, anyhow, bail};
 use self_cell::self_cell;
 use std::ops::{Deref, RangeInclusive};
+use wasm_encoder::{
+    CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
+    TypeSection,
+    reencode::{Reencode, RoundtripReencoder},
+};
 use wasm_tools::parse_binary_wasm;
 use wasmparser::{Operator, Parser, Payload, ValType, ValidPayload, Validator};
 use wast::{
@@ -72,11 +77,77 @@ impl OkModule {
     pub fn borrow_ops(&self) -> &Ops<'_> {
         self.borrow_dependent()
     }
+
+    pub fn build_executable_binary(&self) -> Result<Vec<u8>> {
+        const MAX_STEP_COUNT: i32 = 1000;
+
+        let mut module: wasm_encoder::Module = Default::default();
+
+        // Encode the type section.
+        let mut types = TypeSection::new();
+        let params = vec![];
+        let results = vec![];
+        types.ty().function(params, results);
+        module.section(&types);
+
+        // Encode the function section.
+        let mut functions = FunctionSection::new();
+        let type_index = 0;
+        functions.function(type_index);
+        module.section(&functions);
+
+        // Encode the global section.
+        let mut global = GlobalSection::new();
+        global.global(
+            wasm_encoder::GlobalType {
+                val_type: wasm_encoder::ValType::I32,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i32_const(0),
+        );
+        module.section(&global);
+
+        // Encode the export section.
+        let mut exports = ExportSection::new();
+        exports.export("main", wasm_encoder::ExportKind::Func, 0);
+        module.section(&exports);
+
+        // Encode the code section.
+        let mut codes = CodeSection::new();
+        let locals = vec![];
+        let mut f = wasm_encoder::Function::new(locals);
+        for (op, _) in self.borrow_ops() {
+            let instruction = RoundtripReencoder.instruction(op.clone())?;
+            // Instrument to prevent infinite execution.
+            f.instruction(&EncoderInstruction::GlobalGet(0));
+            f.instruction(&EncoderInstruction::I32Const(1));
+            f.instruction(&EncoderInstruction::I32Add);
+            f.instruction(&EncoderInstruction::GlobalSet(0));
+            f.instruction(&EncoderInstruction::GlobalGet(0));
+            f.instruction(&EncoderInstruction::I32Const(MAX_STEP_COUNT));
+            f.instruction(&EncoderInstruction::I32GtU);
+            f.instruction(&EncoderInstruction::If(wasm_encoder::BlockType::Empty));
+            // Throw unreachable if step count reached.
+            f.instruction(&EncoderInstruction::Unreachable);
+            f.instruction(&EncoderInstruction::End);
+            f.instruction(&instruction);
+        }
+        f.instruction(&EncoderInstruction::End);
+        codes.function(&f);
+        module.section(&codes);
+
+        let wasm = module.finish();
+        Ok(wasm)
+    }
 }
 
 pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
     let txt = format!("module (func (export \"main\")\n{s})");
-    Ok(parser::parse::<Module>(&ParseBuffer::new(&txt)?)?.encode()?)
+    let binding = ParseBuffer::new(&txt)?;
+    let mut module = parser::parse::<Module>(&binding)?;
+
+    Ok(module.encode()?)
 }
 
 #[derive(Debug, PartialEq, Eq)]

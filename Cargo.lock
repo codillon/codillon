@@ -247,6 +247,7 @@ dependencies = [
  "str_indices",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "wasm-encoder",
  "wasm-tools",
  "wasmparser",
  "wasmprinter",
