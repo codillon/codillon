@@ -11,8 +11,8 @@ use crate::{
     },
     line::{CodeLine, LineInfo, Position},
     utils::{
-        FmtError, InstrKind, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames,
-        str_to_binary,
+        FmtError, FrameInfo, InstrKind, LineInfos, LineInfosMut, OkModule, collect_operands,
+        fix_frames, str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -24,8 +24,7 @@ use std::{
 use web_sys::{HtmlDivElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
-type ImageType = DomImage;
-type ComponentType = DomStruct<(ImageType, (ReactiveComponent<TextType>, ())), HtmlDivElement>;
+type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), HtmlDivElement>;
 
 struct _Editor {
     module: OkModule,
@@ -43,7 +42,7 @@ impl Editor {
             synthetic_ends: 0,
             component: DomStruct::new(
                 (
-                    ImageType::new(&factory),
+                    DomImage::new(factory.clone()),
                     (ReactiveComponent::new(DomVec::new(factory.div())), ()),
                 ),
                 factory.div(),
@@ -508,8 +507,17 @@ impl LineInfosMut for Editor {
         self.0.borrow_mut().synthetic_ends = num;
     }
 
-    fn set_indent(&mut self, index: usize, num: u16) {
+    fn set_indent(&mut self, index: usize, num: usize) {
         self.line_mut(index).set_indent(num)
+    }
+
+    fn set_frame(&mut self, frame: &FrameInfo) {
+        self.image_mut()
+            .set_frame(frame.frame_num, frame.indent, frame.start, frame.end)
+    }
+
+    fn set_frame_count(&mut self, count: usize) {
+        self.image_mut().set_frame_count(count)
     }
 }
 

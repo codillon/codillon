@@ -32,10 +32,6 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         }
     }
 
-    pub fn remove(&mut self, index: usize) -> Child {
-        self.contents.remove(index)
-    }
-
     pub fn remove_range(&mut self, begin: usize, end: usize) {
         self.contents.drain(begin..end);
     }
@@ -47,6 +43,8 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
 
     delegate! {
     to self.contents {
+        pub fn truncate(&mut self, len: usize);
+        pub fn remove(&mut self, index: usize) -> Child;
         pub fn len(&self) -> usize;
         pub fn is_empty(&self) -> bool;
         pub fn get(&self, index: usize) -> Option<&Child>;

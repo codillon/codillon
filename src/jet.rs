@@ -402,6 +402,7 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> Default for Document
     }
 }
 
+#[derive(Clone)]
 pub struct ElementFactory(web_sys::Document);
 
 impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyType> {

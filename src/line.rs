@@ -367,8 +367,8 @@ impl CodeLine {
         self.indent
     }
 
-    pub fn set_indent(&mut self, val: u16) {
-        self.indent = val;
+    pub fn set_indent(&mut self, val: usize) {
+        self.indent = val.try_into().unwrap_or(u16::MAX);
         self.contents
             .get_mut()
             .0

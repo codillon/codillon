@@ -161,6 +161,22 @@ pub enum InstrKind {
     Malformed(String), // explanation
 }
 
+impl InstrKind {
+    fn stripped_clone(&self) -> InstrKind {
+        use InstrKind::*;
+
+        match self {
+            Malformed(_) => Malformed(String::new()),
+            If => If,
+            Else => Else,
+            End => End,
+            OtherStructured => OtherStructured,
+            Other => Other,
+            Empty => Empty,
+        }
+    }
+}
+
 impl From<Instruction<'_>> for InstrKind {
     fn from(instr: Instruction<'_>) -> Self {
         match instr {
@@ -325,50 +341,114 @@ pub trait LineInfos {
     fn synthetic_ends(&self) -> usize;
 }
 
+pub struct FrameInfo {
+    pub frame_num: usize,
+    pub indent: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
 pub trait LineInfosMut: LineInfos {
     fn set_active_status(&mut self, index: usize, is_active: bool);
     fn set_synthetic_ends(&mut self, num: usize);
-    fn set_indent(&mut self, index: usize, num: u16);
+    fn set_indent(&mut self, index: usize, num: usize);
+    fn set_frame(&mut self, frame: &FrameInfo);
+    fn set_frame_count(&mut self, count: usize);
 }
 
 /// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
 pub fn fix_frames(instrs: &mut impl LineInfosMut) {
-    // Use stacks as memory of frame begining borders.
-    let mut frame_stack: Vec<InstrKind> = Vec::new();
+    struct OpenFrame {
+        frame_num: usize,
+        line_no: usize,
+        kind: InstrKind,
+    }
 
-    for i in 0..instrs.len() {
-        let mut is_active: bool = true;
-        let mut indentation = frame_stack.len();
-        match instrs.info(i).kind {
-            InstrKind::If => frame_stack.push(InstrKind::If),
-            InstrKind::OtherStructured => frame_stack.push(InstrKind::OtherStructured),
+    let mut frame_stack: Vec<OpenFrame> = Vec::new();
+    let mut frame_count = 0;
+    let len = instrs.len();
+
+    for line_no in 0..instrs.len() {
+        let kind = instrs.info(line_no).kind.stripped_clone();
+        match kind {
+            InstrKind::If | InstrKind::OtherStructured => {
+                instrs.set_indent(line_no, frame_stack.len());
+                instrs.set_active_status(line_no, true);
+                frame_stack.push(OpenFrame {
+                    frame_num: frame_count,
+                    line_no,
+                    kind,
+                });
+                frame_count += 1;
+            }
             InstrKind::Else => {
-                if let Some(frame_entry) = frame_stack.last()
-                    && *frame_entry == InstrKind::If
+                if let Some(OpenFrame {
+                    frame_num,
+                    line_no: start,
+                    kind: InstrKind::If,
+                }) = frame_stack.last()
                 {
+                    instrs.set_frame(&FrameInfo {
+                        frame_num: *frame_num,
+                        indent: frame_stack.len() - 1,
+                        start: *start,
+                        end: line_no,
+                    });
                     frame_stack.pop();
-                    indentation = frame_stack.len();
-                    frame_stack.push(InstrKind::Else);
+                    instrs.set_indent(line_no, frame_stack.len());
+                    instrs.set_active_status(line_no, true);
+                    frame_stack.push(OpenFrame {
+                        frame_num: frame_count,
+                        line_no,
+                        kind,
+                    });
+                    frame_count += 1;
                 } else {
-                    is_active = false;
+                    instrs.set_indent(line_no, frame_stack.len());
+                    instrs.set_active_status(line_no, false);
                 }
             }
             InstrKind::End => {
-                if frame_stack.is_empty() {
-                    is_active = false;
+                if let Some(OpenFrame {
+                    frame_num,
+                    line_no: start,
+                    ..
+                }) = frame_stack.pop()
+                {
+                    instrs.set_indent(line_no, frame_stack.len());
+                    instrs.set_active_status(line_no, true);
+                    instrs.set_frame(&FrameInfo {
+                        frame_num,
+                        indent: frame_stack.len(),
+                        start,
+                        end: line_no,
+                    });
                 } else {
-                    frame_stack.pop();
-                    indentation = frame_stack.len();
+                    instrs.set_indent(line_no, frame_stack.len());
+                    instrs.set_active_status(line_no, false);
                 }
             }
-            InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => (),
+            InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => {
+                instrs.set_indent(line_no, frame_stack.len());
+                instrs.set_active_status(line_no, true);
+            }
         }
-
-        instrs.set_active_status(i, is_active);
-        instrs.set_indent(i, indentation.try_into().unwrap_or(u16::MAX));
     }
 
     instrs.set_synthetic_ends(frame_stack.len());
+    instrs.set_frame_count(frame_count);
+
+    while let Some(OpenFrame {
+        frame_num, line_no, ..
+    }) = frame_stack.pop()
+    {
+        instrs.set_frame(&FrameInfo {
+            frame_num,
+            indent: frame_stack.len(),
+            start: line_no,
+            end: len,
+        });
+    }
 }
 
 /// Match frames for (Instruction or empty).

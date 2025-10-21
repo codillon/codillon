@@ -58,7 +58,7 @@ div.textentry:focus {
     font-size: 20pt;
     color: darkred;
     display: inline-block;
-    width: 2em;
+    width: 50px;
     text-align: right;
 
     content: "\1d11e    ";
@@ -68,7 +68,7 @@ div.textentry:focus {
     font-size: 20pt;
     color: gray;
     display: inline-block;
-    width: 2em;
+    width: 50px;
     text-align: right;
 
     content: "   ";
@@ -78,7 +78,7 @@ div.textentry:focus {
     font-size: 20pt;
     color: gray;
     display: inline-block;
-    width: 2em;
+    width: 50px;
     text-align: right;
 
     content: "   ";
@@ -88,7 +88,7 @@ div.textentry:focus {
     font-size: 20pt;
     color: gray;
     display: inline-block;
-    width: 2em;
+    width: 50px;
     text-align: right;
 
     content: counter(codelines) "   ";
@@ -165,4 +165,11 @@ div.malformed-line span.comment::after {
 
 .annotations {
     position: absolute;
+}
+
+svg line {
+    transition: all 0.25s;
+    transform-origin: top;
+    transform-box: fill-box;
+    transform: scaleY(0);
 }
