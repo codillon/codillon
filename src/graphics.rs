@@ -25,25 +25,22 @@ impl FrameLine {
 
         ret.line.set_attribute("stroke", "darkgray");
         ret.line.set_attribute("stroke-width", "3px");
+        ret.line.set_attribute("x1", &"0px");
+        ret.line.set_attribute("x2", &"0px");
+        ret.line.set_attribute("y1", &"40px");
+        ret.line.set_attribute("y2", &"80px");
         ret.reconcile();
 
         ret
     }
 
     fn reconcile(&mut self) {
-        let x_pos = 95 + self.indent * 25;
-
-        self.line.set_attribute("x1", &format!("{x_pos}px"));
-        self.line.set_attribute("x2", &format!("{x_pos}px"));
-        self.line
-            .set_attribute("y1", &format!("{}px", (self.start_idx + 1) * 40));
-        self.line
-            .set_attribute("y2", &format!("{}px", (self.start_idx + 2) * 40));
-
         self.line.set_attribute(
             "style",
             &format!(
-                "transform: scaleY({});",
+                "transform: translateX({}px) translateY({}px) scaleY({});",
+                95 + self.indent * 25,
+                self.start_idx * 40,
                 (self.end_idx - self.start_idx - 1)
             ),
         );
