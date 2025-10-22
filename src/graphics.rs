@@ -1,11 +1,14 @@
 // A Codillon SVG component
 
 use crate::{
+    dom_struct::DomStruct,
     dom_vec::DomVec,
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement},
 };
 use delegate::delegate;
-use web_sys::{SvgElement, SvgLineElement};
+use web_sys::{
+    SvgDefsElement, SvgElement, SvgLineElement, SvgMarkerElement, SvgPathElement, SvggElement,
+};
 
 struct FrameLine {
     start_idx: usize,
@@ -25,10 +28,10 @@ impl FrameLine {
 
         ret.line.set_attribute("stroke", "darkgray");
         ret.line.set_attribute("stroke-width", "3px");
-        ret.line.set_attribute("x1", &"0px");
-        ret.line.set_attribute("x2", &"0px");
-        ret.line.set_attribute("y1", &"0px");
-        ret.line.set_attribute("y2", &"100px");
+        ret.line.set_attribute("x1", "0px");
+        ret.line.set_attribute("x2", "0px");
+        ret.line.set_attribute("y1", "0px");
+        ret.line.set_attribute("y2", "100px");
         ret.reconcile();
 
         ret
@@ -39,7 +42,7 @@ impl FrameLine {
         if total_len > 0.0 {
             total_len -= 15.0;
         }
-        let current_len = 100 as f64;
+        let current_len = 100.0;
 
         self.line.set_attribute(
             "style",
@@ -66,8 +69,14 @@ impl Component for FrameLine {
     }
 }
 
+type SVGPath = ElementHandle<SvgPathElement>;
+type SVGMarker = DomStruct<(SVGPath, ()), SvgMarkerElement>;
+type SVGDefs = DomVec<SVGMarker, SvgDefsElement>;
+type CodillonBlocks = DomVec<FrameLine, SvggElement>;
+type CodillonSVG = DomStruct<(SVGDefs, (CodillonBlocks, ())), SvgElement>;
+
 pub struct DomImage {
-    contents: DomVec<FrameLine, SvgElement>,
+    contents: CodillonSVG,
     height: usize,
     factory: ElementFactory,
 }
@@ -86,9 +95,23 @@ impl Component for DomImage {
 }
 
 impl DomImage {
+    fn blocks(&self) -> &CodillonBlocks {
+        &self.contents.get().1.0
+    }
+
+    fn blocks_mut(&mut self) -> &mut CodillonBlocks {
+        &mut self.contents.get_mut().1.0
+    }
+
     pub fn new(factory: ElementFactory) -> Self {
         Self {
-            contents: DomVec::new(factory.svg()),
+            contents: CodillonSVG::new(
+                (
+                    SVGDefs::new(factory.svg_defs()),
+                    (CodillonBlocks::new(factory.svg_g()), ()),
+                ),
+                factory.svg(),
+            ),
             height: 0,
             factory,
         }
@@ -104,7 +127,7 @@ impl DomImage {
 
     pub fn set_frame(&mut self, frame_num: usize, indentation: usize, start: usize, end: usize) {
         self.make_height_at_least(end + 1);
-        match self.contents.get_mut(frame_num) {
+        match self.blocks_mut().get_mut(frame_num) {
             Some(FrameLine {
                 start_idx,
                 end_idx,
@@ -118,10 +141,11 @@ impl DomImage {
                 frame_line.reconcile();
             }
             None => {
-                while self.contents.len() <= frame_num {
-                    self.contents.push(FrameLine::new(&self.factory, 0, 1, 0));
+                while self.blocks().len() <= frame_num {
+                    let blocks = &mut self.contents.get_mut().1.0;
+                    blocks.push(FrameLine::new(&self.factory, 0, 1, 0));
                 }
-                let f = &mut self.contents.get_mut(frame_num).unwrap();
+                let f = &mut self.blocks_mut().get_mut(frame_num).unwrap();
                 f.start_idx = start;
                 f.end_idx = end;
                 f.indent = indentation;
@@ -131,7 +155,7 @@ impl DomImage {
     }
 
     pub fn set_frame_count(&mut self, count: usize) {
-        self.contents.truncate(count);
+        self.blocks_mut().truncate(count);
     }
 
     delegate! {

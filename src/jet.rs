@@ -347,20 +347,6 @@ impl<T: AnyElement> ElementHandle<T> {
         self.attributes.get(name)
     }
 
-    pub fn audit(&self) {
-        for (key, value) in &self.attributes {
-            if let Some(dom_value) = self.elem.element().get_attribute(key) {
-                assert_eq!(dom_value, *value);
-            } else {
-                panic!("missing {key} (expected value {value})");
-            }
-        }
-
-        for dom_key in self.elem.element().get_attribute_names() {
-            assert!(self.attributes.contains_key(&dom_key.as_string().unwrap()));
-        }
-    }
-
     pub fn get_child_node_list(&self) -> NodeListHandle {
         NodeListHandle(self.elem.element().child_nodes())
     }
@@ -372,6 +358,22 @@ impl<T: AnyElement> ElementHandle<T> {
         self.elem
             .element()
             .scroll_into_view_with_scroll_into_view_options(&opts);
+    }
+}
+
+impl<T: AnyElement> Component for ElementHandle<T> {
+    fn audit(&self) {
+        for (key, value) in &self.attributes {
+            if let Some(dom_value) = self.elem.element().get_attribute(key) {
+                assert_eq!(dom_value, *value);
+            } else {
+                panic!("missing {key} (expected value {value})");
+            }
+        }
+
+        for dom_key in self.elem.element().get_attribute_names() {
+            assert!(self.attributes.contains_key(&dom_key.as_string().unwrap()));
+        }
     }
 }
 
@@ -479,6 +481,22 @@ impl ElementFactory {
 
     pub fn svg_line(&self) -> ElementHandle<web_sys::SvgLineElement> {
         ElementHandle::new(self.create_svg_element("line"))
+    }
+
+    pub fn svg_defs(&self) -> ElementHandle<web_sys::SvgDefsElement> {
+        ElementHandle::new(self.create_svg_element("defs"))
+    }
+
+    pub fn svg_marker(&self) -> ElementHandle<web_sys::SvgMarkerElement> {
+        ElementHandle::new(self.create_svg_element("marker"))
+    }
+
+    pub fn svg_path(&self) -> ElementHandle<web_sys::SvgPathElement> {
+        ElementHandle::new(self.create_svg_element("path"))
+    }
+
+    pub fn svg_g(&self) -> ElementHandle<web_sys::SvggElement> {
+        ElementHandle::new(self.create_svg_element("g"))
     }
 }
 
