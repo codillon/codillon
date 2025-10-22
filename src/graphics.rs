@@ -27,21 +27,27 @@ impl FrameLine {
         ret.line.set_attribute("stroke-width", "3px");
         ret.line.set_attribute("x1", &"0px");
         ret.line.set_attribute("x2", &"0px");
-        ret.line.set_attribute("y1", &"40px");
-        ret.line.set_attribute("y2", &"80px");
+        ret.line.set_attribute("y1", &"0px");
+        ret.line.set_attribute("y2", &"100px");
         ret.reconcile();
 
         ret
     }
 
     fn reconcile(&mut self) {
+        let mut total_len = 40.0 * (self.end_idx - self.start_idx - 1) as f64;
+        if total_len > 0.0 {
+            total_len -= 15.0;
+        }
+        let current_len = 100 as f64;
+
         self.line.set_attribute(
             "style",
             &format!(
                 "transform: translateX({}px) translateY({}px) scaleY({});",
-                95 + self.indent * 25,
-                self.start_idx * 40,
-                (self.end_idx - self.start_idx - 1)
+                92 + self.indent * 25,
+                40 + self.start_idx * 40 + 15,
+                total_len / current_len
             ),
         );
     }
