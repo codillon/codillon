@@ -2,19 +2,26 @@
 
 use crate::{
     dom_struct::DomStruct,
+    dom_switch::DomSwitch,
     dom_vec::DomVec,
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement},
+    utils::FrameInfo,
 };
 use delegate::delegate;
-use web_sys::{
-    SvgDefsElement, SvgElement, SvgLineElement, SvgMarkerElement, SvgPathElement, SvggElement,
-};
+use web_sys::{SvgCircleElement, SvgElement, SvgLineElement, SvggElement};
 
 struct FrameLine {
     start_idx: usize,
     end_idx: usize,
     indent: usize,
-    line: ElementHandle<SvgLineElement>,
+    unclosed: bool,
+    display: DomStruct<
+        (
+            ElementHandle<SvgLineElement>,
+            (DomSwitch<ElementHandle<SvgCircleElement>, SvggElement>, ()),
+        ),
+        SvggElement,
+    >,
 }
 
 impl FrameLine {
@@ -23,60 +30,96 @@ impl FrameLine {
             start_idx,
             end_idx,
             indent,
-            line: factory.svg_line(),
+            unclosed: false,
+            display: DomStruct::new(
+                (
+                    factory.svg_line(),
+                    (DomSwitch::new(factory.svg_circle(), factory.svg_g()), ()),
+                ),
+                factory.svg_g(),
+            ),
         };
 
-        ret.line.set_attribute("stroke", "darkgray");
-        ret.line.set_attribute("stroke-width", "3px");
-        ret.line.set_attribute("x1", "0px");
-        ret.line.set_attribute("x2", "0px");
-        ret.line.set_attribute("y1", "0px");
-        ret.line.set_attribute("y2", "100px");
+        let circle = &mut ret.display.get_mut().1.0.inner_mut();
+        circle.set_attribute("cx", "0");
+        circle.set_attribute("cy", "0");
+        circle.set_attribute("r", "5");
+        circle.set_attribute("fill", "white");
+        circle.set_attribute("stroke", "darkred");
+        circle.set_attribute("stroke-width", "2");
+
+        let line = &mut ret.display.get_mut().0;
+        line.set_attribute("stroke", "darkgray");
+        line.set_attribute("stroke-width", "3px");
+        line.set_attribute("x1", "0px");
+        line.set_attribute("x2", "0px");
+        line.set_attribute("y1", "0px");
+        line.set_attribute("y2", "100px");
+
         ret.reconcile();
 
         ret
     }
 
+    fn update(&mut self, info: &FrameInfo) {
+        self.start_idx = info.start;
+        self.end_idx = info.end;
+        self.indent = info.indent;
+        self.unclosed = info.unclosed;
+        self.reconcile();
+    }
+
     fn reconcile(&mut self) {
         let mut total_len = 40.0 * (self.end_idx - self.start_idx - 1) as f64;
         if total_len > 0.0 {
-            total_len -= 15.0;
+            total_len -= 12.0;
+        }
+        if self.unclosed {
+            total_len += 8.0;
         }
         let current_len = 100.0;
 
-        self.line.set_attribute(
+        self.display.get_mut().0.set_attribute(
             "style",
             &format!(
                 "transform: translateX({}px) translateY({}px) scaleY({});",
                 92 + self.indent * 25,
-                40 + self.start_idx * 40 + 15,
+                40 + self.start_idx * 40 + 12,
                 total_len / current_len
             ),
         );
+
+        if self.unclosed {
+            self.display.get_mut().1.0.inner_mut().set_attribute(
+                "style",
+                &format!(
+                    "transform: translateX({}px) translateY({}px);",
+                    92 + self.indent * 25,
+                    self.end_idx * 40 + 12,
+                ),
+            );
+            self.display.get_mut().1.0.activate();
+        } else {
+            self.display.get_mut().1.0.deactivate();
+        }
     }
 }
 
 impl WithElement for FrameLine {
-    type Element = SvgLineElement;
+    type Element = SvggElement;
     fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
-        self.line.with_element(f, g)
+        self.display.with_element(f, g)
     }
 }
 
 impl Component for FrameLine {
     fn audit(&self) {
-        self.line.audit();
+        self.display.audit();
     }
 }
 
-type SVGPath = ElementHandle<SvgPathElement>;
-type SVGMarker = DomStruct<(SVGPath, ()), SvgMarkerElement>;
-type SVGDefs = DomVec<SVGMarker, SvgDefsElement>;
-type CodillonBlocks = DomVec<FrameLine, SvggElement>;
-type CodillonSVG = DomStruct<(SVGDefs, (CodillonBlocks, ())), SvgElement>;
-
 pub struct DomImage {
-    contents: CodillonSVG,
+    contents: DomVec<FrameLine, SvgElement>,
     height: usize,
     factory: ElementFactory,
 }
@@ -95,23 +138,9 @@ impl Component for DomImage {
 }
 
 impl DomImage {
-    fn blocks(&self) -> &CodillonBlocks {
-        &self.contents.get().1.0
-    }
-
-    fn blocks_mut(&mut self) -> &mut CodillonBlocks {
-        &mut self.contents.get_mut().1.0
-    }
-
     pub fn new(factory: ElementFactory) -> Self {
         Self {
-            contents: CodillonSVG::new(
-                (
-                    SVGDefs::new(factory.svg_defs()),
-                    (CodillonBlocks::new(factory.svg_g()), ()),
-                ),
-                factory.svg(),
-            ),
+            contents: DomVec::new(factory.svg()),
             height: 0,
             factory,
         }
@@ -125,37 +154,31 @@ impl DomImage {
         }
     }
 
-    pub fn set_frame(&mut self, frame_num: usize, indentation: usize, start: usize, end: usize) {
-        self.make_height_at_least(end + 1);
-        match self.blocks_mut().get_mut(frame_num) {
+    pub fn set_frame(&mut self, frame: &FrameInfo) {
+        self.make_height_at_least(frame.end + 1);
+        match self.contents.get_mut(frame.num) {
             Some(FrameLine {
                 start_idx,
                 end_idx,
                 indent,
+                unclosed,
                 ..
-            }) if start == *start_idx && end == *end_idx && indentation == *indent => {}
-            Some(frame_line) => {
-                frame_line.start_idx = start;
-                frame_line.end_idx = end;
-                frame_line.indent = indentation;
-                frame_line.reconcile();
-            }
+            }) if frame.start == *start_idx
+                && frame.end == *end_idx
+                && frame.indent == *indent
+                && frame.unclosed == *unclosed => {}
+            Some(frame_line) => frame_line.update(frame),
             None => {
-                while self.blocks().len() <= frame_num {
-                    let blocks = &mut self.contents.get_mut().1.0;
-                    blocks.push(FrameLine::new(&self.factory, 0, 1, 0));
+                while self.contents.len() <= frame.num {
+                    self.contents.push(FrameLine::new(&self.factory, 0, 1, 0));
                 }
-                let f = &mut self.blocks_mut().get_mut(frame_num).unwrap();
-                f.start_idx = start;
-                f.end_idx = end;
-                f.indent = indentation;
-                f.reconcile();
+                self.contents.get_mut(frame.num).unwrap().update(frame)
             }
         }
     }
 
     pub fn set_frame_count(&mut self, count: usize) {
-        self.blocks_mut().truncate(count);
+        self.contents.truncate(count);
     }
 
     delegate! {

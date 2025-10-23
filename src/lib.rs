@@ -1,3 +1,4 @@
+pub mod dom_switch;
 pub mod dom_struct;
 pub mod dom_text;
 pub mod dom_vec;

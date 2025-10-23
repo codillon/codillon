@@ -342,10 +342,11 @@ pub trait LineInfos {
 }
 
 pub struct FrameInfo {
-    pub frame_num: usize,
+    pub num: usize,
     pub indent: usize,
     pub start: usize,
     pub end: usize,
+    pub unclosed: bool,
 }
 
 pub trait LineInfosMut: LineInfos {
@@ -359,7 +360,7 @@ pub trait LineInfosMut: LineInfos {
 /// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
 pub fn fix_frames(instrs: &mut impl LineInfosMut) {
     struct OpenFrame {
-        frame_num: usize,
+        num: usize,
         line_no: usize,
         kind: InstrKind,
     }
@@ -375,7 +376,7 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
                 instrs.set_indent(line_no, frame_stack.len());
                 instrs.set_active_status(line_no, true);
                 frame_stack.push(OpenFrame {
-                    frame_num: frame_count,
+                    num: frame_count,
                     line_no,
                     kind,
                 });
@@ -383,22 +384,23 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
             }
             InstrKind::Else => {
                 if let Some(OpenFrame {
-                    frame_num,
+                    num,
                     line_no: start,
                     kind: InstrKind::If,
                 }) = frame_stack.last()
                 {
                     instrs.set_frame(&FrameInfo {
-                        frame_num: *frame_num,
+                        num: *num,
                         indent: frame_stack.len() - 1,
                         start: *start,
                         end: line_no,
+                        unclosed: false,
                     });
                     frame_stack.pop();
                     instrs.set_indent(line_no, frame_stack.len());
                     instrs.set_active_status(line_no, true);
                     frame_stack.push(OpenFrame {
-                        frame_num: frame_count,
+                        num: frame_count,
                         line_no,
                         kind,
                     });
@@ -410,7 +412,7 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
             }
             InstrKind::End => {
                 if let Some(OpenFrame {
-                    frame_num,
+                    num,
                     line_no: start,
                     ..
                 }) = frame_stack.pop()
@@ -418,10 +420,11 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
                     instrs.set_indent(line_no, frame_stack.len());
                     instrs.set_active_status(line_no, true);
                     instrs.set_frame(&FrameInfo {
-                        frame_num,
+                        num,
                         indent: frame_stack.len(),
                         start,
                         end: line_no,
+                        unclosed: false,
                     });
                 } else {
                     instrs.set_indent(line_no, frame_stack.len());
@@ -438,15 +441,13 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
     instrs.set_synthetic_ends(frame_stack.len());
     instrs.set_frame_count(frame_count);
 
-    while let Some(OpenFrame {
-        frame_num, line_no, ..
-    }) = frame_stack.pop()
-    {
+    while let Some(OpenFrame { num, line_no, .. }) = frame_stack.pop() {
         instrs.set_frame(&FrameInfo {
-            frame_num,
+            num,
             indent: frame_stack.len(),
             start: line_no,
             end: len,
+            unclosed: true,
         });
     }
 }

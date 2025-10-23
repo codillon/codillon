@@ -512,8 +512,7 @@ impl LineInfosMut for Editor {
     }
 
     fn set_frame(&mut self, frame: &FrameInfo) {
-        self.image_mut()
-            .set_frame(frame.frame_num, frame.indent, frame.start, frame.end)
+        self.image_mut().set_frame(frame)
     }
 
     fn set_frame_count(&mut self, count: usize) {

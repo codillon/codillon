@@ -22,6 +22,17 @@ const TOKEN: AccessToken = AccessToken(_Private());
 
 pub trait WithNode {
     fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken);
+
+    // Any holder of a WithNode can remove it from its parent.
+    fn remove(&self) {
+        self.with_node(remove_node, TOKEN)
+    }
+}
+
+fn remove_node(node: &web_sys::Node) {
+    if let Some(parent) = node.parent_node() {
+        parent.remove_child(node).expect("remove_child");
+    }
 }
 
 // Any HTML element
@@ -47,8 +58,6 @@ impl<T: WithElement> WithNode for T {
 // Wrapper for a Node or Element that removes it from its parent when dropped
 struct AutoRemove<T: AsRef<web_sys::Node>>(T);
 
-impl<T: AsRef<web_sys::Node>> AutoRemove<T> {}
-
 impl<T: AsRef<web_sys::Node>> From<T> for AutoRemove<T> {
     fn from(t: T) -> Self {
         Self(t)
@@ -71,9 +80,7 @@ impl<T: AsRef<web_sys::Node>> DerefMut for AutoRemove<T> {
 
 impl<T: AsRef<web_sys::Node>> Drop for AutoRemove<T> {
     fn drop(&mut self) {
-        if let Some(parent) = self.0.as_ref().parent_node() {
-            parent.remove_child(self.0.as_ref()).expect("remove_child");
-        }
+        remove_node(self.0.as_ref());
     }
 }
 
@@ -491,12 +498,12 @@ impl ElementFactory {
         ElementHandle::new(self.create_svg_element("marker"))
     }
 
-    pub fn svg_path(&self) -> ElementHandle<web_sys::SvgPathElement> {
-        ElementHandle::new(self.create_svg_element("path"))
-    }
-
     pub fn svg_g(&self) -> ElementHandle<web_sys::SvggElement> {
         ElementHandle::new(self.create_svg_element("g"))
+    }
+
+    pub fn svg_circle(&self) -> ElementHandle<web_sys::SvgCircleElement> {
+        ElementHandle::new(self.create_svg_element("circle"))
     }
 }
 
