@@ -51,11 +51,6 @@ impl<'a> Parse<'a> for FuncHeader<'a> {
             })?;
         }
 
-        // Anything left (e.g., close parenthesis) makes the format malformed.
-        if !parser.is_empty() {
-            return Err(parser.error("invalid function header trailings"));
-        }
-
         Ok(FuncHeader {
             span,
             id,
