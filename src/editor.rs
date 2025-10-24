@@ -341,14 +341,14 @@ impl Editor {
             .instructions_as_text()
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
         let wasm_bin = str_to_binary(text)?;
-        Self::execute(&wasm_bin);
-        self.0.borrow_mut().module = OkModule::build(wasm_bin, self)?;
 
         // log instruction types (TODO: integrate into OkModule)
         let _ = collect_operands(
             self.0.borrow().module.borrow_binary(),
             self.0.borrow().module.borrow_ops(),
         );
+        self.0.borrow_mut().module = OkModule::build(wasm_bin, self)?;
+        Self::execute(&self.0.borrow().module.build_executable_binary()?);
 
         #[cfg(debug_assertions)]
         {
