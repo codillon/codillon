@@ -174,7 +174,7 @@ pub struct TypesTable {
 }
 
 pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
-    let txt = format!("module (func (export \"main\")\n{s})");
+    let txt = format!("module {s}");
     let binding = ParseBuffer::new(&txt)?;
     let mut module = parser::parse::<Module>(&binding)?;
 
@@ -392,7 +392,7 @@ pub trait LineInfos {
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
     fn info(&self, index: usize) -> impl Deref<Target = LineInfo>;
-    fn synthetic_ends(&self) -> usize;
+    fn synthetic_ends_len(&self) -> usize;
 }
 
 #[derive(PartialEq, Clone, Default, Debug)]
@@ -406,10 +406,11 @@ pub struct FrameInfo {
 
 pub trait LineInfosMut: LineInfos {
     fn set_active_status(&mut self, index: usize, is_active: bool);
-    fn set_synthetic_ends(&mut self, num: usize);
     fn set_indent(&mut self, index: usize, num: usize);
     fn set_frame_count(&mut self, count: usize);
     fn set_frame_info(&mut self, num: usize, frame: FrameInfo);
+    fn reset_synthetic_ends(&mut self);
+    fn add_synthetic_ends(&mut self, list: &mut Vec<(usize, String)>);
 }
 
 /// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
@@ -453,6 +454,7 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
         kind: &InstrKind, 
         frame_stack: &mut Vec<OpenFrame>, 
         synthetic: bool,
+        synthetic_ends: &mut Vec<(usize, String)>,
     ) -> usize {
         let mut active = false;
 
@@ -468,9 +470,12 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
 
                         // Add synthetic end
                         match kind {
-                            InstrKind::FuncModuEnd if synthetic => (),  // add ")"
-                            InstrKind::FuncModuEnd => (),
-                            _ => (),    // add "end"
+                            InstrKind::FuncHeader => {
+                                if synthetic {
+                                    synthetic_ends.push((line_no - 1, ")".to_string()));
+                                }
+                            }
+                            _ => synthetic_ends.push((line_no - 1, "end".to_string())),
                         }
 
                         // Record frame
@@ -527,7 +532,7 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                         active = true;
 
                         if synthetic {
-                            // add "end"
+                            synthetic_ends.push((line_no - 1, "end".to_string()));
                         }
                     }
                 } 
@@ -545,6 +550,8 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
 
     let mut frame_stack: Vec<OpenFrame> = Vec::new();
     let mut frame_count = 0;
+    // (line idx just before synthetic end, synthetic end word)
+    let mut synthetic_ends: Vec<(usize, String)> = Vec::new();
     let len = lines.len();
     let mut in_func = false;
 
@@ -559,7 +566,12 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                 InstrKind::FuncHeader => {
                     // Close the previous function frame if there's one
                     if in_func {
-                        try_close_frame(lines, line_no, &InstrKind::FuncModuEnd, &mut frame_stack, true);
+                        try_close_frame(
+                            lines, line_no, 
+                            &InstrKind::FuncModuEnd, 
+                            &mut frame_stack, 
+                            true, &mut synthetic_ends
+                        );
                     }
 
                     // Open new function frame
@@ -568,7 +580,12 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                 }
                 InstrKind::ModuHeader => todo!(),
                 InstrKind::FuncModuEnd => {
-                    try_close_frame(lines, line_no, &InstrKind::FuncModuEnd, &mut frame_stack, false);
+                    try_close_frame(
+                        lines, line_no, 
+                        &InstrKind::FuncModuEnd, 
+                        &mut frame_stack, 
+                        false, &mut synthetic_ends
+                    );
                     in_func = false;
                 }
                 _ => ()
@@ -576,25 +593,35 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
         } else {
             // Instruction line
             // Skip if the instruction is not wrapped in a function
-            // if !in_func {
-            //     lines.set_indent(line_no, frame_stack.len());
-            //     lines.set_active_status(line_no, false);
-            //     continue;
-            // }
+            if !in_func {
+                lines.set_indent(line_no, frame_stack.len());
+                lines.set_active_status(line_no, false);
+                continue;
+            }
 
             match kind {
                 InstrKind::If | InstrKind::OtherStructured => {
                     frame_count += try_open_frame(lines, line_no, &kind, &mut frame_stack, frame_count);
                 }
                 InstrKind::Else => {
-                    let closed_num = try_close_frame(lines, line_no, &kind, &mut frame_stack, false);
+                    let closed_num = try_close_frame(
+                        lines, line_no, 
+                        &kind, 
+                        &mut frame_stack, 
+                        false, &mut synthetic_ends
+                    );
                     if closed_num > 0 {
                         // Insert the ELSE frame
                         frame_count += try_open_frame(lines, line_no, &kind, &mut frame_stack, frame_count);
                     }
                 }
                 InstrKind::End => {
-                    try_close_frame(lines, line_no, &kind, &mut frame_stack, false);
+                    try_close_frame(
+                        lines, line_no, 
+                        &kind, 
+                        &mut frame_stack, 
+                        false, &mut synthetic_ends
+                    );
                 }
                 InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => {
                     lines.set_indent(line_no, frame_stack.len());
@@ -604,26 +631,12 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
         }
     }
 
-    lines.set_synthetic_ends(frame_stack.len());
-    lines.set_frame_count(frame_count);
-
-    while let Some(OpenFrame {
-        num, line_no, kind, ..
-    }) = frame_stack.pop()
-    {
-        lines.set_frame_info(
-            num,
-            FrameInfo {
-                indent: frame_stack.len(),
-                start: line_no,
-                end: len,
-                unclosed: true,
-                kind,
-            },
-        );
-
-        // Add synthetic end
+    while !frame_stack.is_empty() {
+        try_close_frame(lines, len, &InstrKind::FuncModuEnd, &mut frame_stack, true, &mut synthetic_ends);
     }
+
+    lines.set_frame_count(frame_count);
+    lines.add_synthetic_ends(&mut synthetic_ends);
 }
 
 pub trait FmtError {

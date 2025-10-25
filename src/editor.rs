@@ -30,7 +30,7 @@ type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), Ht
 pub const LINE_SPACING: usize = 40;
 
 struct _Editor {
-    synthetic_ends: usize,
+    synthetic_ends: Vec<(usize, String)>,   // (line idx just before end, ending word)
     component: ComponentType,
     factory: ElementFactory,
 }
@@ -40,7 +40,7 @@ pub struct Editor(Rc<RefCell<_Editor>>);
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
         let inner = _Editor {
-            synthetic_ends: 0,
+            synthetic_ends: Vec::new(),
             component: DomStruct::new(
                 (
                     DomImage::new(factory.clone()),
@@ -79,10 +79,12 @@ impl Editor {
 
         ret.image_mut().set_attribute("class", "annotations");
 
+        ret.push_line("(func");
         ret.push_line("i32.const 5");
         ret.push_line("i32.const 6");
         ret.push_line("i32.add");
         ret.push_line("drop");
+        ret.push_line(")");
 
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
@@ -403,20 +405,41 @@ impl Editor {
         RefMut::map(self.text_mut(), |c| &mut c[idx])
     }
 
-    // get the "instructions" (active, well-formed lines) as text
-    fn instructions_as_text(&self) -> impl Iterator<Item = Ref<'_, str>> {
-        InstructionTextIterator {
-            editor: self.text(),
-            index: 0,
-        }
-        .chain(
-            std::iter::repeat_with(move || Ref::map(self.0.borrow(), |_| "end"))
-                .take(self.0.borrow().synthetic_ends),
-        )
+    // get the module(s) (active, well-formed lines) as text
+    fn instructions_as_text(&self) -> impl Iterator<Item = String> {
+        let synthetic_ends = {
+            let inner = self.0.borrow();
+            inner.synthetic_ends.clone()
+        };
+        let mut synthetic_iter = synthetic_ends.into_iter().peekable();
+
+        let total_line = self.text().len();
+
+        (0..total_line).flat_map(move |line_idx| {
+            // current line + associated synthetic ends
+            let mut line_with_ends = Vec::new();
+            
+            // add the actual line
+            let line_text = self.line(line_idx).instr().get().to_string();
+            line_with_ends.push(line_text);
+            
+            // add synthetic ends for this line
+            while let Some((synthetic_line_idx, _)) = synthetic_iter.peek() {
+                if *synthetic_line_idx == line_idx {
+                    let (_, word) = synthetic_iter.next().unwrap();
+                    line_with_ends.push(word);
+                } else {
+                    break;
+                }
+            }
+            
+            line_with_ends.into_iter()
+        })
     }
 
     fn on_change(&mut self) -> Result<()> {
         // repair syntax
+        self.reset_synthetic_ends();
         fix_frames(self);
 
         // create binary
@@ -478,7 +501,7 @@ impl Editor {
             {
                 line_idx += 1;
             }
-            if line_idx >= component.len() + self.0.borrow().synthetic_ends {
+            if line_idx >= component.len() + self.0.borrow().synthetic_ends.len() {
                 bail!("not enough instructions");
             }
             instruction_table.push(CodillonInstruction { op, line_idx });
@@ -561,8 +584,8 @@ impl LineInfos for Editor {
         Ref::map(self.line(index), |x| x.info())
     }
 
-    fn synthetic_ends(&self) -> usize {
-        self.0.borrow().synthetic_ends
+    fn synthetic_ends_len(&self) -> usize {
+        self.0.borrow().synthetic_ends.len()
     }
 }
 
@@ -571,8 +594,12 @@ impl LineInfosMut for Editor {
         self.line_mut(index).set_active_status(is_active)
     }
 
-    fn set_synthetic_ends(&mut self, num: usize) {
-        self.0.borrow_mut().synthetic_ends = num;
+    fn reset_synthetic_ends(&mut self) {
+        self.0.borrow_mut().synthetic_ends.clear()
+    }
+
+    fn add_synthetic_ends(&mut self, list: &mut Vec<(usize, String)>) {
+        self.0.borrow_mut().synthetic_ends.append(list)
     }
 
     fn set_indent(&mut self, index: usize, num: usize) {
