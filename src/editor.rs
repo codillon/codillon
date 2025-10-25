@@ -418,10 +418,11 @@ impl Editor {
         (0..total_line).flat_map(move |line_idx| {
             // current line + associated synthetic ends
             let mut line_with_ends = Vec::new();
-            
-            // add the actual line
-            let line_text = self.line(line_idx).instr().get().to_string();
-            line_with_ends.push(line_text);
+
+            let code_line = self.line(line_idx);
+            if code_line.info().is_instr() {
+                line_with_ends.push(code_line.instr().get().to_string());
+            }
             
             // add synthetic ends for this line
             while let Some((synthetic_line_idx, _)) = synthetic_iter.peek() {
