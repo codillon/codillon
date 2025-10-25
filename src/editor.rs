@@ -9,10 +9,11 @@ use crate::{
     },
     line::{CodeLine, LineInfo, Position},
     utils::{
-        FmtError, LineInfos, LineInfosMut, OkModule, collect_operands, fix_frames, str_to_binary,
+        CodillonInstruction, FmtError, InstructionTable, LineInfos, LineInfosMut, fix_frames,
+        str_to_binary,
     },
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use std::{
     cell::{Ref, RefCell, RefMut},
     ops::Deref,
@@ -20,10 +21,11 @@ use std::{
 };
 use web_sys::{HtmlDivElement, console::log_1};
 
+use wasmparser::{Parser, Payload};
+
 type ComponentType = DomVec<CodeLine, HtmlDivElement>;
 
 struct _Editor {
-    module: OkModule,
     synthetic_ends: usize,
     component: ComponentType,
     factory: ElementFactory,
@@ -34,7 +36,6 @@ pub struct Editor(Rc<RefCell<_Editor>>);
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
         let mut inner = _Editor {
-            module: OkModule::default(),
             synthetic_ends: 0,
             component: DomVec::new(factory.div()),
             factory,
@@ -342,13 +343,12 @@ impl Editor {
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
         let wasm_bin = str_to_binary(text)?;
 
-        // log instruction types (TODO: integrate into OkModule)
-        let _ = collect_operands(
-            self.0.borrow().module.borrow_binary(),
-            self.0.borrow().module.borrow_ops(),
-        );
-        self.0.borrow_mut().module = OkModule::build(wasm_bin, self)?;
-        Self::execute(&self.0.borrow().module.build_executable_binary()?);
+        //create Instruction Table
+        let instruction_table = self.to_instruction_table(&wasm_bin)?;
+
+        //annotation and instrumentation
+        let _types_table = instruction_table.to_types_table(&wasm_bin)?;
+        Self::execute(&instruction_table.build_executable_binary()?);
 
         #[cfg(debug_assertions)]
         {
@@ -357,6 +357,49 @@ impl Editor {
         }
 
         Ok(())
+    }
+
+    /// TODO: support multi-function by returning a "Function Table" (a vector of instruction tables)
+    /// note that the FuncEnd will also get a line in the Instruction Table for a given function
+    fn to_instruction_table<'a>(&self, wasm_bin: &'a [u8]) -> Result<InstructionTable<'a>> {
+        let parser = Parser::new(0);
+        let mut ops = Vec::new();
+
+        for payload in parser.parse_all(wasm_bin) {
+            if let Payload::CodeSectionEntry(body) = payload? {
+                for op in body.get_operators_reader()?.into_iter() {
+                    ops.push(op?);
+                }
+            }
+        }
+
+        //pop the function's end operator off the Vec<Operators>
+        ops.pop();
+
+        //match each operator with its idx in the editor
+        let mut instruction_table = Vec::new();
+        let mut line_idx = 0;
+        let component = &self.0.borrow().component;
+        for op in ops {
+            while line_idx < component.len()
+                && !component
+                    .get(line_idx)
+                    .ok_or(anyhow!("expected line at idx"))?
+                    .info()
+                    .is_instr()
+            {
+                line_idx += 1;
+            }
+            if line_idx >= component.len() + self.0.borrow().synthetic_ends {
+                bail!("not enough instructions");
+            }
+            instruction_table.push(CodillonInstruction { op, line_idx });
+            line_idx += 1;
+        }
+
+        Ok(InstructionTable {
+            table: instruction_table,
+        })
     }
 
     fn execute(binary: &[u8]) {

@@ -1,6 +1,5 @@
 use crate::line::LineInfo;
-use anyhow::{Result, anyhow, bail};
-use self_cell::self_cell;
+use anyhow::{Result, anyhow};
 use std::ops::{Deref, RangeInclusive};
 use wasm_encoder::{
     CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
@@ -8,74 +7,87 @@ use wasm_encoder::{
     reencode::{Reencode, RoundtripReencoder},
 };
 use wasm_tools::parse_binary_wasm;
-use wasmparser::{Operator, Parser, Payload, ValType, ValidPayload, Validator};
+use wasmparser::{Operator, Parser, ValType, ValidPayload, Validator};
 use wast::{
     core::{Instruction, Module},
     parser::{self, ParseBuffer},
 };
 
-//Lines that can have Operators are each associated with an Operator and a usize that represents its idx in the editor
-type Ops<'a> = Vec<(Operator<'a>, usize)>;
-
-self_cell!(
-    pub struct OkModule {
-        owner: Vec<u8>,
-        #[covariant]
-        dependent: Ops,
-    }
-
-    impl {Debug}
-);
-
-impl Default for OkModule {
-    fn default() -> Self {
-        OkModule::new(Vec::new(), |_| Vec::new())
-    }
+pub struct CodillonInstruction<'a> {
+    pub op: Operator<'a>,
+    pub line_idx: usize,
 }
 
-impl OkModule {
-    //assumes only one function
-    pub fn build(wasm_bin: Vec<u8>, infos: &impl LineInfos) -> Result<Self> {
-        OkModule::try_new(wasm_bin, |wasm_bin| {
-            //first, collect all operators
-            let parser = Parser::new(0);
-            let mut ops = Vec::new();
+pub struct InstructionTable<'a> {
+    pub table: Vec<CodillonInstruction<'a>>,
+}
 
-            for payload in parser.parse_all(wasm_bin) {
-                if let Payload::CodeSectionEntry(body) = payload? {
-                    for op in body.get_operators_reader()?.into_iter() {
-                        ops.push(op);
+impl<'a> InstructionTable<'a> {
+    /// Returns input and output types for each instruction in a binary Wasm module
+    ///
+    /// # Parameters
+    /// wasm_bin: a binary Wasm module
+    ///
+    /// # Returns
+    /// Err if function is not valid, else:
+    /// a TypesTable which is a vector of CodillonType
+    /// TODO: insert synthetic instructions to make function well-typed
+    pub fn to_types_table(&self, wasm_bin: &[u8]) -> Result<TypesTable> {
+        let mut validator = Validator::new();
+        let parser = Parser::new(0);
+        let dummy_offset = 1; // no need to track offsets, but validator has safety checks against 0
+        let mut result = Vec::new();
+
+        for payload in parser.parse_all(wasm_bin) {
+            if let ValidPayload::Func(func, _) = validator.payload(&payload?)? {
+                let mut func_validator: wasmparser::FuncValidator<wasmparser::ValidatorResources> =
+                    func.into_validator(wasmparser::FuncValidatorAllocations::default());
+                let mut idx_stack: Vec<usize> = Vec::new(); // simulated operand stack to track idx where each operand is pushed
+                for instr in &self.table {
+                    let op = &instr.op;
+                    let (pop_count, push_count) = op
+                        .operator_arity(&func_validator.visitor(dummy_offset))
+                        .ok_or(anyhow!("could not determine operator arity"))?;
+                    let prev_height = func_validator.operand_stack_height();
+                    if pop_count > prev_height {
+                        return Err(anyhow!("expected to pop operand, but empty stack"));
                     }
+                    let mut inputs = (prev_height - pop_count..prev_height)
+                        .filter_map(|i| {
+                            let valtype = func_validator.get_operand_type(i as usize).flatten();
+                            let idx = idx_stack.pop();
+                            match (valtype, idx) {
+                                (Some(val), Some(idx)) => Some(InputType {
+                                    instr_type: val,
+                                    origin_idx: idx,
+                                }),
+                                _ => None,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+
+                    //reverse inputs so that operands pushed more recently are towards the left (for UI)
+                    inputs.reverse();
+
+                    func_validator.op(dummy_offset, op)?;
+
+                    let new_height = func_validator.operand_stack_height();
+                    if push_count > new_height {
+                        return Err(anyhow!(
+                            "expected operator to push operand that is not on the stack"
+                        ));
+                    }
+                    let outputs = (new_height - push_count..new_height)
+                        .filter_map(|i| func_validator.get_operand_type(i as usize).flatten())
+                        .collect::<Vec<_>>();
+                    for _ in &outputs {
+                        idx_stack.push(instr.line_idx);
+                    }
+                    result.push(CodillonType { inputs, outputs });
                 }
             }
-
-            //pop the function's end operator off the Vec<Operators>
-            ops.pop();
-
-            //match each operator with its idx in the editor
-            let mut ops_with_indices = Vec::new();
-            let mut line_idx = 0;
-            for op in ops {
-                while line_idx < infos.len() && !infos.info(line_idx).is_instr() {
-                    line_idx += 1;
-                }
-                if line_idx >= infos.len() + infos.synthetic_ends() {
-                    bail!("not enough instructions");
-                }
-                ops_with_indices.push((op?, line_idx));
-                line_idx += 1;
-            }
-
-            Ok(ops_with_indices)
-        })
-    }
-
-    pub fn borrow_binary(&self) -> &[u8] {
-        self.borrow_owner()
-    }
-
-    pub fn borrow_ops(&self) -> &Ops<'_> {
-        self.borrow_dependent()
+        }
+        Ok(TypesTable { _table: result })
     }
 
     pub fn build_executable_binary(&self) -> Result<Vec<u8>> {
@@ -117,8 +129,8 @@ impl OkModule {
         let mut codes = CodeSection::new();
         let locals = vec![];
         let mut f = wasm_encoder::Function::new(locals);
-        for (op, _) in self.borrow_ops() {
-            let instruction = RoundtripReencoder.instruction(op.clone())?;
+        for codillon_instruction in &self.table {
+            let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
             // Instrument to prevent infinite execution.
             f.instruction(&EncoderInstruction::GlobalGet(0));
             f.instruction(&EncoderInstruction::I32Const(1));
@@ -140,6 +152,23 @@ impl OkModule {
         let wasm = module.finish();
         Ok(wasm)
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct InputType {
+    pub instr_type: ValType,
+    pub origin_idx: usize,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct CodillonType {
+    inputs: Vec<InputType>,
+    outputs: Vec<ValType>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct TypesTable {
+    _table: Vec<CodillonType>,
 }
 
 pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
@@ -421,7 +450,7 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::Result;
+    use wasmparser::BlockType;
 
     impl<const N: usize> LineInfos for ([LineInfo; N], usize) {
         fn is_empty(&self) -> bool {
@@ -629,180 +658,422 @@ mod tests {
 
         assert_eq!(frames2, expected2);
     }
+
     #[test]
     fn test_collect_operands() -> Result<()> {
         //block instruction with params and results
-        let output = [
-            (vec![], vec![ValType::I32]),
-            (vec![], vec![ValType::I32]),
-            (
-                vec![(ValType::I32, 0), (ValType::I32, 1)],
-                vec![ValType::I32, ValType::I32],
-            ),
-            (
-                vec![(ValType::I32, 2), (ValType::I32, 2)],
-                vec![ValType::I32],
-            ),
-            (vec![(ValType::I32, 3)], vec![ValType::I32]),
-            (vec![(ValType::I32, 4)], vec![]),
-        ];
+        let output = TypesTable {
+            _table: vec![
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![
+                        InputType {
+                            instr_type: ValType::I32,
+                            origin_idx: 0,
+                        },
+                        InputType {
+                            instr_type: ValType::I32,
+                            origin_idx: 1,
+                        },
+                    ],
+                    outputs: vec![ValType::I32, ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![
+                        InputType {
+                            instr_type: ValType::I32,
+                            origin_idx: 2,
+                        },
+                        InputType {
+                            instr_type: ValType::I32,
+                            origin_idx: 2,
+                        },
+                    ],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 3,
+                    }],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 4,
+                    }],
+                    outputs: vec![],
+                },
+            ],
+        };
         let lines =
             "i32.const 1\ni32.const 2\nblock (param i32 i32) (result i32)\ni32.add\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = (
-            [
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::OtherStructured, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::End, true),
-                LineInfo::new(InstrKind::Other, true),
+        let instruction_table = InstructionTable {
+            table: vec![
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 1 },
+                    line_idx: 0,
+                },
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 2 },
+                    line_idx: 1,
+                },
+                CodillonInstruction {
+                    op: Operator::Block {
+                        blockty: BlockType::FuncType(1),
+                    },
+                    line_idx: 2,
+                },
+                CodillonInstruction {
+                    op: Operator::I32Add,
+                    line_idx: 3,
+                },
+                CodillonInstruction {
+                    op: Operator::End,
+                    line_idx: 4,
+                },
+                CodillonInstruction {
+                    op: Operator::Drop,
+                    line_idx: 5,
+                },
             ],
-            0,
-        );
-        let module = OkModule::build(wasm_bin, &infos)?;
-        assert_eq!(
-            collect_operands(module.borrow_binary(), module.borrow_ops())?,
-            output
-        );
+        };
+        assert_eq!(instruction_table.to_types_table(&wasm_bin)?, output);
 
         //if else with params and results
-        let output = [
-            (vec![], vec![ValType::I32]),
-            (vec![(ValType::I32, 0)], vec![]),
-            (vec![], vec![ValType::I32]),
-            (vec![(ValType::I32, 2)], vec![]),
-            (vec![], vec![ValType::I32]),
-            (vec![(ValType::I32, 4)], vec![ValType::I32]),
-            (vec![(ValType::I32, 5)], vec![]),
-        ];
+        let output = TypesTable {
+            _table: vec![
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 0,
+                    }],
+                    outputs: vec![],
+                },
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 2,
+                    }],
+                    outputs: vec![],
+                },
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 4,
+                    }],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 5,
+                    }],
+                    outputs: vec![],
+                },
+            ],
+        };
         let lines = "i32.const 1\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = (
-            [
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::If, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::Else, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::End, true),
-                LineInfo::new(InstrKind::Other, true),
+        let instruction_table = InstructionTable {
+            table: vec![
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 1 },
+                    line_idx: 0,
+                },
+                CodillonInstruction {
+                    op: Operator::If {
+                        blockty: BlockType::Type(ValType::I32),
+                    },
+                    line_idx: 1,
+                },
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 1 },
+                    line_idx: 2,
+                },
+                CodillonInstruction {
+                    op: Operator::Else,
+                    line_idx: 3,
+                },
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 2 },
+                    line_idx: 4,
+                },
+                CodillonInstruction {
+                    op: Operator::End,
+                    line_idx: 5,
+                },
+                CodillonInstruction {
+                    op: Operator::Drop,
+                    line_idx: 6,
+                },
             ],
-            0,
-        );
-        let module = OkModule::build(wasm_bin, &infos)?;
-        assert_eq!(
-            collect_operands(module.borrow_binary(), module.borrow_ops())?,
-            output
-        );
+        };
+        assert_eq!(instruction_table.to_types_table(&wasm_bin)?, output);
 
         //loop with param and return
-        let output = [
-            (vec![], vec![ValType::I32]),
-            (vec![(ValType::I32, 0)], vec![ValType::I32]),
-            (vec![], vec![ValType::I32]),
-            (
-                vec![(ValType::I32, 1), (ValType::I32, 2)],
-                vec![ValType::I32],
-            ),
-            (vec![(ValType::I32, 3)], vec![]),
-            (vec![], vec![ValType::I32]),
-            (vec![(ValType::I32, 5)], vec![ValType::I32]),
-            (vec![(ValType::I32, 6)], vec![]),
-            /*  "Inputs: [] Returns: [i32]",
-            "Inputs: [i32] Returns: [i32]",
-            "Inputs: [] Returns: [i32]",
-            "Inputs: [i32 i32] Returns: [i32]",
-            "Inputs: [i32] Returns: []",
-            "Inputs: [] Returns: [i32]",
-            "Inputs: [i32] Returns: [i32]",
-            "Inputs: [i32] Returns: []",*/
-        ];
+        let output = TypesTable {
+            _table: vec![
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 0,
+                    }],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![
+                        InputType {
+                            instr_type: ValType::I32,
+                            origin_idx: 1,
+                        },
+                        InputType {
+                            instr_type: ValType::I32,
+                            origin_idx: 2,
+                        },
+                    ],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 3,
+                    }],
+                    outputs: vec![],
+                },
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 5,
+                    }],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 6,
+                    }],
+                    outputs: vec![],
+                },
+            ],
+        };
         let lines = "i32.const 10\nloop (param i32) (result i32)\ni32.const 1\ni32.sub\nbr_if 1\ni32.const 2\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = (
-            [
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::OtherStructured, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::End, true),
-                LineInfo::new(InstrKind::Other, true),
+        let instruction_table = InstructionTable {
+            table: vec![
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 10 },
+                    line_idx: 0,
+                },
+                CodillonInstruction {
+                    op: Operator::Loop {
+                        blockty: BlockType::FuncType(1),
+                    },
+                    line_idx: 1,
+                },
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 1 },
+                    line_idx: 2,
+                },
+                CodillonInstruction {
+                    op: Operator::I32Sub,
+                    line_idx: 3,
+                },
+                CodillonInstruction {
+                    op: Operator::BrIf { relative_depth: 1 },
+                    line_idx: 4,
+                },
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 2 },
+                    line_idx: 5,
+                },
+                CodillonInstruction {
+                    op: Operator::End,
+                    line_idx: 6,
+                },
+                CodillonInstruction {
+                    op: Operator::Drop,
+                    line_idx: 7,
+                },
             ],
-            0,
-        );
-        let module = OkModule::build(wasm_bin, &infos)?;
-        assert_eq!(
-            collect_operands(module.borrow_binary(), module.borrow_ops())?,
-            output
-        );
+        };
+        assert_eq!(instruction_table.to_types_table(&wasm_bin)?, output);
 
         //nested block and if
-        let output = [
-            (vec![], vec![ValType::I32]),
-            (vec![(ValType::I32, 0)], vec![ValType::I32]),
-            (vec![(ValType::I32, 1)], vec![]),
-            (vec![], vec![ValType::I32]),
-            (vec![(ValType::I32, 3)], vec![]),
-            (vec![], vec![ValType::I32]),
-            (vec![(ValType::I32, 5)], vec![ValType::I32]),
-            (vec![(ValType::I32, 6)], vec![ValType::I32]),
-            (vec![(ValType::I32, 7)], vec![]),
-            /*              "Inputs: [] Returns: [i32]",
-            "Inputs: [i32] Returns: [i32]",
-            "Inputs: [i32] Returns: []",
-            "Inputs: [] Returns: [i32]",
-            "Inputs: [i32] Returns: []",
-            "Inputs: [] Returns: [i32]",
-            "Inputs: [i32] Returns: [i32]",
-            "Inputs: [i32] Returns: [i32]",
-            "Inputs: [i32] Returns: []",*/
-        ];
+        let output = TypesTable {
+            _table: vec![
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 0,
+                    }],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 1,
+                    }],
+                    outputs: vec![],
+                },
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 3,
+                    }],
+                    outputs: vec![],
+                },
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 5,
+                    }],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 6,
+                    }],
+                    outputs: vec![ValType::I32],
+                },
+                CodillonType {
+                    inputs: vec![InputType {
+                        instr_type: ValType::I32,
+                        origin_idx: 7,
+                    }],
+                    outputs: vec![],
+                },
+            ],
+        };
         let lines = "i32.const 10\nblock (param i32) (result i32)\nif (result i32)\ni32.const 1\nelse\ni32.const 2\nend\nend\ndrop";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = (
-            [
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::OtherStructured, true),
-                LineInfo::new(InstrKind::If, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::Else, true),
-                LineInfo::new(InstrKind::Other, true),
-                LineInfo::new(InstrKind::End, true),
-                LineInfo::new(InstrKind::End, true),
-                LineInfo::new(InstrKind::Other, true),
+        let instruction_table = InstructionTable {
+            table: vec![
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 10 },
+                    line_idx: 0,
+                },
+                CodillonInstruction {
+                    op: Operator::Block {
+                        blockty: BlockType::FuncType(1),
+                    },
+                    line_idx: 1,
+                },
+                CodillonInstruction {
+                    op: Operator::If {
+                        blockty: BlockType::Type(ValType::I32),
+                    },
+                    line_idx: 2,
+                },
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 1 },
+                    line_idx: 3,
+                },
+                CodillonInstruction {
+                    op: Operator::Else,
+                    line_idx: 4,
+                },
+                CodillonInstruction {
+                    op: Operator::I32Const { value: 2 },
+                    line_idx: 5,
+                },
+                CodillonInstruction {
+                    op: Operator::End,
+                    line_idx: 6,
+                },
+                CodillonInstruction {
+                    op: Operator::End,
+                    line_idx: 7,
+                },
+                CodillonInstruction {
+                    op: Operator::Drop,
+                    line_idx: 8,
+                },
             ],
-            0,
-        );
-        let module = OkModule::build(wasm_bin, &infos)?;
-        assert_eq!(
-            collect_operands(module.borrow_binary(), module.borrow_ops())?,
-            output
-        );
+        };
+        assert_eq!(instruction_table.to_types_table(&wasm_bin)?, output);
 
         //empty block
-        let output = [(vec![], vec![]), (vec![], vec![])];
+        let output = TypesTable {
+            _table: vec![
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![],
+                },
+                CodillonType {
+                    inputs: vec![],
+                    outputs: vec![],
+                },
+            ],
+        };
         let lines = "block\nend";
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
-        let infos = (
-            [
-                LineInfo::new(InstrKind::OtherStructured, true),
-                LineInfo::new(InstrKind::End, true),
+        let instruction_table = InstructionTable {
+            table: vec![
+                CodillonInstruction {
+                    op: Operator::Block {
+                        blockty: BlockType::Empty,
+                    },
+                    line_idx: 0,
+                },
+                CodillonInstruction {
+                    op: Operator::End,
+                    line_idx: 1,
+                },
             ],
-            0,
-        );
-        let module = OkModule::build(wasm_bin, &infos)?;
-        assert_eq!(
-            collect_operands(module.borrow_binary(), module.borrow_ops())?,
-            output
-        );
+        };
+        assert_eq!(instruction_table.to_types_table(&wasm_bin)?, output);
 
         Ok(())
     }
