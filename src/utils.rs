@@ -412,134 +412,206 @@ pub trait LineInfosMut: LineInfos {
     fn set_frame_info(&mut self, num: usize, frame: FrameInfo);
 }
 
-/// Fix functions by deactivating unwrapped instrs and appending closing parenthesis as necessary to
-/// close functions.
-// TODO fix mudules
-pub fn fix_funcs(lines: &mut impl LineInfosMut) {
-    // Use stacks as memory for function beginning borders
-    let mut func_stack: Vec<InstrKind> = Vec::new();
-
-    for i in 0..lines.len() {
-        let mut is_active: bool = true;
-        match lines.info(i).kind {
-            InstrKind::FuncHeader => {
-                if func_stack.is_empty() {
-                    func_stack.push(InstrKind::FuncHeader);
-                } else {
-                    // Append synthetic end to avoid nested functions
-                    func_stack.pop();
-                }
-            }
-            InstrKind::FuncModuEnd => {
-                if func_stack.is_empty() {
-                    is_active = false;
-                } else {
-                    func_stack.pop();
-                }
-            }
-            _ => ()
-        }
-        lines.set_active_status(i, is_active);
-    }
-}
-
 /// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
-pub fn fix_frames(instrs: &mut impl LineInfosMut) {
+pub fn fix_frames(lines: &mut impl LineInfosMut) {
     struct OpenFrame {
         num: usize,
         line_no: usize,
         kind: InstrKind,
     }
 
-    let mut frame_stack: Vec<OpenFrame> = Vec::new();
-    let mut frame_count = 0;
-    let len = instrs.len();
-
-    for line_no in 0..instrs.len() {
-        let kind = instrs.info(line_no).kind.stripped_clone();
+    // Return the number of frames opened
+    fn try_open_frame(
+        lines: &mut impl LineInfosMut, 
+        line_no: usize, 
+        kind: &InstrKind, 
+        frame_stack: &mut Vec<OpenFrame>, 
+        frame_count: usize
+    ) -> usize {
         match kind {
-            InstrKind::If | InstrKind::OtherStructured => {
-                instrs.set_indent(line_no, frame_stack.len());
-                instrs.set_active_status(line_no, true);
+            InstrKind::If | InstrKind::Else | InstrKind::OtherStructured | InstrKind::FuncHeader => {
+                // Set indentation
+                lines.set_indent(line_no, frame_stack.len());
+
+                // Push frame opening
                 frame_stack.push(OpenFrame {
                     num: frame_count,
                     line_no,
-                    kind,
+                    kind: kind.clone(),
                 });
-                frame_count += 1;
+
+                1
             }
-            InstrKind::Else => {
-                if let Some(OpenFrame {
-                    num,
-                    line_no: start,
-                    kind: InstrKind::If,
-                }) = frame_stack.last()
-                {
-                    instrs.set_frame_info(
-                        *num,
-                        FrameInfo {
-                            indent: frame_stack.len() - 1,
-                            start: *start,
-                            end: line_no,
-                            unclosed: false,
-                            kind: InstrKind::If,
-                        },
-                    );
-                    frame_stack.pop();
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, true);
-                    frame_stack.push(OpenFrame {
-                        num: frame_count,
-                        line_no,
-                        kind: InstrKind::Else,
-                    });
-                    frame_count += 1;
-                } else {
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, false);
-                }
-            }
-            InstrKind::End => {
-                if let Some(OpenFrame {
-                    num,
-                    line_no: start,
-                    kind,
-                    ..
-                }) = frame_stack.pop()
-                {
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, true);
-                    instrs.set_frame_info(
-                        num,
-                        FrameInfo {
-                            indent: frame_stack.len(),
-                            start,
-                            end: line_no,
-                            unclosed: false,
-                            kind,
-                        },
-                    );
-                } else {
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, false);
-                }
-            }
-            InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => {
-                instrs.set_indent(line_no, frame_stack.len());
-                instrs.set_active_status(line_no, true);
-            }
-            _ => ()
+            _ => 0,
         }
     }
 
-    instrs.set_synthetic_ends(frame_stack.len());
-    instrs.set_frame_count(frame_count);
+    // Return the number of frames opened
+    fn try_close_frame(
+        lines: &mut impl LineInfosMut, 
+        line_no: usize, 
+        kind: &InstrKind, 
+        frame_stack: &mut Vec<OpenFrame>, 
+        synthetic: bool,
+    ) -> usize {
+        let mut active = false;
+
+        match kind {
+            InstrKind::FuncModuEnd => {
+                let mut closed_num = 0;
+
+                // Find the last inserted Func opening
+                if let Some(pos) = frame_stack.iter().rposition(|f| matches!(f.kind, InstrKind::FuncHeader)) {
+                    // Close all frames at and after that
+                    while frame_stack.len() > pos {
+                        let Some(OpenFrame { num, line_no: start, kind }) = frame_stack.pop() else { continue };
+
+                        // Add synthetic end
+                        match kind {
+                            InstrKind::FuncModuEnd if synthetic => (),  // add ")"
+                            InstrKind::FuncModuEnd => (),
+                            _ => (),    // add "end"
+                        }
+
+                        // Record frame
+                        lines.set_frame_info(
+                            num,
+                            FrameInfo {
+                                indent: frame_stack.len(),
+                                start: start,
+                                end: line_no,
+                                unclosed: true,
+                                kind,
+                            },
+                        );
+                        closed_num += 1;
+                    }
+
+                    active = true;
+                }
+
+                if !active {
+                    lines.set_indent(line_no, frame_stack.len());
+                    lines.set_active_status(line_no, false);
+                }
+
+                closed_num
+            }
+            InstrKind::Else | InstrKind::End => {
+                if let Some(OpenFrame {
+                    num,
+                    line_no: start,
+                    kind: open_kind,
+                }) = frame_stack.last()
+                {
+                    let can_close = match (kind, open_kind) {
+                        (InstrKind::Else, InstrKind::If) => true,
+                        (InstrKind::End, InstrKind::If | InstrKind::Else | InstrKind::OtherStructured) => true,
+                        _ => false,
+                    };
+
+                    if can_close {
+                        let indent = frame_stack.len() - 1;
+                        lines.set_indent(line_no, indent);
+                        lines.set_frame_info(
+                            *num,
+                            FrameInfo {
+                                indent,
+                                start: *start,
+                                end: line_no,
+                                unclosed: false,
+                                kind: open_kind.clone(),
+                            },
+                        );
+                        frame_stack.pop();
+                        active = true;
+
+                        if synthetic {
+                            // add "end"
+                        }
+                    }
+                } 
+
+                if !active {
+                    lines.set_indent(line_no, frame_stack.len());
+                    lines.set_active_status(line_no, false);
+                }
+
+                1
+            }
+            _ => 0,
+        }
+    }
+
+    let mut frame_stack: Vec<OpenFrame> = Vec::new();
+    let mut frame_count = 0;
+    let len = lines.len();
+    let mut in_func = false;
+
+    for line_no in 0..lines.len() {
+        // Assume this line is active at the beginning
+        lines.set_active_status(line_no, true);
+
+        let kind = lines.info(line_no).kind.stripped_clone();
+        if !is_instr(&kind) {
+            // Function/Module frame
+            match kind {
+                InstrKind::FuncHeader => {
+                    // Close the previous function frame if there's one
+                    if in_func {
+                        try_close_frame(lines, line_no, &InstrKind::FuncModuEnd, &mut frame_stack, true);
+                    }
+
+                    // Open new function frame
+                    frame_count += try_open_frame(lines, line_no, &kind, &mut frame_stack, frame_count);
+                    in_func = true;
+                }
+                InstrKind::ModuHeader => todo!(),
+                InstrKind::FuncModuEnd => {
+                    try_close_frame(lines, line_no, &InstrKind::FuncModuEnd, &mut frame_stack, false);
+                    in_func = false;
+                }
+                _ => ()
+            }
+        } else {
+            // Instruction line
+            // Skip if the instruction is not wrapped in a function
+            // if !in_func {
+            //     lines.set_indent(line_no, frame_stack.len());
+            //     lines.set_active_status(line_no, false);
+            //     continue;
+            // }
+
+            match kind {
+                InstrKind::If | InstrKind::OtherStructured => {
+                    frame_count += try_open_frame(lines, line_no, &kind, &mut frame_stack, frame_count);
+                }
+                InstrKind::Else => {
+                    let closed_num = try_close_frame(lines, line_no, &kind, &mut frame_stack, false);
+                    if closed_num > 0 {
+                        // Insert the ELSE frame
+                        frame_count += try_open_frame(lines, line_no, &kind, &mut frame_stack, frame_count);
+                    }
+                }
+                InstrKind::End => {
+                    try_close_frame(lines, line_no, &kind, &mut frame_stack, false);
+                }
+                InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => {
+                    lines.set_indent(line_no, frame_stack.len());
+                }
+                _ => ()
+            }
+        }
+    }
+
+    lines.set_synthetic_ends(frame_stack.len());
+    lines.set_frame_count(frame_count);
 
     while let Some(OpenFrame {
         num, line_no, kind, ..
     }) = frame_stack.pop()
     {
-        instrs.set_frame_info(
+        lines.set_frame_info(
             num,
             FrameInfo {
                 indent: frame_stack.len(),
@@ -549,6 +621,8 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
                 kind,
             },
         );
+
+        // Add synthetic end
     }
 }
 
