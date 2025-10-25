@@ -337,7 +337,7 @@ impl Editor {
         // repair syntax
         fix_frames(self);
 
-        // update module
+        // create binary
         let text = self
             .instructions_as_text()
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
