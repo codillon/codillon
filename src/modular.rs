@@ -29,12 +29,6 @@ pub struct FuncHeader<'a> {
     pub locals: Box<[Local<'a>]>,
 }
 
-/// The function/module closing parenthesis.
-pub struct FuncModuEnd {
-    /// Where this closing was defined.
-    pub span: Span,
-}
-
 impl<'a> Parse<'a> for FuncHeader<'a> {
     fn parse(parser: Parser<'a>) -> Result<Self> {
         let span = parser.parse::<kw::func>()?.0;

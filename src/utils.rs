@@ -1,5 +1,7 @@
 use crate::line::LineInfo;
-use anyhow::{Result, anyhow};
+use crate::modular::{FuncHeader};
+use anyhow::{Result, anyhow, bail};
+use self_cell::self_cell;
 use std::ops::{Deref, RangeInclusive};
 use wasm_encoder::{
     CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
@@ -183,6 +185,11 @@ pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
 pub enum InstrKind {
     #[default]
     Empty,
+    
+    FuncHeader,
+    ModuHeader,
+    FuncModuEnd,
+
     If,
     Else,
     End,
@@ -203,6 +210,9 @@ impl InstrKind {
             OtherStructured => OtherStructured,
             Other => Other,
             Empty => Empty,
+            FuncHeader => FuncHeader,
+            ModuHeader => ModuHeader,
+            FuncModuEnd => FuncModuEnd,
         }
     }
 }
@@ -230,6 +240,10 @@ impl From<wast::Error> for InstrKind {
     }
 }
 
+pub fn is_instr(line: &InstrKind) -> bool {
+    !matches!(line, InstrKind::FuncHeader | InstrKind::ModuHeader | InstrKind::FuncModuEnd)
+}
+
 // Find the line comment separator in these string slices.
 pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     if let Some(idx) = s1.find(";;") {
@@ -255,6 +269,16 @@ pub fn parse_instr(s: &str) -> InstrKind {
     let s = s.trim(); // get rid of spaces
     if s.is_empty() {
         InstrKind::Empty // no instruction on this line
+    } else if s.starts_with("(func") {
+        match ParseBuffer::new(&s[1..]) {
+            Ok(buf) => match parser::parse::<FuncHeader>(&buf) {
+                Ok(_) => InstrKind::FuncHeader,
+                Err(e) => e.into(),
+            },
+            Err(e) => e.into(),
+        }
+    } else if s == ")" {
+        InstrKind::FuncModuEnd
     } else {
         match ParseBuffer::new(s) {
             Ok(buf) => match parser::parse::<Instruction>(&buf) {
@@ -388,6 +412,37 @@ pub trait LineInfosMut: LineInfos {
     fn set_frame_info(&mut self, num: usize, frame: FrameInfo);
 }
 
+/// Fix functions by deactivating unwrapped instrs and appending closing parenthesis as necessary to
+/// close functions.
+// TODO fix mudules
+pub fn fix_funcs(lines: &mut impl LineInfosMut) {
+    // Use stacks as memory for function beginning borders
+    let mut func_stack: Vec<InstrKind> = Vec::new();
+
+    for i in 0..lines.len() {
+        let mut is_active: bool = true;
+        match lines.info(i).kind {
+            InstrKind::FuncHeader => {
+                if func_stack.is_empty() {
+                    func_stack.push(InstrKind::FuncHeader);
+                } else {
+                    // Append synthetic end to avoid nested functions
+                    func_stack.pop();
+                }
+            }
+            InstrKind::FuncModuEnd => {
+                if func_stack.is_empty() {
+                    is_active = false;
+                } else {
+                    func_stack.pop();
+                }
+            }
+            _ => ()
+        }
+        lines.set_active_status(i, is_active);
+    }
+}
+
 /// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
 pub fn fix_frames(instrs: &mut impl LineInfosMut) {
     struct OpenFrame {
@@ -473,6 +528,7 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
                 instrs.set_indent(line_no, frame_stack.len());
                 instrs.set_active_status(line_no, true);
             }
+            _ => ()
         }
     }
 
@@ -627,6 +683,15 @@ mod tests {
         assert_eq!(parse_instr("   block   "), InstrKind::OtherStructured);
         assert_eq!(parse_instr("   loop   "), InstrKind::OtherStructured);
         assert_eq!(parse_instr("   try_table   "), InstrKind::OtherStructured);
+        // function header
+        assert_eq!(parse_instr("(func"), InstrKind::FuncHeader);
+        assert_eq!(parse_instr("(func)"), malf("extra tokens remaining after parse"));
+        assert_eq!(parse_instr("(func $x"), InstrKind::FuncHeader);
+        assert_eq!(parse_instr("(func (param $a i32)"), InstrKind::FuncHeader);
+        assert_eq!(parse_instr("(func (param) (result i64)"), InstrKind::FuncHeader);
+        assert_eq!(parse_instr("  (func (type 0) (local i32)"), InstrKind::FuncHeader);
+        assert_eq!(parse_instr("(func i32.const 5"), malf("extra tokens remaining after parse"));
+        assert_eq!(parse_instr("(func (i32.const 5)"), malf("extra tokens remaining after parse"));
         Ok(())
     }
 
