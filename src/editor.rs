@@ -347,7 +347,13 @@ impl Editor {
         let instruction_table = self.to_instruction_table(&wasm_bin)?;
 
         //annotation and instrumentation
-        let _types_table = instruction_table.to_types_table(&wasm_bin)?;
+        // For now, don't return Err even if `to_types_table` fails.
+        // Otherwise, keystrokes that create well-formed-but-invalid
+        // modules will be rejected and cause the "shake" animation.
+        let _types_table = instruction_table.to_types_table(&wasm_bin);
+        if let Err(e) = _types_table {
+            log_1(&format!("Generating types table failed: {e}").into());
+        }
         Self::execute(&instruction_table.build_executable_binary()?);
 
         #[cfg(debug_assertions)]
