@@ -342,7 +342,30 @@ impl CodeLine {
 
     // Modify the contents. This calls replace_range on one of the inner DomTexts (or both), then
     // makes the comment split, kind, and CSS presentation consistent with the new contents.
-    pub fn replace_range(&mut self, a: Position, b: Position, string: &str) -> Result<Position> {
+    pub fn replace_range(
+        &mut self,
+        mut a: Position,
+        b: Position,
+        mut string: &str,
+    ) -> Result<Position> {
+        // Special-case the creation or deletion of the comment separator (";;").
+        if a == b && b == Position::instr(self.instr().len_utf16()) && string == ";" {
+            string = ";;"; // type the whole ";;" separator on one ";" keystroke
+        } else if a == b
+            && b == Position::comment(2)
+            && self.comment().get() == ";;"
+            && string == ";"
+        {
+            string = ""; // if user types two ";" characters, give them two total (ignore second one)
+        } else if a == Position::comment(1)
+            && b == Position::comment(2)
+            && string.is_empty()
+            && self.comment().get() == ";;"
+        {
+            a = Position::comment(0); // if user deletes from end of ";;" and comment otherwise empty, delete both
+        }
+
+        // Do the replacement in the appropriate components (text or comment).
         let mut total_pos = match (a.in_instr, b.in_instr) {
             (true, true) => self.instr_mut().replace_range(a.offset, b.offset, string)?,
             (false, false) => {
