@@ -130,6 +130,7 @@ impl Editor {
         let mut new_cursor_pos = if start_line == end_line {
             // Single-line edit.
             let was_structured = self.line(start_line).info().is_structured();
+            let old_instr = self.line(start_line).instr().get().to_string();
             // Do the replacement.
             let new_pos = self
                 .line_mut(start_line)
@@ -139,7 +140,10 @@ impl Editor {
             let is_structured = self.line(start_line).info().is_structured();
             let is_if = self.line(start_line).info().kind == InstrKind::If;
 
-            if !was_structured && is_structured {
+            if !was_structured
+                && is_structured
+                && !old_instr.starts_with(self.line(start_line).instr().get())
+            {
                 // search for existing deactivated matching `end` (or `else` if the new instr is `if`)
                 let mut need_end = true;
                 for i in start_line + 1..self.text().len() {
