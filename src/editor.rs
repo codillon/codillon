@@ -1,16 +1,18 @@
 // The Codillon code editor
 
 use crate::{
+    dom_struct::DomStruct,
     dom_vec::DomVec,
+    graphics::DomImage,
     jet::{
-        AccessToken, Component, ElementFactory, InputEventHandle, NodeRef, RangeLike,
-        StaticRangeHandle, WithElement, compare_document_position, get_selection,
-        set_selection_range,
+        AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
+        RangeLike, ReactiveComponent, StaticRangeHandle, WithElement, compare_document_position,
+        get_selection, set_selection_range,
     },
     line::{CodeLine, LineInfo, Position},
     utils::{
-        CodillonInstruction, FmtError, InstructionTable, LineInfos, LineInfosMut, fix_frames,
-        str_to_binary,
+        CodillonInstruction, FmtError, FrameInfo, InstrKind, InstructionTable, LineInfos,
+        LineInfosMut, fix_frames, str_to_binary,
     },
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -19,11 +21,13 @@ use std::{
     ops::Deref,
     rc::Rc,
 };
+use wasmparser::{Parser, Payload};
 use web_sys::{HtmlDivElement, console::log_1};
 
-use wasmparser::{Parser, Payload};
+type TextType = DomVec<CodeLine, HtmlDivElement>;
+type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), HtmlDivElement>;
 
-type ComponentType = DomVec<CodeLine, HtmlDivElement>;
+pub const LINE_SPACING: usize = 40;
 
 struct _Editor {
     synthetic_ends: usize,
@@ -35,43 +39,60 @@ pub struct Editor(Rc<RefCell<_Editor>>);
 
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
-        let mut inner = _Editor {
+        let inner = _Editor {
             synthetic_ends: 0,
-            component: DomVec::new(factory.div()),
+            component: DomStruct::new(
+                (
+                    DomImage::new(factory.clone()),
+                    (ReactiveComponent::new(DomVec::new(factory.div())), ()),
+                ),
+                factory.div(),
+            ),
             factory,
         };
 
-        inner.component.set_attribute("class", "textentry");
-        inner.component.set_attribute("contenteditable", "true");
-        inner.component.set_attribute("spellcheck", "false");
-
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
+        {
+            let mut text = ret.textbox_mut();
+            text.inner_mut().set_attribute("class", "textentry");
+            text.inner_mut().set_attribute(
+                "style",
+                &format!("--codillon-line-spacing: {}px;", LINE_SPACING),
+            );
+            text.inner_mut().set_attribute("contenteditable", "true");
+            text.inner_mut().set_attribute("spellcheck", "false");
 
-        let editor_ref = Rc::clone(&ret.0);
-        ret.component_mut().set_onbeforeinput(move |ev| {
-            Editor(editor_ref.clone())
-                .handle_input(ev)
-                .expect("input handler")
-        });
+            let editor_ref = Rc::clone(&ret.0);
+            text.set_onbeforeinput(move |ev| {
+                Editor(editor_ref.clone())
+                    .handle_input(ev)
+                    .expect("input handler")
+            });
 
-        let editor_ref = Rc::clone(&ret.0);
-        ret.component_mut().set_onkeydown(move |ev| {
-            Editor(editor_ref.clone())
-                .handle_keydown(ev)
-                .expect("keydown handler")
-        });
+            let editor_ref = Rc::clone(&ret.0);
+            text.set_onkeydown(move |ev| {
+                Editor(editor_ref.clone())
+                    .handle_keydown(ev)
+                    .expect("keydown handler")
+            });
+        }
+
+        ret.image_mut().set_attribute("class", "annotations");
 
         ret.push_line("i32.const 5");
         ret.push_line("i32.const 6");
         ret.push_line("i32.add");
         ret.push_line("drop");
 
+        let height = LINE_SPACING * ret.text().len();
+        ret.image_mut().set_attribute("height", &height.to_string());
+
         ret
     }
 
     fn push_line(&mut self, string: &str) {
         let newline = CodeLine::new(string, &self.0.borrow().factory);
-        self.component_mut().push(newline);
+        self.text_mut().push(newline);
         self.on_change().expect("well-formed after push_line");
     }
 
@@ -104,10 +125,58 @@ impl Editor {
             backup.push(self.line(i).suffix(Position::begin())?);
         }
 
+        self.image_mut().disable_animation(); // will be re-enabled if any indentation changes
+
         let mut new_cursor_pos = if start_line == end_line {
-            // Single-line edit
-            self.line_mut(start_line)
-                .replace_range(start_pos, end_pos, new_str)?
+            // Single-line edit.
+            let was_structured = self.line(start_line).info().is_structured();
+            // Do the replacement.
+            let new_pos = self
+                .line_mut(start_line)
+                .replace_range(start_pos, end_pos, new_str)?;
+
+            // Should we add a "courtesy" `end` (because of a newly added structured instruction)?
+            let is_structured = self.line(start_line).info().is_structured();
+            let is_if = self.line(start_line).info().kind == InstrKind::If;
+
+            if !was_structured && is_structured {
+                // search for existing deactivated matching `end` (or `else` if the new instr is `if`)
+                let mut need_end = true;
+                for i in start_line + 1..self.text().len() {
+                    if self.line(i).info().kind == InstrKind::End && !self.line(i).info().active {
+                        need_end = false;
+                    }
+                    if is_if
+                        && self.line(i).info().kind == InstrKind::Else
+                        && !self.line(i).info().active
+                    {
+                        need_end = false;
+                    }
+                }
+                if need_end {
+                    let matching_end = CodeLine::new("end", &self.0.borrow().factory);
+                    self.text_mut().insert(start_line + 1, matching_end);
+                    self.line_mut(start_line + 1).reveal();
+                }
+            } else if was_structured && !is_structured {
+                // Should we delete an unnecessary subsequent `end` (because of a removed structured instr)?
+                if self.len() > start_line + 1
+                    && self.line(start_line + 1).info().active
+                    && self.line(start_line + 1).info().kind == InstrKind::End
+                    && self.line(start_line + 1).comment().is_empty()
+                {
+                    self.text_mut().remove(start_line + 1);
+                    self.line_mut(start_line).fly_end();
+                }
+            }
+
+            // Bounce on attempts to add whitespace at the prefix of a line
+            if start_pos == Position::begin() && new_str == " " {
+                self.line_mut(start_line).shake();
+            }
+
+            // Return new cursor position
+            new_pos
         } else if start_line < end_line {
             // Multi-line edit.
 
@@ -118,8 +187,7 @@ impl Editor {
                 .replace_range(start_pos, end_pos_in_line, &s)?;
 
             // Step 2: Remove all lines after the start.
-            self.component_mut()
-                .remove_range(start_line + 1, end_line + 1);
+            self.text_mut().remove_range(start_line + 1, end_line + 1);
 
             // Step 3: Insert the new text into the (remaining) start line.
             self.line_mut(start_line)
@@ -145,7 +213,7 @@ impl Editor {
                     let newline = CodeLine::new(&rest[1..], &self.0.borrow().factory);
                     new_cursor_pos = Position::begin();
                     fixup_line += 1;
-                    self.component_mut().insert(fixup_line, newline);
+                    self.text_mut().insert(fixup_line, newline);
                 }
             }
         }
@@ -155,12 +223,11 @@ impl Editor {
             Ok(()) => self.line(fixup_line).set_cursor_position(new_cursor_pos),
             Err(_) => {
                 // restore backup
-                self.component_mut()
-                    .remove_range(start_line, fixup_line + 1);
+                self.text_mut().remove_range(start_line, fixup_line + 1);
                 for (i, contents) in backup.iter().enumerate() {
                     let mut line = CodeLine::new(contents, &self.0.borrow().factory);
-                    line.strobe();
-                    self.component_mut().insert(start_line + i, line);
+                    line.shake();
+                    self.text_mut().insert(start_line + i, line);
                 }
 
                 self.on_change().expect("well-formed after restore");
@@ -226,8 +293,7 @@ impl Editor {
                         selection.focus_node().context("focus")?,
                         selection.focus_offset(),
                     )?;
-                    if line_idx + 1 < self.component().len()
-                        && pos == self.line(line_idx).end_position()
+                    if line_idx + 1 < self.text().len() && pos == self.line(line_idx).end_position()
                     {
                         ev.prevent_default();
                         self.line(line_idx + 1)
@@ -243,7 +309,7 @@ impl Editor {
                         selection.focus_node().context("focus")?,
                         selection.focus_offset(),
                     )?;
-                    if line_idx + 1 == self.component().len() {
+                    if line_idx + 1 == self.text().len() {
                         ev.prevent_default();
                         self.line(line_idx)
                             .set_cursor_position(self.line(line_idx).end_position());
@@ -280,8 +346,8 @@ impl Editor {
 
         // If the position is "in" the div element, make sure the offset matches expectations
         // (either 0 for the very beginning, or #lines for the very end).
-        if node.is_same_node(&*self.component()) {
-            let line_count = self.component().len();
+        if node.is_same_node(&*self.text()) {
+            let line_count = self.text().len();
             return Ok(if offset == 0 {
                 (0, Position::begin())
             } else if offset < line_count {
@@ -297,7 +363,7 @@ impl Editor {
         // Otherwise, find the line that hosts the position via binary search.
         // (This seems to be sub-millisecond for documents up to 10,000 lines.)
         let line_idx = self
-            .component()
+            .text()
             .binary_search_by(|probe| compare_document_position(probe, &node))
             .fmt_err()?;
 
@@ -305,26 +371,38 @@ impl Editor {
     }
 
     // Accessors for the component and for a particular line of code
-    fn component(&self) -> Ref<'_, ComponentType> {
-        Ref::map(self.0.borrow(), |c| &c.component)
+    fn textbox(&self) -> Ref<'_, ReactiveComponent<TextType>> {
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.0)
     }
 
-    fn component_mut(&mut self) -> RefMut<'_, ComponentType> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component)
+    fn textbox_mut(&self) -> RefMut<'_, ReactiveComponent<TextType>> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
+    }
+
+    fn image_mut(&self) -> RefMut<'_, DomImage> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().0)
+    }
+
+    fn text(&self) -> Ref<'_, TextType> {
+        Ref::map(self.textbox(), |c| c.inner())
+    }
+
+    fn text_mut(&mut self) -> RefMut<'_, TextType> {
+        RefMut::map(self.textbox_mut(), |c| c.inner_mut())
     }
 
     fn line(&self, idx: usize) -> Ref<'_, CodeLine> {
-        Ref::map(self.component(), |c| &c[idx])
+        Ref::map(self.text(), |c| &c[idx])
     }
 
     fn line_mut(&mut self, idx: usize) -> RefMut<'_, CodeLine> {
-        RefMut::map(self.component_mut(), |c| &mut c[idx])
+        RefMut::map(self.text_mut(), |c| &mut c[idx])
     }
 
     // get the "instructions" (active, well-formed lines) as text
     fn instructions_as_text(&self) -> impl Iterator<Item = Ref<'_, str>> {
         InstructionTextIterator {
-            editor: self.component(),
+            editor: self.text(),
             index: 0,
         }
         .chain(
@@ -385,7 +463,7 @@ impl Editor {
         //match each operator with its idx in the editor
         let mut instruction_table = Vec::new();
         let mut line_idx = 0;
-        let component = &self.0.borrow().component;
+        let component = &self.text();
         for op in ops {
             while line_idx < component.len()
                 && !component
@@ -442,7 +520,7 @@ impl Editor {
 }
 
 pub struct InstructionTextIterator<'a> {
-    editor: Ref<'a, ComponentType>,
+    editor: Ref<'a, TextType>,
     index: usize,
 }
 
@@ -468,11 +546,11 @@ impl<'a> Iterator for InstructionTextIterator<'a> {
 
 impl LineInfos for Editor {
     fn is_empty(&self) -> bool {
-        self.component().is_empty()
+        self.text().is_empty()
     }
 
     fn len(&self) -> usize {
-        self.component().len()
+        self.text().len()
     }
 
     fn info(&self, index: usize) -> impl Deref<Target = LineInfo> {
@@ -492,17 +570,31 @@ impl LineInfosMut for Editor {
     fn set_synthetic_ends(&mut self, num: usize) {
         self.0.borrow_mut().synthetic_ends = num;
     }
+
+    fn set_indent(&mut self, index: usize, num: usize) {
+        if self.line_mut(index).set_indent(num) {
+            self.image_mut().enable_animation();
+        }
+    }
+
+    fn set_frame_count(&mut self, count: usize) {
+        self.image_mut().set_frame_count(count)
+    }
+
+    fn set_frame_info(&mut self, num: usize, frame: FrameInfo) {
+        self.image_mut().set_frame(num, frame)
+    }
 }
 
 impl WithElement for Editor {
     type Element = HtmlDivElement;
     fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
-        self.component().with_element(f, g);
+        self.0.borrow().component.with_element(f, g);
     }
 }
 
 impl Component for Editor {
     fn audit(&self) {
-        self.component().audit()
+        self.0.borrow().component.audit()
     }
 }

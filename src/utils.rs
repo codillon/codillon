@@ -179,15 +179,32 @@ pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
     Ok(module.encode()?)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default, Clone)]
 pub enum InstrKind {
+    #[default]
+    Empty,
     If,
     Else,
     End,
-    OtherStructured, // block, loop, or try_table
-    Other,           // any other instruction
-    Empty,
+    OtherStructured,   // block, loop, or try_table
+    Other,             // any other instruction
     Malformed(String), // explanation
+}
+
+impl InstrKind {
+    fn stripped_clone(&self) -> InstrKind {
+        use InstrKind::*;
+
+        match self {
+            Malformed(_) => Malformed(String::new()),
+            If => If,
+            Else => Else,
+            End => End,
+            OtherStructured => OtherStructured,
+            Other => Other,
+            Empty => Empty,
+        }
+    }
 }
 
 impl From<Instruction<'_>> for InstrKind {
@@ -354,86 +371,129 @@ pub trait LineInfos {
     fn synthetic_ends(&self) -> usize;
 }
 
+#[derive(PartialEq, Clone, Default, Debug)]
+pub struct FrameInfo {
+    pub indent: usize,
+    pub start: usize,
+    pub end: usize,
+    pub unclosed: bool,
+    pub kind: InstrKind,
+}
+
 pub trait LineInfosMut: LineInfos {
     fn set_active_status(&mut self, index: usize, is_active: bool);
     fn set_synthetic_ends(&mut self, num: usize);
+    fn set_indent(&mut self, index: usize, num: usize);
+    fn set_frame_count(&mut self, count: usize);
+    fn set_frame_info(&mut self, num: usize, frame: FrameInfo);
 }
 
 /// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
 pub fn fix_frames(instrs: &mut impl LineInfosMut) {
-    // Use stacks as memory of frame begining borders.
-    let mut frame_stack: Vec<InstrKind> = Vec::new();
-
-    for i in 0..instrs.len() {
-        let mut is_active: bool = true;
-        match instrs.info(i).kind {
-            InstrKind::If => frame_stack.push(InstrKind::If),
-            InstrKind::OtherStructured => frame_stack.push(InstrKind::OtherStructured),
-            InstrKind::Else => {
-                if let Some(frame_entry) = frame_stack.last()
-                    && *frame_entry == InstrKind::If
-                {
-                    frame_stack.pop();
-                    frame_stack.push(InstrKind::Else);
-                } else {
-                    is_active = false;
-                }
-            }
-            InstrKind::End => {
-                if frame_stack.is_empty() {
-                    is_active = false;
-                } else {
-                    frame_stack.pop();
-                }
-            }
-            InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => (),
-        }
-
-        instrs.set_active_status(i, is_active);
+    struct OpenFrame {
+        num: usize,
+        line_no: usize,
+        kind: InstrKind,
     }
 
-    instrs.set_synthetic_ends(frame_stack.len())
-}
+    let mut frame_stack: Vec<OpenFrame> = Vec::new();
+    let mut frame_count = 0;
+    let len = instrs.len();
 
-/// Match frames for (Instruction or empty).
-///
-/// ### Panics
-/// When the input has unmatched frames
-pub fn match_frames(instrs: &[InstrKind]) -> Vec<Frame> {
-    let mut frames = Vec::new();
-    // Use stacks as memory of frame begining borders.
-    let mut frame_border_stack = Vec::new();
-
-    for (idx, instr) in instrs.iter().enumerate() {
-        match instr {
+    for line_no in 0..instrs.len() {
+        let kind = instrs.info(line_no).kind.stripped_clone();
+        match kind {
             InstrKind::If | InstrKind::OtherStructured => {
-                frame_border_stack.push((instr, idx));
+                instrs.set_indent(line_no, frame_stack.len());
+                instrs.set_active_status(line_no, true);
+                frame_stack.push(OpenFrame {
+                    num: frame_count,
+                    line_no,
+                    kind,
+                });
+                frame_count += 1;
             }
             InstrKind::Else => {
-                if let Some((prev, last_span_start)) = frame_border_stack.pop()
-                    && matches!(prev, InstrKind::If)
+                if let Some(OpenFrame {
+                    num,
+                    line_no: start,
+                    kind: InstrKind::If,
+                }) = frame_stack.last()
                 {
-                    let last_span_end = idx - 1;
-                    frames.push(last_span_start..=last_span_end);
+                    instrs.set_frame_info(
+                        *num,
+                        FrameInfo {
+                            indent: frame_stack.len() - 1,
+                            start: *start,
+                            end: line_no,
+                            unclosed: false,
+                            kind: InstrKind::If,
+                        },
+                    );
+                    frame_stack.pop();
+                    instrs.set_indent(line_no, frame_stack.len());
+                    instrs.set_active_status(line_no, true);
+                    frame_stack.push(OpenFrame {
+                        num: frame_count,
+                        line_no,
+                        kind: InstrKind::Else,
+                    });
+                    frame_count += 1;
                 } else {
-                    panic!("Unmatched else");
+                    instrs.set_indent(line_no, frame_stack.len());
+                    instrs.set_active_status(line_no, false);
                 }
-                frame_border_stack.push((instr, idx));
             }
             InstrKind::End => {
-                if let Some((_, last_span_start)) = frame_border_stack.pop() {
-                    frames.push(last_span_start..=idx);
+                if let Some(OpenFrame {
+                    num,
+                    line_no: start,
+                    kind,
+                    ..
+                }) = frame_stack.pop()
+                {
+                    instrs.set_indent(line_no, frame_stack.len());
+                    instrs.set_active_status(line_no, true);
+                    instrs.set_frame_info(
+                        num,
+                        FrameInfo {
+                            indent: frame_stack.len(),
+                            start,
+                            end: line_no,
+                            unclosed: false,
+                            kind,
+                        },
+                    );
                 } else {
-                    panic!("Unmatched end");
+                    instrs.set_indent(line_no, frame_stack.len());
+                    instrs.set_active_status(line_no, false);
                 }
             }
-            _ => (), // Ignore other instructions
+            InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => {
+                instrs.set_indent(line_no, frame_stack.len());
+                instrs.set_active_status(line_no, true);
+            }
         }
     }
-    if !frame_border_stack.is_empty() {
-        panic!("Unmatched frames: {frame_border_stack:?}");
+
+    instrs.set_synthetic_ends(frame_stack.len());
+    instrs.set_frame_count(frame_count);
+
+    while let Some(OpenFrame {
+        num, line_no, kind, ..
+    }) = frame_stack.pop()
+    {
+        instrs.set_frame_info(
+            num,
+            FrameInfo {
+                indent: frame_stack.len(),
+                start: line_no,
+                end: len,
+                unclosed: true,
+                kind,
+            },
+        );
     }
-    frames
 }
 
 pub trait FmtError {
@@ -452,32 +512,70 @@ mod tests {
     use super::*;
     use wasmparser::BlockType;
 
-    impl<const N: usize> LineInfos for ([LineInfo; N], usize) {
+    struct TestLineInfos {
+        lines: Vec<LineInfo>,
+        synthetic_ends: usize,
+        frames: Vec<FrameInfo>,
+    }
+
+    impl TestLineInfos {
+        fn new<const N: usize>(instrs: [&str; N]) -> Self {
+            Self {
+                lines: instrs
+                    .into_iter()
+                    .map(|x| LineInfo {
+                        kind: parse_instr(x),
+                        active: true,
+                        ..Default::default()
+                    })
+                    .collect(),
+                synthetic_ends: 0,
+                frames: Vec::new(),
+            }
+        }
+    }
+
+    impl LineInfos for TestLineInfos {
         fn is_empty(&self) -> bool {
-            N == 0
+            self.lines.is_empty()
         }
 
         fn len(&self) -> usize {
-            N
+            self.lines.len()
         }
 
         #[allow(refining_impl_trait)]
         fn info(&self, index: usize) -> &LineInfo {
-            &self.0[index]
+            &self.lines[index]
         }
 
         fn synthetic_ends(&self) -> usize {
-            0
+            self.synthetic_ends
         }
     }
 
-    impl<const N: usize> LineInfosMut for ([LineInfo; N], usize) {
+    impl LineInfosMut for TestLineInfos {
         fn set_active_status(&mut self, index: usize, is_active: bool) {
-            self.0[index].active = is_active;
+            self.lines[index].active = is_active;
         }
 
         fn set_synthetic_ends(&mut self, num: usize) {
-            self.1 = num;
+            self.synthetic_ends = num;
+        }
+
+        fn set_indent(&mut self, index: usize, num: usize) {
+            self.lines[index].indent = Some(num.try_into().unwrap());
+        }
+
+        fn set_frame_info(&mut self, num: usize, frame: FrameInfo) {
+            if num >= self.frames.len() {
+                self.frames.resize(num + 1, FrameInfo::default());
+            }
+            self.frames[num] = frame;
+        }
+
+        fn set_frame_count(&mut self, count: usize) {
+            self.frames.truncate(count);
         }
     }
 
@@ -577,86 +675,168 @@ mod tests {
 
     #[test]
     fn test_fix_frames() {
-        let instrs1 = ["block", "i32.const 42", "drop"];
-        let mut infos1 = (
-            instrs1.map(|x| LineInfo {
-                kind: parse_instr(x),
-                active: false,
-            }),
-            0,
-        );
-        fix_frames(&mut infos1);
-        assert!(infos1.1 == 1 && infos1.0.iter().all(|x| x.active));
+        {
+            let mut infos1 = TestLineInfos::new(["block", "i32.const 42", "drop"]);
+            fix_frames(&mut infos1);
+            assert!(infos1.lines.iter().all(|x| x.active));
+            assert_eq!(
+                infos1
+                    .lines
+                    .iter()
+                    .map(|x| x.indent.unwrap())
+                    .collect::<Vec<_>>(),
+                [0, 1, 1]
+            );
+            assert_eq!(infos1.synthetic_ends, 1);
+            assert_eq!(
+                infos1.frames,
+                [FrameInfo {
+                    indent: 0,
+                    start: 0,
+                    end: 3,
+                    unclosed: true,
+                    kind: InstrKind::OtherStructured
+                }]
+            );
+        }
 
-        let instrs2 = [
-            "if",    // 0
-            "block", // 1
-            "else",  // 2
-            "end",   // 3
-        ];
-        let mut infos2 = (
-            instrs2.map(|x| LineInfo {
-                kind: parse_instr(x),
-                active: false,
-            }),
-            0,
-        );
-        fix_frames(&mut infos2);
-        assert!(infos2.1 == 1 && infos2.0.map(|x| x.active) == [true, true, false, true]);
+        {
+            let mut infos2 = TestLineInfos::new([
+                "if",    // 0
+                "block", // 1
+                "else",  // 2
+                "end",   // 3
+            ]);
+            fix_frames(&mut infos2);
+            assert_eq!(infos2.synthetic_ends, 1);
+            assert_eq!(
+                infos2.lines.iter().map(|x| x.active).collect::<Vec<_>>(),
+                [true, true, false, true]
+            );
+            assert_eq!(
+                infos2
+                    .lines
+                    .iter()
+                    .map(|x| x.indent.unwrap())
+                    .collect::<Vec<_>>(),
+                [0, 1, 2, 1]
+            );
+            assert_eq!(
+                infos2.frames,
+                [
+                    FrameInfo {
+                        indent: 0,
+                        start: 0,
+                        end: 4,
+                        unclosed: true,
+                        kind: InstrKind::If
+                    },
+                    FrameInfo {
+                        indent: 1,
+                        start: 1,
+                        end: 3,
+                        unclosed: false,
+                        kind: InstrKind::OtherStructured
+                    }
+                ]
+            );
+        }
 
-        let instrs3 = ["end"];
-        let mut infos3 = (
-            instrs3.map(|x| LineInfo {
-                kind: parse_instr(x),
-                active: false,
-            }),
-            0,
-        );
-        fix_frames(&mut infos3);
-        assert!(infos3.1 == 0 && !infos3.0[0].active);
-    }
+        {
+            let mut infos3 = TestLineInfos::new(["end"]);
+            fix_frames(&mut infos3);
+            assert!(!infos3.lines[0].active);
+            assert!(infos3.frames.is_empty());
+        }
 
-    #[test]
-    fn test_frame_match() {
-        // Test case 1: Simple block
-        let instrs1 = ["block", "i32.const 42", "drop", "end"];
-        let frames1 = match_frames(&instrs1.into_iter().map(parse_instr).collect::<Vec<_>>());
-        let expected1 = [0..=3]; // block from 0 to 3
-        assert_eq!(frames1, expected1);
+        {
+            // Test case 4: Simple block
+            let mut infos4 = TestLineInfos::new(["block", "i32.const 42", "drop", "end"]);
+            fix_frames(&mut infos4);
+            assert_eq!(
+                infos4.frames,
+                [FrameInfo {
+                    indent: 0,
+                    start: 0,
+                    end: 3,
+                    unclosed: false,
+                    kind: InstrKind::OtherStructured
+                }]
+            );
+        }
 
-        // Test case 2: Complex nested structure
-        let instrs2 = [
-            "block",        // 0
-            "i32.const 42", // 1
-            "drop",         // 2
-            "end",          // 3
-            "block",        // 4
-            "loop",         // 5
-            "if",           // 6
-            "i32.const 43", // 7
-            "drop",         // 8
-            "else",         // 9
-            "i32.const 44", // 10
-            "drop",         // 11
-            "end",          // 12
-            "end",          // 13
-            "end",          // 14
-        ];
-
-        let mut frames2 = match_frames(&instrs2.into_iter().map(parse_instr).collect::<Vec<_>>());
-        let mut expected2 = [
-            0..=3,  // first block
-            4..=14, // second block
-            6..=8,  // if part
-            5..=13, // loop
-            9..=12, // else part
-        ];
-
-        // Sort both vectors for comparison since order might vary
-        frames2.sort_by_key(|r| *r.start());
-        expected2.sort_by_key(|r| *r.start());
-
-        assert_eq!(frames2, expected2);
+        {
+            // Test case 5: Complex nested structure
+            let mut infos5 = TestLineInfos::new([
+                "block",        // 0
+                "i32.const 42", // 1
+                "drop",         // 2
+                "end",          // 3
+                "block",        // 4
+                "loop",         // 5
+                "if",           // 6
+                "i32.const 43", // 7
+                "drop",         // 8
+                "else",         // 9
+                "i32.const 44", // 10
+                "drop",         // 11
+                "end",          // 12
+                "end",          // 13
+                "end",          // 14
+            ]);
+            fix_frames(&mut infos5);
+            assert_eq!(infos5.frames.len(), 5);
+            assert_eq!(
+                infos5.frames[0],
+                FrameInfo {
+                    start: 0,
+                    end: 3,
+                    unclosed: false,
+                    indent: 0,
+                    kind: InstrKind::OtherStructured
+                }
+            );
+            assert_eq!(
+                infos5.frames[1],
+                FrameInfo {
+                    start: 4,
+                    end: 14,
+                    unclosed: false,
+                    indent: 0,
+                    kind: InstrKind::OtherStructured
+                }
+            );
+            assert_eq!(
+                infos5.frames[2],
+                FrameInfo {
+                    start: 5,
+                    end: 13,
+                    unclosed: false,
+                    indent: 1,
+                    kind: InstrKind::OtherStructured
+                }
+            );
+            assert_eq!(
+                infos5.frames[3],
+                FrameInfo {
+                    start: 6,
+                    end: 9,
+                    unclosed: false,
+                    indent: 2,
+                    kind: InstrKind::If
+                }
+            );
+            assert_eq!(
+                infos5.frames[4],
+                FrameInfo {
+                    start: 9,
+                    end: 12,
+                    unclosed: false,
+                    indent: 2,
+                    kind: InstrKind::Else
+                }
+            );
+        }
     }
 
     #[test]

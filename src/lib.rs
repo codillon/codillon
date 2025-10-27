@@ -5,4 +5,5 @@ pub mod jet;
 pub mod utils;
 
 pub mod editor;
+pub mod graphics;
 pub mod line;

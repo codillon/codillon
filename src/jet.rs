@@ -12,7 +12,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::{HtmlBodyElement, KeyboardEvent, wasm_bindgen::JsCast};
+use web_sys::{Element, HtmlBodyElement, HtmlElement, KeyboardEvent, wasm_bindgen::JsCast};
 
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the jet (web support) module.
@@ -25,13 +25,13 @@ pub trait WithNode {
 }
 
 // Any HTML element
-pub trait AnyElement: AsRef<web_sys::HtmlElement> + AsRef<web_sys::Node> {
-    fn element(&self) -> &web_sys::HtmlElement {
+pub trait AnyElement: AsRef<Element> + AsRef<web_sys::Node> {
+    fn element(&self) -> &Element {
         self.as_ref()
     }
 }
 
-impl<T: AsRef<web_sys::HtmlElement> + AsRef<web_sys::Node>> AnyElement for T {}
+impl<T: AsRef<Element> + AsRef<web_sys::Node>> AnyElement for T {}
 
 pub trait WithElement {
     type Element: AnyElement;
@@ -46,8 +46,6 @@ impl<T: WithElement> WithNode for T {
 
 // Wrapper for a Node or Element that removes it from its parent when dropped
 struct AutoRemove<T: AsRef<web_sys::Node>>(T);
-
-impl<T: AsRef<web_sys::Node>> AutoRemove<T> {}
 
 impl<T: AsRef<web_sys::Node>> From<T> for AutoRemove<T> {
     fn from(t: T) -> Self {
@@ -116,9 +114,160 @@ impl TextHandle {
 
 // Event handlers on an element
 #[derive(Default)]
-struct Handlers {
+pub struct Handlers {
     beforeinput: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
     keydown: Option<Closure<dyn Fn(web_sys::KeyboardEvent)>>,
+}
+
+impl Handlers {
+    pub fn audit(&self, elem: &impl AsRef<HtmlElement>) {
+        audit_handler(&self.beforeinput, elem.as_ref().onbeforeinput());
+        audit_handler(&self.keydown, elem.as_ref().onkeydown());
+
+        fn audit_handler<EventType>(
+            expected: &Option<Closure<dyn Fn(EventType)>>,
+            actual: Option<::js_sys::Function>,
+        ) {
+            match (expected, actual) {
+                (Some(expected), Some(actual)) => {
+                    assert_eq!(actual, *expected.as_ref().unchecked_ref())
+                }
+                (Some(_), None) => panic!("missing event handler"),
+                (None, Some(_)) => panic!("unexpected event handler"),
+                (None, None) => (),
+            }
+        }
+    }
+
+    pub fn set_onbeforeinput<E: WithElement, F: Fn(InputEventHandle) + 'static>(
+        &mut self,
+        elem: &mut E,
+        handler: F,
+    ) where
+        E::Element: AsRef<HtmlElement>,
+    {
+        self.beforeinput = Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
+        elem.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onbeforeinput(Some(
+                    self.beforeinput.as_ref().unwrap().as_ref().unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
+
+    pub fn set_onkeydown<E: WithElement, F: Fn(KeyboardEvent) + 'static>(
+        &mut self,
+        elem: &mut E,
+        handler: F,
+    ) where
+        E::Element: AsRef<HtmlElement>,
+    {
+        self.keydown = Some(Closure::new(handler));
+        elem.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onkeydown(Some(
+                    self.keydown.as_ref().unwrap().as_ref().unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
+}
+
+pub struct ReactiveComponent<T: ElementComponent> {
+    component: T,
+    handlers: Handlers,
+}
+
+impl<T: ElementComponent> ReactiveComponent<T>
+where
+    T::Element: AsRef<HtmlElement>,
+{
+    pub fn new(component: T) -> Self {
+        Self {
+            component,
+            handlers: Handlers::default(),
+        }
+    }
+
+    pub fn inner(&self) -> &T {
+        &self.component
+    }
+
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.component
+    }
+}
+
+pub trait ControlHandlers {
+    fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
+    fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F);
+}
+
+impl<T: ElementComponent> ControlHandlers for ReactiveComponent<T>
+where
+    T::Element: AsRef<HtmlElement>,
+{
+    fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F) {
+        self.handlers.beforeinput = Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
+        self.component.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onbeforeinput(Some(
+                    self.handlers
+                        .beforeinput
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
+    fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F) {
+        self.handlers.keydown = Some(Closure::new(handler));
+        self.component.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onkeydown(Some(
+                    self.handlers
+                        .keydown
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
+}
+
+impl<T: ElementComponent> Component for ReactiveComponent<T>
+where
+    T::Element: AsRef<HtmlElement>,
+{
+    fn audit(&self) {
+        self.component.audit();
+        self.component.with_element(
+            |elem| {
+                self.handlers.audit(&elem);
+            },
+            TOKEN,
+        );
+    }
+}
+
+impl<T: ElementComponent> WithElement for ReactiveComponent<T> {
+    type Element = T::Element;
+    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
+        self.component.with_element(f, g)
+    }
 }
 
 // Wrapper for a DOM Element, allowing access to and modification of its attributes
@@ -126,7 +275,6 @@ struct Handlers {
 pub struct ElementHandle<T: AnyElement> {
     elem: AutoRemove<T>,
     attributes: HashMap<String, String>,
-    event_handlers: Handlers,
 }
 
 impl<T: AnyElement> WithElement for ElementHandle<T> {
@@ -141,7 +289,6 @@ impl<T: AnyElement> ElementHandle<T> {
         Self {
             elem: elem.into(),
             attributes: HashMap::default(),
-            event_handlers: Handlers::default(),
         }
     }
 
@@ -182,20 +329,39 @@ impl<T: AnyElement> ElementHandle<T> {
     }
 
     pub fn set_attribute(&mut self, name: &str, value: &str) {
-        self.attributes.insert(name.to_string(), value.to_string());
-        self.elem.element().set_attribute(name, value).unwrap();
+        match self.attributes.insert(name.to_string(), value.to_string()) {
+            None => self.elem.element().set_attribute(name, value).unwrap(),
+            Some(x) if x != value => self.elem.element().set_attribute(name, value).unwrap(),
+            _ => {}
+        }
     }
 
     pub fn remove_attribute(&mut self, name: &str) {
-        self.attributes.remove(name);
-        self.elem.element().remove_attribute(name).unwrap();
+        if self.attributes.remove(name).is_some() {
+            self.elem.element().remove_attribute(name).unwrap()
+        }
     }
 
     pub fn get_attribute(&self, name: &str) -> Option<&String> {
         self.attributes.get(name)
     }
 
-    pub fn audit(&self) {
+    pub fn get_child_node_list(&self) -> NodeListHandle {
+        NodeListHandle(self.elem.element().child_nodes())
+    }
+
+    pub fn scroll_into_view(&self) {
+        let opts = web_sys::ScrollIntoViewOptions::new();
+        opts.set_behavior(web_sys::ScrollBehavior::Smooth);
+        opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
+        self.elem
+            .element()
+            .scroll_into_view_with_scroll_into_view_options(&opts);
+    }
+}
+
+impl<T: AnyElement> Component for ElementHandle<T> {
+    fn audit(&self) {
         for (key, value) in &self.attributes {
             if let Some(dom_value) = self.elem.element().get_attribute(key) {
                 assert_eq!(dom_value, *value);
@@ -207,64 +373,6 @@ impl<T: AnyElement> ElementHandle<T> {
         for dom_key in self.elem.element().get_attribute_names() {
             assert!(self.attributes.contains_key(&dom_key.as_string().unwrap()));
         }
-
-        match (
-            &self.event_handlers.beforeinput,
-            self.elem.element().onbeforeinput(),
-        ) {
-            (Some(expect), Some(actual)) => assert_eq!(actual, *expect.as_ref().unchecked_ref()),
-            (Some(_), None) => panic!("missing event handler"),
-            (None, Some(_)) => panic!("unexpected event handler"),
-            (None, None) => (),
-        }
-
-        match (
-            &self.event_handlers.keydown,
-            self.elem.element().onkeydown(),
-        ) {
-            (Some(expect), Some(actual)) => assert_eq!(actual, *expect.as_ref().unchecked_ref()),
-            (Some(_), None) => panic!("missing event handler"),
-            (None, Some(_)) => panic!("unexpected event handler"),
-            (None, None) => (),
-        }
-    }
-
-    pub fn get_child_node_list(&self) -> NodeListHandle {
-        NodeListHandle(self.elem.element().child_nodes())
-    }
-
-    pub fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F) {
-        self.event_handlers.beforeinput =
-            Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
-        self.elem.element().set_onbeforeinput(Some(
-            self.event_handlers
-                .beforeinput
-                .as_ref()
-                .unwrap()
-                .as_ref()
-                .unchecked_ref(),
-        ));
-    }
-
-    pub fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F) {
-        self.event_handlers.keydown = Some(Closure::new(handler));
-        self.elem.element().set_onkeydown(Some(
-            self.event_handlers
-                .keydown
-                .as_ref()
-                .unwrap()
-                .as_ref()
-                .unchecked_ref(),
-        ));
-    }
-
-    pub fn scroll_into_view(&self) {
-        let opts = web_sys::ScrollIntoViewOptions::new();
-        opts.set_behavior(web_sys::ScrollBehavior::Smooth);
-        opts.set_block(web_sys::ScrollLogicalPosition::Nearest);
-        self.elem
-            .element()
-            .scroll_into_view_with_scroll_into_view_options(&opts);
     }
 }
 
@@ -295,6 +403,7 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> Default for Document
     }
 }
 
+#[derive(Clone)]
 pub struct ElementFactory(web_sys::Document);
 
 impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyType> {
@@ -337,6 +446,14 @@ impl ElementFactory {
             .unwrap_or_else(|_| panic!("expecting {t} element"))
     }
 
+    fn create_svg_element<T: JsCast>(&self, t: &str) -> T {
+        self.0
+            .create_element_ns(Some("http://www.w3.org/2000/svg"), t)
+            .unwrap()
+            .dyn_into::<T>()
+            .unwrap_or_else(|_| panic!("expecting {t} element"))
+    }
+
     pub fn div(&self) -> ElementHandle<web_sys::HtmlDivElement> {
         ElementHandle::new(self.create_element("div"))
     }
@@ -355,6 +472,38 @@ impl ElementFactory {
 
     pub fn body(&self) -> ElementHandle<web_sys::HtmlBodyElement> {
         ElementHandle::new(self.create_element("body"))
+    }
+
+    pub fn svg(&self) -> ElementHandle<web_sys::SvgElement> {
+        ElementHandle::new(self.create_svg_element("svg"))
+    }
+
+    pub fn svg_line(&self) -> ElementHandle<web_sys::SvgLineElement> {
+        ElementHandle::new(self.create_svg_element("line"))
+    }
+
+    pub fn svg_defs(&self) -> ElementHandle<web_sys::SvgDefsElement> {
+        ElementHandle::new(self.create_svg_element("defs"))
+    }
+
+    pub fn svg_marker(&self) -> ElementHandle<web_sys::SvgMarkerElement> {
+        ElementHandle::new(self.create_svg_element("marker"))
+    }
+
+    pub fn svg_g(&self) -> ElementHandle<web_sys::SvggElement> {
+        ElementHandle::new(self.create_svg_element("g"))
+    }
+
+    pub fn svg_circle(&self) -> ElementHandle<web_sys::SvgCircleElement> {
+        ElementHandle::new(self.create_svg_element("circle"))
+    }
+
+    pub fn svg_path(&self) -> ElementHandle<web_sys::SvgPathElement> {
+        ElementHandle::new(self.create_svg_element("path"))
+    }
+
+    pub fn svg_use(&self) -> ElementHandle<web_sys::SvgUseElement> {
+        ElementHandle::new(self.create_svg_element("use"))
     }
 }
 
