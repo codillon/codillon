@@ -160,7 +160,7 @@ impl Editor {
                 }
             } else if was_structured && !is_structured {
                 // Should we delete an unnecessary subsequent `end` (because of a removed structured instr)?
-                if self.len() > start_line
+                if self.len() > start_line + 1
                     && self.line(start_line + 1).info().active
                     && self.line(start_line + 1).info().kind == InstrKind::End
                     && self.line(start_line + 1).comment().is_empty()
