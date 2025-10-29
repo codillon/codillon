@@ -463,23 +463,24 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                 if let Some(pos) = frame_stack.iter().rposition(|f| matches!(f.kind, InstrKind::FuncHeader)) {
                     // Close all frames at and after that
                     while frame_stack.len() > pos {
-                        let Some(OpenFrame { num, line_no: start, kind }) = frame_stack.pop() else { continue };
+                        let Some(OpenFrame { num, line_no: start, kind }) = frame_stack.pop() else { break; };
+                        let indent = frame_stack.len();
 
-                        // Add synthetic end
-                        match kind {
-                            InstrKind::FuncHeader => {
-                                if synthetic {
-                                    synthetic_ends.push((line_no - 1, ")".to_string()));
-                                }
+                        if synthetic {
+                            // Add synthetic end
+                            match kind {
+                                InstrKind::FuncHeader => synthetic_ends.push((line_no - 1, ")".to_string())),
+                                _ => synthetic_ends.push((line_no - 1, "end".to_string())),
                             }
-                            _ => synthetic_ends.push((line_no - 1, "end".to_string())),
+                        } else {
+                            lines.set_indent(line_no, indent);
                         }
 
                         // Record frame
                         lines.set_frame_info(
                             num,
                             FrameInfo {
-                                indent: frame_stack.len(),
+                                indent: indent,
                                 start: start,
                                 end: line_no,
                                 unclosed: true,
@@ -512,7 +513,14 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
 
                     if can_close {
                         let indent = frame_stack.len() - 1;
-                        lines.set_indent(line_no, indent);
+
+                        if synthetic {
+                            // Add synthetic end
+                            synthetic_ends.push((line_no - 1, "end".to_string()));
+                        } else {
+                            lines.set_indent(line_no, indent);
+                        }
+
                         lines.set_frame_info(
                             *num,
                             FrameInfo {
@@ -524,10 +532,6 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.pop();
-
-                        if synthetic {
-                            synthetic_ends.push((line_no - 1, "end".to_string()));
-                        }
 
                         1
                     } else {
