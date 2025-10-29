@@ -483,7 +483,7 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                                 indent: indent,
                                 start: start,
                                 end: line_no,
-                                unclosed: true,
+                                unclosed: synthetic,
                                 kind,
                             },
                         );
@@ -527,7 +527,7 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                                 indent,
                                 start: *start,
                                 end: line_no,
-                                unclosed: false,
+                                unclosed: synthetic,
                                 kind: open_kind.clone(),
                             },
                         );
@@ -597,7 +597,9 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
             // Skip if the instruction is not wrapped in a function
             if !in_func {
                 lines.set_indent(line_no, frame_stack.len());
-                lines.set_active_status(line_no, false);
+                if lines.info(line_no).is_instr() {
+                    lines.set_active_status(line_no, false);
+                }
                 continue;
             }
 
