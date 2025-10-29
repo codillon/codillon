@@ -1,7 +1,6 @@
 use crate::line::LineInfo;
 use crate::modular::{FuncHeader};
-use anyhow::{Result, anyhow, bail};
-use self_cell::self_cell;
+use anyhow::{Result, anyhow};
 use std::ops::{Deref, RangeInclusive};
 use wasm_encoder::{
     CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
@@ -456,8 +455,6 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
         synthetic: bool,
         synthetic_ends: &mut Vec<(usize, String)>,
     ) -> usize {
-        let mut active = false;
-
         match kind {
             InstrKind::FuncModuEnd => {
                 let mut closed_num = 0;
@@ -492,10 +489,8 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                         closed_num += 1;
                     }
 
-                    active = true;
-                }
-
-                if !active {
+                } else {
+                    // No matching open frame
                     lines.set_indent(line_no, frame_stack.len());
                     lines.set_active_status(line_no, false);
                 }
@@ -529,20 +524,23 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.pop();
-                        active = true;
 
                         if synthetic {
                             synthetic_ends.push((line_no - 1, "end".to_string()));
                         }
-                    }
-                } 
 
-                if !active {
+                        1
+                    } else {
+                        lines.set_indent(line_no, frame_stack.len());
+                        lines.set_active_status(line_no, false);
+                        0
+                    }
+                } else {
+                    // No matching open frame
                     lines.set_indent(line_no, frame_stack.len());
                     lines.set_active_status(line_no, false);
+                    0
                 }
-
-                1
             }
             _ => 0,
         }
