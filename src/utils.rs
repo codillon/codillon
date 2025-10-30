@@ -446,7 +446,7 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
         }
     }
 
-    // Return the number of frames opened
+    // Return the number of frames closed
     fn try_close_frame(
         lines: &mut impl LineInfosMut, 
         line_no: usize, 
@@ -476,6 +476,11 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                             lines.set_indent(line_no, indent);
                         }
 
+                        let frame_unclosed = match kind {
+                            InstrKind::FuncHeader => synthetic,
+                            _ => true, // instructions frames are not closed
+                        };
+
                         // Record frame
                         lines.set_frame_info(
                             num,
@@ -483,7 +488,7 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                                 indent: indent,
                                 start: start,
                                 end: line_no,
-                                unclosed: synthetic,
+                                unclosed: frame_unclosed,
                                 kind,
                             },
                         );
