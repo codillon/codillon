@@ -1,4 +1,5 @@
 use crate::line::LineInfo;
+use crate::modular::FuncHeader;
 use anyhow::{Result, anyhow};
 use std::ops::{Deref, RangeInclusive};
 use wasm_encoder::{
@@ -172,7 +173,7 @@ pub struct TypesTable {
 }
 
 pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
-    let txt = format!("module (func (export \"main\")\n{s})");
+    let txt = format!("module {s}");
     let binding = ParseBuffer::new(&txt)?;
     let mut module = parser::parse::<Module>(&binding)?;
 
@@ -183,6 +184,11 @@ pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
 pub enum InstrKind {
     #[default]
     Empty,
+
+    FuncHeader,
+    ModuHeader,
+    FuncModuEnd,
+
     If,
     Else,
     End,
@@ -203,7 +209,17 @@ impl InstrKind {
             OtherStructured => OtherStructured,
             Other => Other,
             Empty => Empty,
+            FuncHeader => FuncHeader,
+            ModuHeader => ModuHeader,
+            FuncModuEnd => FuncModuEnd,
         }
+    }
+
+    pub fn is_func_or_modu(&self) -> bool {
+        matches!(
+            self,
+            InstrKind::FuncHeader | InstrKind::ModuHeader | InstrKind::FuncModuEnd
+        )
     }
 }
 
@@ -241,20 +257,29 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     }
 }
 
-/// Parse one code line as instruction
-/// (only accepts plain instructions)
+/// Parse one code line
 ///
-/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Instruction
+/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer
 ///
 /// # Parameters
-/// s: A string slice representing a Wasm instruction
+/// s: A string slice representing a line
 ///
 /// # Returns
-/// InstrKind: instruction (or malformed "instruction") of given category
+/// InstrKind: instruction or func/modu header/end (or malformed "instruction") of given category
 pub fn parse_instr(s: &str) -> InstrKind {
     let s = s.trim(); // get rid of spaces
     if s.is_empty() {
         InstrKind::Empty // no instruction on this line
+    } else if s.starts_with("(func") {
+        match ParseBuffer::new(&s[1..]) {
+            Ok(buf) => match parser::parse::<FuncHeader>(&buf) {
+                Ok(_) => InstrKind::FuncHeader,
+                Err(e) => e.into(),
+            },
+            Err(e) => e.into(),
+        }
+    } else if s == ")" {
+        InstrKind::FuncModuEnd
     } else {
         match ParseBuffer::new(s) {
             Ok(buf) => match parser::parse::<Instruction>(&buf) {
@@ -368,7 +393,7 @@ pub trait LineInfos {
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
     fn info(&self, index: usize) -> impl Deref<Target = LineInfo>;
-    fn synthetic_ends(&self) -> usize;
+    fn synthetic_ends_len(&self) -> usize;
 }
 
 #[derive(PartialEq, Clone, Default, Debug)]
@@ -382,118 +407,283 @@ pub struct FrameInfo {
 
 pub trait LineInfosMut: LineInfos {
     fn set_active_status(&mut self, index: usize, is_active: bool);
-    fn set_synthetic_ends(&mut self, num: usize);
     fn set_indent(&mut self, index: usize, num: usize);
     fn set_frame_count(&mut self, count: usize);
     fn set_frame_info(&mut self, num: usize, frame: FrameInfo);
+    fn reset_synthetic_ends(&mut self);
+    fn add_synthetic_ends(&mut self, list: &mut Vec<(usize, String)>);
 }
 
 /// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
-pub fn fix_frames(instrs: &mut impl LineInfosMut) {
+pub fn fix_frames(lines: &mut impl LineInfosMut) {
     struct OpenFrame {
         num: usize,
         line_no: usize,
         kind: InstrKind,
     }
 
-    let mut frame_stack: Vec<OpenFrame> = Vec::new();
-    let mut frame_count = 0;
-    let len = instrs.len();
-
-    for line_no in 0..instrs.len() {
-        let kind = instrs.info(line_no).kind.stripped_clone();
+    // Return the number of frames opened
+    fn try_open_frame(
+        lines: &mut impl LineInfosMut,
+        line_no: usize,
+        kind: &InstrKind,
+        frame_stack: &mut Vec<OpenFrame>,
+        frame_count: usize,
+    ) -> usize {
         match kind {
-            InstrKind::If | InstrKind::OtherStructured => {
-                instrs.set_indent(line_no, frame_stack.len());
-                instrs.set_active_status(line_no, true);
+            InstrKind::If
+            | InstrKind::Else
+            | InstrKind::OtherStructured
+            | InstrKind::FuncHeader => {
+                // Set indentation
+                lines.set_indent(line_no, frame_stack.len());
+
+                // Push frame opening
                 frame_stack.push(OpenFrame {
                     num: frame_count,
                     line_no,
-                    kind,
+                    kind: kind.clone(),
                 });
-                frame_count += 1;
+
+                1
             }
-            InstrKind::Else => {
+            _ => 0,
+        }
+    }
+
+    // Return the number of frames closed
+    fn try_close_frame(
+        lines: &mut impl LineInfosMut,
+        line_no: usize,
+        kind: &InstrKind,
+        frame_stack: &mut Vec<OpenFrame>,
+        synthetic: bool,
+        synthetic_ends: &mut Vec<(usize, String)>,
+    ) -> usize {
+        match kind {
+            InstrKind::FuncModuEnd => {
+                let mut closed_num = 0;
+
+                // Find the last inserted Func opening
+                if let Some(pos) = frame_stack
+                    .iter()
+                    .rposition(|f| matches!(f.kind, InstrKind::FuncHeader))
+                {
+                    // Close all frames at and after that
+                    while frame_stack.len() > pos {
+                        let Some(OpenFrame {
+                            num,
+                            line_no: start,
+                            kind,
+                        }) = frame_stack.pop()
+                        else {
+                            break;
+                        };
+                        let indent = frame_stack.len();
+
+                        // Add synthetic end if required
+                        match kind {
+                            InstrKind::FuncHeader => {
+                                if synthetic {
+                                    synthetic_ends.push((line_no - 1, ")".to_string()));
+                                } else {
+                                    lines.set_indent(line_no, indent);
+                                }
+                            }
+                            _ => synthetic_ends.push((line_no - 1, "end".to_string())),
+                        }
+
+                        let frame_unclosed = match kind {
+                            InstrKind::FuncHeader => synthetic,
+                            _ => true, // instructions frames are not closed
+                        };
+
+                        // Record frame
+                        lines.set_frame_info(
+                            num,
+                            FrameInfo {
+                                indent,
+                                start,
+                                end: line_no,
+                                unclosed: frame_unclosed,
+                                kind,
+                            },
+                        );
+                        closed_num += 1;
+                    }
+                } else {
+                    // No matching open frame
+                    lines.set_indent(line_no, frame_stack.len());
+                    lines.set_active_status(line_no, false);
+                }
+
+                closed_num
+            }
+            InstrKind::Else | InstrKind::End => {
                 if let Some(OpenFrame {
                     num,
                     line_no: start,
-                    kind: InstrKind::If,
+                    kind: open_kind,
                 }) = frame_stack.last()
                 {
-                    instrs.set_frame_info(
-                        *num,
-                        FrameInfo {
-                            indent: frame_stack.len() - 1,
-                            start: *start,
-                            end: line_no,
-                            unclosed: false,
-                            kind: InstrKind::If,
-                        },
+                    let can_close = matches!(
+                        (kind, open_kind),
+                        (InstrKind::Else, InstrKind::If)
+                            | (
+                                InstrKind::End,
+                                InstrKind::If | InstrKind::Else | InstrKind::OtherStructured
+                            )
                     );
-                    frame_stack.pop();
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, true);
-                    frame_stack.push(OpenFrame {
-                        num: frame_count,
+
+                    if can_close {
+                        let indent = frame_stack.len() - 1;
+
+                        if synthetic {
+                            // Add synthetic end
+                            synthetic_ends.push((line_no - 1, "end".to_string()));
+                        } else {
+                            lines.set_indent(line_no, indent);
+                        }
+
+                        lines.set_frame_info(
+                            *num,
+                            FrameInfo {
+                                indent,
+                                start: *start,
+                                end: line_no,
+                                unclosed: synthetic,
+                                kind: open_kind.clone(),
+                            },
+                        );
+                        frame_stack.pop();
+
+                        1
+                    } else {
+                        lines.set_indent(line_no, frame_stack.len());
+                        lines.set_active_status(line_no, false);
+                        0
+                    }
+                } else {
+                    // No matching open frame
+                    lines.set_indent(line_no, frame_stack.len());
+                    lines.set_active_status(line_no, false);
+                    0
+                }
+            }
+            _ => 0,
+        }
+    }
+
+    let mut frame_stack: Vec<OpenFrame> = Vec::new();
+    let mut frame_count = 0;
+    // (line idx just before synthetic end, synthetic end word)
+    let mut synthetic_ends: Vec<(usize, String)> = Vec::new();
+    let len = lines.len();
+    let mut in_func = false;
+
+    for line_no in 0..lines.len() {
+        // Assume this line is active at the beginning
+        lines.set_active_status(line_no, true);
+
+        let kind = lines.info(line_no).kind.stripped_clone();
+        if kind.is_func_or_modu() {
+            // Function/Module frame
+            match kind {
+                InstrKind::FuncHeader => {
+                    // Close the previous function frame if there's one
+                    if in_func {
+                        try_close_frame(
+                            lines,
+                            line_no,
+                            &InstrKind::FuncModuEnd,
+                            &mut frame_stack,
+                            true,
+                            &mut synthetic_ends,
+                        );
+                    }
+
+                    // Open new function frame
+                    frame_count +=
+                        try_open_frame(lines, line_no, &kind, &mut frame_stack, frame_count);
+                    in_func = true;
+                }
+                InstrKind::ModuHeader => todo!(),
+                InstrKind::FuncModuEnd => {
+                    try_close_frame(
+                        lines,
                         line_no,
-                        kind: InstrKind::Else,
-                    });
-                    frame_count += 1;
-                } else {
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, false);
-                }
-            }
-            InstrKind::End => {
-                if let Some(OpenFrame {
-                    num,
-                    line_no: start,
-                    kind,
-                    ..
-                }) = frame_stack.pop()
-                {
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, true);
-                    instrs.set_frame_info(
-                        num,
-                        FrameInfo {
-                            indent: frame_stack.len(),
-                            start,
-                            end: line_no,
-                            unclosed: false,
-                            kind,
-                        },
+                        &InstrKind::FuncModuEnd,
+                        &mut frame_stack,
+                        false,
+                        &mut synthetic_ends,
                     );
-                } else {
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, false);
+                    in_func = false;
                 }
+                _ => (),
             }
-            InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => {
-                instrs.set_indent(line_no, frame_stack.len());
-                instrs.set_active_status(line_no, true);
+        } else {
+            // Instruction line
+            // Skip if the instruction is not wrapped in a function
+            if !in_func {
+                lines.set_indent(line_no, frame_stack.len());
+                // Prioritize malformed msg to deactivation
+                if lines.info(line_no).is_well_formed() {
+                    lines.set_active_status(line_no, false);
+                }
+                continue;
+            }
+
+            match kind {
+                InstrKind::If | InstrKind::OtherStructured => {
+                    frame_count +=
+                        try_open_frame(lines, line_no, &kind, &mut frame_stack, frame_count);
+                }
+                InstrKind::Else => {
+                    let closed_num = try_close_frame(
+                        lines,
+                        line_no,
+                        &kind,
+                        &mut frame_stack,
+                        false,
+                        &mut synthetic_ends,
+                    );
+                    if closed_num > 0 {
+                        // Insert the ELSE frame
+                        frame_count +=
+                            try_open_frame(lines, line_no, &kind, &mut frame_stack, frame_count);
+                    }
+                }
+                InstrKind::End => {
+                    try_close_frame(
+                        lines,
+                        line_no,
+                        &kind,
+                        &mut frame_stack,
+                        false,
+                        &mut synthetic_ends,
+                    );
+                }
+                InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => {
+                    lines.set_indent(line_no, frame_stack.len());
+                }
+                _ => (),
             }
         }
     }
 
-    instrs.set_synthetic_ends(frame_stack.len());
-    instrs.set_frame_count(frame_count);
-
-    while let Some(OpenFrame {
-        num, line_no, kind, ..
-    }) = frame_stack.pop()
-    {
-        instrs.set_frame_info(
-            num,
-            FrameInfo {
-                indent: frame_stack.len(),
-                start: line_no,
-                end: len,
-                unclosed: true,
-                kind,
-            },
+    while !frame_stack.is_empty() {
+        try_close_frame(
+            lines,
+            len,
+            &InstrKind::FuncModuEnd,
+            &mut frame_stack,
+            true,
+            &mut synthetic_ends,
         );
     }
+
+    lines.set_frame_count(frame_count);
+    lines.add_synthetic_ends(&mut synthetic_ends);
 }
 
 pub trait FmtError {
@@ -514,7 +704,7 @@ mod tests {
 
     struct TestLineInfos {
         lines: Vec<LineInfo>,
-        synthetic_ends: usize,
+        synthetic_ends: Vec<(usize, String)>,
         frames: Vec<FrameInfo>,
     }
 
@@ -529,7 +719,7 @@ mod tests {
                         ..Default::default()
                     })
                     .collect(),
-                synthetic_ends: 0,
+                synthetic_ends: Vec::new(),
                 frames: Vec::new(),
             }
         }
@@ -549,8 +739,8 @@ mod tests {
             &self.lines[index]
         }
 
-        fn synthetic_ends(&self) -> usize {
-            self.synthetic_ends
+        fn synthetic_ends_len(&self) -> usize {
+            self.synthetic_ends.len()
         }
     }
 
@@ -559,8 +749,12 @@ mod tests {
             self.lines[index].active = is_active;
         }
 
-        fn set_synthetic_ends(&mut self, num: usize) {
-            self.synthetic_ends = num;
+        fn reset_synthetic_ends(&mut self) {
+            self.synthetic_ends.clear()
+        }
+
+        fn add_synthetic_ends(&mut self, list: &mut Vec<(usize, String)>) {
+            self.synthetic_ends.append(list)
         }
 
         fn set_indent(&mut self, index: usize, num: usize) {
@@ -627,6 +821,32 @@ mod tests {
         assert_eq!(parse_instr("   block   "), InstrKind::OtherStructured);
         assert_eq!(parse_instr("   loop   "), InstrKind::OtherStructured);
         assert_eq!(parse_instr("   try_table   "), InstrKind::OtherStructured);
+        // function header
+        assert_eq!(parse_instr("(func"), InstrKind::FuncHeader);
+        assert_eq!(
+            parse_instr("(func)"),
+            malf("extra tokens remaining after parse")
+        );
+        assert_eq!(parse_instr("(func $x"), InstrKind::FuncHeader);
+        assert_eq!(parse_instr("(func (param $a i32)"), InstrKind::FuncHeader);
+        assert_eq!(
+            parse_instr("(func (param) (result i64)"),
+            InstrKind::FuncHeader
+        );
+        assert_eq!(
+            parse_instr("  (func (type 0) (local i32)"),
+            InstrKind::FuncHeader
+        );
+        assert_eq!(
+            parse_instr("(func i32.const 5"),
+            malf("extra tokens remaining after parse")
+        );
+        assert_eq!(
+            parse_instr("(func (i32.const 5)"),
+            malf("extra tokens remaining after parse")
+        );
+        // function/module end
+        assert_eq!(parse_instr("  ) "), InstrKind::FuncModuEnd);
         Ok(())
     }
 
@@ -676,7 +896,7 @@ mod tests {
     #[test]
     fn test_fix_frames() {
         {
-            let mut infos1 = TestLineInfos::new(["block", "i32.const 42", "drop"]);
+            let mut infos1 = TestLineInfos::new(["(func", "block", "i32.const 42", "drop", ")"]);
             fix_frames(&mut infos1);
             assert!(infos1.lines.iter().all(|x| x.active));
             assert_eq!(
@@ -685,33 +905,44 @@ mod tests {
                     .iter()
                     .map(|x| x.indent.unwrap())
                     .collect::<Vec<_>>(),
-                [0, 1, 1]
+                [0, 1, 2, 2, 0]
             );
-            assert_eq!(infos1.synthetic_ends, 1);
+            assert_eq!(infos1.synthetic_ends_len(), 1);
             assert_eq!(
                 infos1.frames,
-                [FrameInfo {
-                    indent: 0,
-                    start: 0,
-                    end: 3,
-                    unclosed: true,
-                    kind: InstrKind::OtherStructured
-                }]
+                [
+                    FrameInfo {
+                        indent: 0,
+                        start: 0,
+                        end: 4,
+                        unclosed: false,
+                        kind: InstrKind::FuncHeader
+                    },
+                    FrameInfo {
+                        indent: 1,
+                        start: 1,
+                        end: 4,
+                        unclosed: true,
+                        kind: InstrKind::OtherStructured
+                    }
+                ]
             );
         }
 
         {
             let mut infos2 = TestLineInfos::new([
-                "if",    // 0
-                "block", // 1
-                "else",  // 2
-                "end",   // 3
+                "(func", // 0
+                "if",    // 1
+                "block", // 2
+                "else",  // 3
+                "end",   // 4
+                ")",     // 5
             ]);
             fix_frames(&mut infos2);
-            assert_eq!(infos2.synthetic_ends, 1);
+            assert_eq!(infos2.synthetic_ends_len(), 1);
             assert_eq!(
                 infos2.lines.iter().map(|x| x.active).collect::<Vec<_>>(),
-                [true, true, false, true]
+                [true, true, true, false, true, true]
             );
             assert_eq!(
                 infos2
@@ -719,7 +950,7 @@ mod tests {
                     .iter()
                     .map(|x| x.indent.unwrap())
                     .collect::<Vec<_>>(),
-                [0, 1, 2, 1]
+                [0, 1, 2, 3, 2, 0]
             );
             assert_eq!(
                 infos2.frames,
@@ -727,14 +958,21 @@ mod tests {
                     FrameInfo {
                         indent: 0,
                         start: 0,
-                        end: 4,
-                        unclosed: true,
-                        kind: InstrKind::If
+                        end: 5,
+                        unclosed: false,
+                        kind: InstrKind::FuncHeader
                     },
                     FrameInfo {
                         indent: 1,
                         start: 1,
-                        end: 3,
+                        end: 5,
+                        unclosed: true,
+                        kind: InstrKind::If
+                    },
+                    FrameInfo {
+                        indent: 2,
+                        start: 2,
+                        end: 4,
                         unclosed: false,
                         kind: InstrKind::OtherStructured
                     }
@@ -743,66 +981,77 @@ mod tests {
         }
 
         {
-            let mut infos3 = TestLineInfos::new(["end"]);
+            let mut infos3 = TestLineInfos::new(["(func", "end", ")"]);
             fix_frames(&mut infos3);
-            assert!(!infos3.lines[0].active);
-            assert!(infos3.frames.is_empty());
+            assert!(!infos3.lines[1].active);
+            assert_eq!(
+                infos3.frames,
+                [FrameInfo {
+                    indent: 0,
+                    start: 0,
+                    end: 2,
+                    unclosed: false,
+                    kind: InstrKind::FuncHeader
+                }]
+            );
         }
 
         {
             // Test case 4: Simple block
-            let mut infos4 = TestLineInfos::new(["block", "i32.const 42", "drop", "end"]);
+            let mut infos4 =
+                TestLineInfos::new(["(func", "block", "i32.const 42", "drop", "end", ")"]);
             fix_frames(&mut infos4);
             assert_eq!(
                 infos4.frames,
-                [FrameInfo {
-                    indent: 0,
-                    start: 0,
-                    end: 3,
-                    unclosed: false,
-                    kind: InstrKind::OtherStructured
-                }]
+                [
+                    FrameInfo {
+                        indent: 0,
+                        start: 0,
+                        end: 5,
+                        unclosed: false,
+                        kind: InstrKind::FuncHeader
+                    },
+                    FrameInfo {
+                        indent: 1,
+                        start: 1,
+                        end: 4,
+                        unclosed: false,
+                        kind: InstrKind::OtherStructured
+                    }
+                ]
             );
         }
 
         {
             // Test case 5: Complex nested structure
             let mut infos5 = TestLineInfos::new([
-                "block",        // 0
-                "i32.const 42", // 1
-                "drop",         // 2
-                "end",          // 3
-                "block",        // 4
-                "loop",         // 5
-                "if",           // 6
-                "i32.const 43", // 7
-                "drop",         // 8
-                "else",         // 9
-                "i32.const 44", // 10
-                "drop",         // 11
-                "end",          // 12
+                "(func",        // 0
+                "block",        // 1
+                "i32.const 42", // 2
+                "drop",         // 3
+                "end",          // 4
+                "block",        // 5
+                "loop",         // 6
+                "if",           // 7
+                "i32.const 43", // 8
+                "drop",         // 9
+                "else",         // 10
+                "i32.const 44", // 11
+                "drop",         // 12
                 "end",          // 13
                 "end",          // 14
+                "end",          // 15
+                ")",            // 16
             ]);
             fix_frames(&mut infos5);
-            assert_eq!(infos5.frames.len(), 5);
-            assert_eq!(
-                infos5.frames[0],
-                FrameInfo {
-                    start: 0,
-                    end: 3,
-                    unclosed: false,
-                    indent: 0,
-                    kind: InstrKind::OtherStructured
-                }
-            );
+            assert_eq!(infos5.frames.len(), 6);
             assert_eq!(
                 infos5.frames[1],
                 FrameInfo {
-                    start: 4,
-                    end: 14,
+                    start: 1,
+                    end: 4,
                     unclosed: false,
-                    indent: 0,
+                    indent: 1,
                     kind: InstrKind::OtherStructured
                 }
             );
@@ -810,7 +1059,7 @@ mod tests {
                 infos5.frames[2],
                 FrameInfo {
                     start: 5,
-                    end: 13,
+                    end: 15,
                     unclosed: false,
                     indent: 1,
                     kind: InstrKind::OtherStructured
@@ -820,19 +1069,29 @@ mod tests {
                 infos5.frames[3],
                 FrameInfo {
                     start: 6,
-                    end: 9,
+                    end: 14,
                     unclosed: false,
                     indent: 2,
-                    kind: InstrKind::If
+                    kind: InstrKind::OtherStructured
                 }
             );
             assert_eq!(
                 infos5.frames[4],
                 FrameInfo {
-                    start: 9,
-                    end: 12,
+                    start: 7,
+                    end: 10,
                     unclosed: false,
-                    indent: 2,
+                    indent: 3,
+                    kind: InstrKind::If
+                }
+            );
+            assert_eq!(
+                infos5.frames[5],
+                FrameInfo {
+                    start: 10,
+                    end: 13,
+                    unclosed: false,
+                    indent: 3,
                     kind: InstrKind::Else
                 }
             );
