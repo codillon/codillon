@@ -214,6 +214,10 @@ impl InstrKind {
             FuncModuEnd => FuncModuEnd,
         }
     }
+
+    pub fn is_func_or_modu(&self) -> bool {
+        matches!(self, InstrKind::FuncHeader | InstrKind::ModuHeader | InstrKind::FuncModuEnd)
+    }
 }
 
 impl From<Instruction<'_>> for InstrKind {
@@ -239,10 +243,6 @@ impl From<wast::Error> for InstrKind {
     }
 }
 
-pub fn is_instr(line: &InstrKind) -> bool {
-    !matches!(line, InstrKind::FuncHeader | InstrKind::ModuHeader | InstrKind::FuncModuEnd)
-}
-
 // Find the line comment separator in these string slices.
 pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     if let Some(idx) = s1.find(";;") {
@@ -254,16 +254,15 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     }
 }
 
-/// Parse one code line as instruction
-/// (only accepts plain instructions)
+/// Parse one code line
 ///
-/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Instruction
+/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer
 ///
 /// # Parameters
-/// s: A string slice representing a Wasm instruction
+/// s: A string slice representing a line
 ///
 /// # Returns
-/// InstrKind: instruction (or malformed "instruction") of given category
+/// InstrKind: instruction or func/modu header/end (or malformed "instruction") of given category
 pub fn parse_instr(s: &str) -> InstrKind {
     let s = s.trim(); // get rid of spaces
     if s.is_empty() {
@@ -567,7 +566,7 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
         lines.set_active_status(line_no, true);
 
         let kind = lines.info(line_no).kind.stripped_clone();
-        if !is_instr(&kind) {
+        if kind.is_func_or_modu() {
             // Function/Module frame
             match kind {
                 InstrKind::FuncHeader => {
@@ -602,7 +601,8 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
             // Skip if the instruction is not wrapped in a function
             if !in_func {
                 lines.set_indent(line_no, frame_stack.len());
-                if lines.info(line_no).is_instr() {
+                // Prioritize malformed msg to deactivation
+                if lines.info(line_no).is_well_formed() {
                     lines.set_active_status(line_no, false);
                 }
                 continue;

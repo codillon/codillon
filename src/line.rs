@@ -32,8 +32,12 @@ impl LineInfo {
         }
     }
 
-    pub fn is_instr(&self) -> bool {
+    pub fn is_well_formed(&self) -> bool {
         self.active && !matches!(self.kind, InstrKind::Empty | InstrKind::Malformed(_))
+    }
+
+    pub fn is_instr(&self) -> bool {
+        self.active && self.is_well_formed() && !self.kind.is_func_or_modu()
     }
 
     pub fn is_structured(&self) -> bool {

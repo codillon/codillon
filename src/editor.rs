@@ -420,7 +420,7 @@ impl Editor {
             let mut line_with_ends = Vec::new();
 
             let code_line = self.line(line_idx);
-            if code_line.info().is_instr() {
+            if code_line.info().is_well_formed() {
                 line_with_ends.push(code_line.instr().get().to_string());
             }
             
@@ -556,7 +556,7 @@ impl<'a> Iterator for InstructionTextIterator<'a> {
     type Item = Ref<'a, str>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.index < self.editor.len() && !self.editor[self.index].info().is_instr() {
+        while self.index < self.editor.len() && !self.editor[self.index].info().is_well_formed() {
             self.index += 1;
         }
 
