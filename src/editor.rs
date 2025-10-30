@@ -30,7 +30,7 @@ type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), Ht
 pub const LINE_SPACING: usize = 40;
 
 struct _Editor {
-    synthetic_ends: Vec<(usize, String)>,   // (line idx just before end, ending word)
+    synthetic_ends: Vec<(usize, String)>, // (line idx just before end, ending word)
     component: ComponentType,
     factory: ElementFactory,
 }
@@ -423,7 +423,7 @@ impl Editor {
             if code_line.info().is_well_formed() {
                 line_with_ends.push(code_line.instr().get().to_string());
             }
-            
+
             // add synthetic ends for this line
             while let Some((synthetic_line_idx, _)) = synthetic_iter.peek() {
                 if *synthetic_line_idx == line_idx {
@@ -433,7 +433,7 @@ impl Editor {
                     break;
                 }
             }
-            
+
             line_with_ends.into_iter()
         })
     }

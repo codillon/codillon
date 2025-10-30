@@ -1,16 +1,16 @@
 // Structures and utilities to support multi-function/multi-module.
 //use crate::utils::InstrKind;
 use wast::{
-    core::{InlineExport, TypeUse, FunctionType, Local, LocalParser},
-    parser::{Parse, Parser, Result},
+    core::{FunctionType, InlineExport, Local, LocalParser, TypeUse},
     kw,
+    parser::{Parse, Parser, Result},
     token::{Id, NameAnnotation, Span},
 };
 
 /// The function header only, without closing parenthesis.
-/// Containing expressions (instructions) within function header is 
-/// considered as malformed. 
-/// 
+/// Containing expressions (instructions) within function header is
+/// considered as malformed.
+///
 /// Modified from wasm-tools func.rs.
 pub struct FuncHeader<'a> {
     /// Where this `func` was defined.
