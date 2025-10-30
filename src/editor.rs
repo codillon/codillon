@@ -498,7 +498,7 @@ impl Editor {
                     .get(line_idx)
                     .ok_or(anyhow!("expected line at idx"))?
                     .info()
-                    .is_instr()
+                    .is_well_formed()
             {
                 line_idx += 1;
             }
