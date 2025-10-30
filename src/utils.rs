@@ -788,6 +788,8 @@ mod tests {
         assert_eq!(parse_instr("  (func (type 0) (local i32)"), InstrKind::FuncHeader);
         assert_eq!(parse_instr("(func i32.const 5"), malf("extra tokens remaining after parse"));
         assert_eq!(parse_instr("(func (i32.const 5)"), malf("extra tokens remaining after parse"));
+        // function/module end
+        assert_eq!(parse_instr("  ) "), InstrKind::FuncModuEnd);
         Ok(())
     }
 
