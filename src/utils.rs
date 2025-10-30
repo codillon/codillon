@@ -465,14 +465,16 @@ pub fn fix_frames(lines: &mut impl LineInfosMut) {
                         let Some(OpenFrame { num, line_no: start, kind }) = frame_stack.pop() else { break; };
                         let indent = frame_stack.len();
 
-                        if synthetic {
-                            // Add synthetic end
-                            match kind {
-                                InstrKind::FuncHeader => synthetic_ends.push((line_no - 1, ")".to_string())),
-                                _ => synthetic_ends.push((line_no - 1, "end".to_string())),
+                        // Add synthetic end if required
+                        match kind {
+                            InstrKind::FuncHeader => {
+                                if synthetic {
+                                    synthetic_ends.push((line_no - 1, ")".to_string()));
+                                } else {
+                                    lines.set_indent(line_no, indent);
+                                }
                             }
-                        } else {
-                            lines.set_indent(line_no, indent);
+                            _ => synthetic_ends.push((line_no - 1, "end".to_string()))
                         }
 
                         let frame_unclosed = match kind {
@@ -666,7 +668,7 @@ mod tests {
 
     struct TestLineInfos {
         lines: Vec<LineInfo>,
-        synthetic_ends: usize,
+        synthetic_ends: Vec<(usize, String)>,
         frames: Vec<FrameInfo>,
     }
 
@@ -681,7 +683,7 @@ mod tests {
                         ..Default::default()
                     })
                     .collect(),
-                synthetic_ends: 0,
+                synthetic_ends: Vec::new(),
                 frames: Vec::new(),
             }
         }
@@ -701,8 +703,8 @@ mod tests {
             &self.lines[index]
         }
 
-        fn synthetic_ends(&self) -> usize {
-            self.synthetic_ends
+        fn synthetic_ends_len(&self) -> usize {
+            self.synthetic_ends.len()
         }
     }
 
@@ -711,8 +713,12 @@ mod tests {
             self.lines[index].active = is_active;
         }
 
-        fn set_synthetic_ends(&mut self, num: usize) {
-            self.synthetic_ends = num;
+        fn reset_synthetic_ends(&mut self) {
+            self.synthetic_ends.clear()
+        }
+
+        fn add_synthetic_ends(&mut self, list: &mut Vec<(usize, String)>) {
+            self.synthetic_ends.append(list)
         }
 
         fn set_indent(&mut self, index: usize, num: usize) {
@@ -839,7 +845,7 @@ mod tests {
     #[test]
     fn test_fix_frames() {
         {
-            let mut infos1 = TestLineInfos::new(["block", "i32.const 42", "drop"]);
+            let mut infos1 = TestLineInfos::new(["(func", "block", "i32.const 42", "drop", ")"]);
             fix_frames(&mut infos1);
             assert!(infos1.lines.iter().all(|x| x.active));
             assert_eq!(
@@ -848,33 +854,44 @@ mod tests {
                     .iter()
                     .map(|x| x.indent.unwrap())
                     .collect::<Vec<_>>(),
-                [0, 1, 1]
+                [0, 1, 2, 2, 0]
             );
-            assert_eq!(infos1.synthetic_ends, 1);
+            assert_eq!(infos1.synthetic_ends_len(), 1);
             assert_eq!(
                 infos1.frames,
-                [FrameInfo {
-                    indent: 0,
-                    start: 0,
-                    end: 3,
-                    unclosed: true,
-                    kind: InstrKind::OtherStructured
-                }]
+                [
+                    FrameInfo {
+                        indent: 0,
+                        start: 0,
+                        end: 4,
+                        unclosed: false,
+                        kind: InstrKind::FuncHeader
+                    },
+                    FrameInfo {
+                        indent: 1,
+                        start: 1,
+                        end: 4,
+                        unclosed: true,
+                        kind: InstrKind::OtherStructured
+                    }
+                ]
             );
         }
 
         {
             let mut infos2 = TestLineInfos::new([
-                "if",    // 0
-                "block", // 1
-                "else",  // 2
-                "end",   // 3
+                "(func", // 0
+                "if",    // 1
+                "block", // 2
+                "else",  // 3
+                "end",   // 4
+                ")",     // 5
             ]);
             fix_frames(&mut infos2);
-            assert_eq!(infos2.synthetic_ends, 1);
+            assert_eq!(infos2.synthetic_ends_len(), 1);
             assert_eq!(
                 infos2.lines.iter().map(|x| x.active).collect::<Vec<_>>(),
-                [true, true, false, true]
+                [true, true, true, false, true, true]
             );
             assert_eq!(
                 infos2
@@ -882,7 +899,7 @@ mod tests {
                     .iter()
                     .map(|x| x.indent.unwrap())
                     .collect::<Vec<_>>(),
-                [0, 1, 2, 1]
+                [0, 1, 2, 3, 2, 0]
             );
             assert_eq!(
                 infos2.frames,
@@ -890,14 +907,21 @@ mod tests {
                     FrameInfo {
                         indent: 0,
                         start: 0,
-                        end: 4,
-                        unclosed: true,
-                        kind: InstrKind::If
+                        end: 5,
+                        unclosed: false,
+                        kind: InstrKind::FuncHeader
                     },
                     FrameInfo {
                         indent: 1,
                         start: 1,
-                        end: 3,
+                        end: 5,
+                        unclosed: true,
+                        kind: InstrKind::If
+                    },
+                    FrameInfo {
+                        indent: 2,
+                        start: 2,
+                        end: 4,
                         unclosed: false,
                         kind: InstrKind::OtherStructured
                     }
@@ -906,66 +930,76 @@ mod tests {
         }
 
         {
-            let mut infos3 = TestLineInfos::new(["end"]);
+            let mut infos3 = TestLineInfos::new(["(func", "end", ")"]);
             fix_frames(&mut infos3);
-            assert!(!infos3.lines[0].active);
-            assert!(infos3.frames.is_empty());
+            assert!(!infos3.lines[1].active);
+            assert_eq!(
+                infos3.frames,
+                [FrameInfo {
+                    indent: 0,
+                    start: 0,
+                    end: 2,
+                    unclosed: false,
+                    kind: InstrKind::FuncHeader
+                }]
+            );
         }
 
         {
             // Test case 4: Simple block
-            let mut infos4 = TestLineInfos::new(["block", "i32.const 42", "drop", "end"]);
+            let mut infos4 = TestLineInfos::new(["(func", "block", "i32.const 42", "drop", "end", ")"]);
             fix_frames(&mut infos4);
             assert_eq!(
                 infos4.frames,
-                [FrameInfo {
-                    indent: 0,
-                    start: 0,
-                    end: 3,
-                    unclosed: false,
-                    kind: InstrKind::OtherStructured
-                }]
+                [
+                    FrameInfo {
+                        indent: 0,
+                        start: 0,
+                        end: 5,
+                        unclosed: false,
+                        kind: InstrKind::FuncHeader
+                    },
+                    FrameInfo {
+                        indent: 1,
+                        start: 1,
+                        end: 4,
+                        unclosed: false,
+                        kind: InstrKind::OtherStructured
+                    }
+                ]
             );
         }
 
         {
             // Test case 5: Complex nested structure
             let mut infos5 = TestLineInfos::new([
-                "block",        // 0
-                "i32.const 42", // 1
-                "drop",         // 2
-                "end",          // 3
-                "block",        // 4
-                "loop",         // 5
-                "if",           // 6
-                "i32.const 43", // 7
-                "drop",         // 8
-                "else",         // 9
-                "i32.const 44", // 10
-                "drop",         // 11
-                "end",          // 12
+                "(func",        // 0
+                "block",        // 1
+                "i32.const 42", // 2
+                "drop",         // 3
+                "end",          // 4
+                "block",        // 5
+                "loop",         // 6
+                "if",           // 7
+                "i32.const 43", // 8
+                "drop",         // 9
+                "else",         // 10
+                "i32.const 44", // 11
+                "drop",         // 12
                 "end",          // 13
                 "end",          // 14
+                "end",          // 15
+                ")",            // 16
             ]);
             fix_frames(&mut infos5);
-            assert_eq!(infos5.frames.len(), 5);
-            assert_eq!(
-                infos5.frames[0],
-                FrameInfo {
-                    start: 0,
-                    end: 3,
-                    unclosed: false,
-                    indent: 0,
-                    kind: InstrKind::OtherStructured
-                }
-            );
+            assert_eq!(infos5.frames.len(), 6);
             assert_eq!(
                 infos5.frames[1],
                 FrameInfo {
-                    start: 4,
-                    end: 14,
+                    start: 1,
+                    end: 4,
                     unclosed: false,
-                    indent: 0,
+                    indent: 1,
                     kind: InstrKind::OtherStructured
                 }
             );
@@ -973,7 +1007,7 @@ mod tests {
                 infos5.frames[2],
                 FrameInfo {
                     start: 5,
-                    end: 13,
+                    end: 15,
                     unclosed: false,
                     indent: 1,
                     kind: InstrKind::OtherStructured
@@ -983,19 +1017,29 @@ mod tests {
                 infos5.frames[3],
                 FrameInfo {
                     start: 6,
-                    end: 9,
+                    end: 14,
                     unclosed: false,
                     indent: 2,
-                    kind: InstrKind::If
+                    kind: InstrKind::OtherStructured
                 }
             );
             assert_eq!(
                 infos5.frames[4],
                 FrameInfo {
-                    start: 9,
-                    end: 12,
+                    start: 7,
+                    end: 10,
                     unclosed: false,
-                    indent: 2,
+                    indent: 3,
+                    kind: InstrKind::If
+                }
+            );
+            assert_eq!(
+                infos5.frames[5],
+                FrameInfo {
+                    start: 10,
+                    end: 13,
+                    unclosed: false,
+                    indent: 3,
                     kind: InstrKind::Else
                 }
             );
