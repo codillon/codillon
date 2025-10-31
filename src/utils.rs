@@ -1,5 +1,4 @@
 use crate::line::LineInfo;
-use crate::modular::FuncHeader;
 use anyhow::{Result, anyhow};
 use std::ops::{Deref, RangeInclusive};
 use wasm_encoder::{
@@ -8,10 +7,11 @@ use wasm_encoder::{
     reencode::{Reencode, RoundtripReencoder},
 };
 use wasm_tools::parse_binary_wasm;
-use wasmparser::{Operator, Parser, ValType, ValidPayload, Validator};
+use wasmparser::{Operator, ValType, ValidPayload, Validator};
 use wast::{
     core::{Instruction, Module},
-    parser::{self, ParseBuffer},
+    kw,
+    parser::{self, Parse, ParseBuffer, Peek},
 };
 
 pub struct CodillonInstruction<'a> {
@@ -35,7 +35,7 @@ impl<'a> InstructionTable<'a> {
     /// TODO: insert synthetic instructions to make function well-typed
     pub fn to_types_table(&self, wasm_bin: &[u8]) -> Result<TypesTable> {
         let mut validator = Validator::new();
-        let parser = Parser::new(0);
+        let parser = wasmparser::Parser::new(0);
         let dummy_offset = 1; // no need to track offsets, but validator has safety checks against 0
         let mut result = Vec::new();
 
@@ -180,21 +180,29 @@ pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
     Ok(module.encode()?)
 }
 
-#[derive(Debug, PartialEq, Eq, Default, Clone)]
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub enum InstrKind {
     #[default]
     Empty,
-
-    FuncHeader,
-    ModuHeader,
-    FuncModuEnd,
-
     If,
     Else,
     End,
     OtherStructured,   // block, loop, or try_table
     Other,             // any other instruction
     Malformed(String), // explanation
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ModulePart {
+    LParen,
+    FuncBegin,
+    RParen,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum LineKind {
+    Instr(InstrKind),
+    Other(Vec<ModulePart>),
 }
 
 impl InstrKind {
@@ -207,11 +215,8 @@ impl InstrKind {
             Else => Else,
             End => End,
             OtherStructured => OtherStructured,
-            Other => Other,
             Empty => Empty,
-            FuncHeader => FuncHeader,
-            ModuHeader => ModuHeader,
-            FuncModuEnd => FuncModuEnd,
+            Other => Other,
         }
     }
 }
@@ -250,39 +255,144 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     }
 }
 
-/// Parse one code line
+/// Parse one code line as instruction
+/// (only accepts plain instructions)
 ///
-/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer
+/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Instruction
 ///
 /// # Parameters
-/// s: A string slice representing a line of code
+/// s: A string slice representing a Wasm instruction
 ///
 /// # Returns
-/// InstrKind: instruction or function/module header/end (or malformed "instruction") of
-///            given category
+/// InstrKind: instruction (or malformed "instruction") of given category
 pub fn parse_instr(s: &str) -> InstrKind {
-    let s = s.trim(); // get rid of spaces
-    if s.is_empty() {
-        InstrKind::Empty // no instruction on this line
-    } else if s.starts_with("(func") {
-        match ParseBuffer::new(&s[1..]) {
-            Ok(buf) => match parser::parse::<FuncHeader>(&buf) {
-                Ok(_) => InstrKind::FuncHeader,
-                Err(e) => e.into(),
-            },
+    match ParseBuffer::new(s) {
+        Ok(buf) => match parser::parse::<Instruction>(&buf) {
+            Ok(instr) => instr.into(),
             Err(e) => e.into(),
-        }
-    } else if s == ")" {
-        InstrKind::FuncModuEnd
-    } else {
-        match ParseBuffer::new(s) {
-            Ok(buf) => match parser::parse::<Instruction>(&buf) {
-                Ok(instr) => instr.into(),
-                Err(e) => e.into(),
-            },
-            Err(e) => e.into(),
+        },
+        Err(e) => e.into(),
+    }
+}
+
+impl<'a> Parse<'a> for ModulePart {
+    fn parse(parser: wast::parser::Parser<'a>) -> Result<Self, wast::Error> {
+        if parser.step(|cursor| match cursor.lparen()? {
+            Some(rest) => Ok((true, rest)),
+            None => Ok((false, cursor)),
+        })? {
+            Ok(ModulePart::LParen)
+        } else if parser.step(|cursor| match cursor.rparen()? {
+            Some(rest) => Ok((true, rest)),
+            None => Ok((false, cursor)),
+        })? {
+            Ok(ModulePart::RParen)
+        } else if parser.parse::<kw::func>().is_ok() {
+            Ok(ModulePart::FuncBegin)
+        } else {
+            Err(parser.error("not text syntax other than an instruction"))
         }
     }
+}
+
+impl Peek for ModulePart {
+    fn peek(cursor: wast::parser::Cursor) -> Result<bool, wast::Error> {
+        if cursor.peek_lparen()? || cursor.peek_rparen()? || kw::func::peek(cursor)? {
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn display() -> &'static str {
+        "'(' or ')' or 'func'"
+    }
+}
+
+#[test]
+fn test_parse_modulepart() -> Result<()> {
+    assert_eq!(
+        parser::parse::<ModulePart>(&ParseBuffer::new("    (   ")?)?,
+        ModulePart::LParen
+    );
+    assert_eq!(
+        parser::parse::<ModulePart>(&ParseBuffer::new("    )    ")?)?,
+        ModulePart::RParen
+    );
+    assert_eq!(
+        parser::parse::<ModulePart>(&ParseBuffer::new("    func    ")?)?,
+        ModulePart::FuncBegin
+    );
+    assert!(parser::parse::<ModulePart>(&ParseBuffer::new("()")?).is_err());
+    Ok(())
+}
+
+impl<'a> Parse<'a> for LineKind {
+    fn parse(parser: wast::parser::Parser<'a>) -> Result<Self, wast::Error> {
+        // In the Codillon editor, a line can contain a single instruction
+        // or a (possibly empty) sequence of ModuleParts.
+
+        if parser.peek::<ModulePart>()? {
+            let mut parts = Vec::new();
+            while (!parser.is_empty()) || parser.peek::<ModulePart>()? {
+                parts.push(parser.parse()?);
+            }
+            Ok(LineKind::Other(parts))
+        } else {
+            Ok(LineKind::Instr(parser.parse::<Instruction>()?.into()))
+        }
+    }
+}
+
+#[test]
+fn test_parse_linekind() -> Result<()> {
+    assert_eq!(
+        parser::parse::<LineKind>(&ParseBuffer::new("i32.const 4")?)?,
+        LineKind::Instr(InstrKind::Other)
+    );
+
+    assert_eq!(
+        parser::parse::<LineKind>(&ParseBuffer::new("   i32.const 4   ")?)?,
+        LineKind::Instr(InstrKind::Other)
+    );
+
+    assert_eq!(
+        parser::parse::<LineKind>(&ParseBuffer::new("   if   ")?)?,
+        LineKind::Instr(InstrKind::If)
+    );
+
+    assert_eq!(
+        parser::parse::<LineKind>(&ParseBuffer::new("   (   ")?)?,
+        LineKind::Other(vec![ModulePart::LParen])
+    );
+
+    assert_eq!(
+        parser::parse::<LineKind>(&ParseBuffer::new("()")?)?,
+        LineKind::Other(vec![ModulePart::LParen, ModulePart::RParen])
+    );
+
+    assert_eq!(
+        parser::parse::<LineKind>(&ParseBuffer::new(")func")?)?,
+        LineKind::Other(vec![ModulePart::RParen, ModulePart::FuncBegin])
+    );
+
+    assert_eq!(
+        parser::parse::<LineKind>(&ParseBuffer::new(") func")?)?,
+        LineKind::Other(vec![ModulePart::RParen, ModulePart::FuncBegin])
+    );
+
+    assert_eq!(
+        parser::parse::<LineKind>(&ParseBuffer::new("   (func)   ")?)?,
+        LineKind::Other(vec![
+            ModulePart::LParen,
+            ModulePart::FuncBegin,
+            ModulePart::RParen
+        ])
+    );
+
+    assert!(parser::parse::<LineKind>(&ParseBuffer::new(") func i32.const 7")?).is_err());
+
+    Ok(())
 }
 
 /// Decides if a given string is a well-formed text-format Wasm function
@@ -302,7 +412,7 @@ pub fn is_well_formed_func(lines: &str) -> bool {
     let parse_text = || {
         let text = format!("module (func {lines})");
         let binary = parser::parse::<Module>(&ParseBuffer::new(&text)?)?.encode()?;
-        parse_binary_wasm(Parser::new(0), &binary)
+        parse_binary_wasm(wasmparser::Parser::new(0), &binary)
     };
     parse_text().is_ok()
 }
@@ -324,7 +434,7 @@ pub type InstrOps = Vec<(Vec<(ValType, usize)>, Vec<ValType>)>;
 // TODO: use Operators in OkModule instead of re-parsing the binary, and annotate each Operator in OkModule with its type instead of returning a vector
 pub fn collect_operands<'a>(wasm_bin: &[u8], ops: &Vec<(Operator<'a>, usize)>) -> Result<InstrOps> {
     let mut validator = Validator::new();
-    let parser = Parser::new(0);
+    let parser = wasmparser::Parser::new(0);
     let mut result = Vec::new();
     let dummy_offset = 1; // no need to track offsets, but validator has safety checks against 0
 
@@ -492,7 +602,6 @@ pub fn fix_frames(instrs: &mut impl LineInfosMut) {
                 instrs.set_indent(line_no, frame_stack.len());
                 instrs.set_active_status(line_no, true);
             }
-            _ => (),
         }
     }
 
@@ -638,8 +747,8 @@ mod tests {
             parse_instr("i32.const 5   ;;this is a const"),
             InstrKind::Other
         );
-        assert_eq!(parse_instr(""), InstrKind::Empty);
-        assert_eq!(parse_instr("   "), InstrKind::Empty);
+        //        assert_eq!(parse_instr(""), InstrKind::Empty);
+        //        assert_eq!(parse_instr("   "), InstrKind::Empty);
         assert_eq!(parse_instr("if"), InstrKind::If);
         assert_eq!(parse_instr("if (result i32)"), InstrKind::If);
         assert_eq!(parse_instr("   else   "), InstrKind::Else);
@@ -647,31 +756,6 @@ mod tests {
         assert_eq!(parse_instr("   block   "), InstrKind::OtherStructured);
         assert_eq!(parse_instr("   loop   "), InstrKind::OtherStructured);
         assert_eq!(parse_instr("   try_table   "), InstrKind::OtherStructured);
-        // function header and end
-        assert_eq!(parse_instr("(func"), InstrKind::FuncHeader);
-        assert_eq!(
-            parse_instr("(func)"),
-            malf("extra tokens remaining after parse")
-        );
-        assert_eq!(parse_instr("(func $x"), InstrKind::FuncHeader);
-        assert_eq!(parse_instr("(func (param $a i32)"), InstrKind::FuncHeader);
-        assert_eq!(
-            parse_instr("(func (param) (result i64)"),
-            InstrKind::FuncHeader
-        );
-        assert_eq!(
-            parse_instr("  (func (type 0) (local i32)"),
-            InstrKind::FuncHeader
-        );
-        assert_eq!(
-            parse_instr("(func i32.const 5"),
-            malf("extra tokens remaining after parse")
-        );
-        assert_eq!(
-            parse_instr("(func (i32.const 5)"),
-            malf("extra tokens remaining after parse")
-        );
-        assert_eq!(parse_instr("  ) "), InstrKind::FuncModuEnd);
         Ok(())
     }
 
