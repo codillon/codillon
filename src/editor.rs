@@ -12,7 +12,7 @@ use crate::{
     line::{CodeLine, LineInfo, Position},
     utils::{
         CodillonInstruction, FmtError, FrameInfo, InstrKind, InstructionTable, LineInfos,
-        LineInfosMut, fix_frames, str_to_binary,
+        LineInfosMut, LineKind, fix_frames, str_to_binary,
     },
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -138,7 +138,7 @@ impl Editor {
 
             // Should we add a "courtesy" `end` (because of a newly added structured instruction)?
             let is_structured = self.line(start_line).info().is_structured();
-            let is_if = self.line(start_line).info().kind == InstrKind::If;
+            let is_if = self.line(start_line).info().kind == LineKind::Instr(InstrKind::If);
 
             if !was_structured
                 && is_structured
@@ -147,11 +147,13 @@ impl Editor {
                 // search for existing deactivated matching `end` (or `else` if the new instr is `if`)
                 let mut need_end = true;
                 for i in start_line + 1..self.text().len() {
-                    if self.line(i).info().kind == InstrKind::End && !self.line(i).info().active {
+                    if self.line(i).info().kind == LineKind::Instr(InstrKind::End)
+                        && !self.line(i).info().active
+                    {
                         need_end = false;
                     }
                     if is_if
-                        && self.line(i).info().kind == InstrKind::Else
+                        && self.line(i).info().kind == LineKind::Instr(InstrKind::Else)
                         && !self.line(i).info().active
                     {
                         need_end = false;
@@ -166,7 +168,7 @@ impl Editor {
                 // Should we delete an unnecessary subsequent `end` (because of a removed structured instr)?
                 if self.len() > start_line + 1
                     && self.line(start_line + 1).info().active
-                    && self.line(start_line + 1).info().kind == InstrKind::End
+                    && self.line(start_line + 1).info().kind == LineKind::Instr(InstrKind::End)
                     && self.line(start_line + 1).comment().is_empty()
                 {
                     self.text_mut().remove(start_line + 1);

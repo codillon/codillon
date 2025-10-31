@@ -40,8 +40,12 @@ div.textentry:focus {
 .malformed-line {
     color: gray;
 }
-.inactive-line { 
+
+.inactive-line .instr {
     color: gray;
+    border: 1px dashed darkgray;
+    padding: 2px;
+    font-size: 17pt;
     text-decoration: underline;
     text-decoration-style: wavy;
     text-decoration-color: gray;

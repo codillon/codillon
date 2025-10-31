@@ -7,7 +7,7 @@ use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
     jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
-    utils::{InstrKind, find_comment, parse_instr},
+    utils::{InstrKind, LineKind, find_comment, parse_line},
 };
 use anyhow::{Result, bail};
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
@@ -18,13 +18,13 @@ type LinePara = DomStruct<(TextSpan, (TextSpan, (DomBr, ()))), HtmlDivElement>;
 
 #[derive(Default, Clone)]
 pub struct LineInfo {
-    pub kind: InstrKind,
+    pub kind: LineKind,
     pub active: bool,
     pub indent: Option<u16>,
 }
 
 impl LineInfo {
-    pub fn new(kind: InstrKind, active: bool) -> Self {
+    pub fn new(kind: LineKind, active: bool) -> Self {
         Self {
             kind,
             active,
@@ -33,11 +33,15 @@ impl LineInfo {
     }
 
     pub fn is_instr(&self) -> bool {
-        self.active && !matches!(self.kind, InstrKind::Empty | InstrKind::Malformed(_))
+        self.active && matches!(self.kind, LineKind::Instr(_))
     }
 
     pub fn is_structured(&self) -> bool {
-        self.active && matches!(self.kind, InstrKind::If | InstrKind::OtherStructured)
+        self.active
+            && matches!(
+                self.kind,
+                LineKind::Instr(InstrKind::If) | LineKind::Instr(InstrKind::OtherStructured)
+            )
     }
 }
 
@@ -89,11 +93,11 @@ impl Position {
 
 impl Component for CodeLine {
     fn audit(&self) {
-        assert_eq!(self.info.kind, parse_instr(self.instr().get()));
+        assert_eq!(self.info.kind, parse_line(self.instr().get()));
         assert_eq!(self.contents.get_attribute("class").unwrap(), &self.class());
         assert_eq!(
             self.contents.get().1.0.get_attribute("data-commentary"),
-            if let InstrKind::Malformed(reason) = &self.info.kind {
+            if let LineKind::Malformed(reason) = &self.info.kind {
                 Some(reason)
             } else {
                 None
@@ -186,8 +190,8 @@ impl CodeLine {
             "inactive-line"
         } else {
             match self.info.kind {
-                InstrKind::Empty => "empty-line",
-                InstrKind::Malformed(_) => "malformed-line",
+                LineKind::Empty => "empty-line",
+                LineKind::Malformed(_) => "malformed-line",
                 _ => "good-line",
             }
         }
@@ -264,7 +268,7 @@ impl CodeLine {
     }
 
     fn conform_commentary(&mut self) {
-        if let InstrKind::Malformed(reason) = &self.info.kind {
+        if let LineKind::Malformed(reason) = &self.info.kind {
             self.contents
                 .get_mut()
                 .1
@@ -307,7 +311,7 @@ impl CodeLine {
             self.instr_mut().replace_range_bytes(0, ws_bytes, "")?;
         }
         // Update kind, commentary, and active status
-        self.info.kind = parse_instr(self.instr().get());
+        self.info.kind = parse_line(self.instr().get());
         self.conform_commentary();
         self.conform_activity();
         Ok(ws_bytes)
