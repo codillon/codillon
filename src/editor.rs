@@ -10,12 +10,13 @@ use crate::{
         get_selection, set_selection_range,
     },
     line::{CodeLine, LineInfo, Position},
+    syntax::{InstrKind, LineKind, SyntheticWasm, find_frames, fix_syntax},
     utils::{
-        CodillonInstruction, FmtError, FrameInfo, InstrKind, InstructionTable, LineInfos,
-        LineInfosMut, fix_frames, str_to_binary,
+        CodillonInstruction, FmtError, FrameInfo, FrameInfosMut, InstructionTable, LineInfos,
+        LineInfosMut, str_to_binary,
     },
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use std::{
     cell::{Ref, RefCell, RefMut},
     ops::Deref,
@@ -30,7 +31,6 @@ type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), Ht
 pub const LINE_SPACING: usize = 40;
 
 struct _Editor {
-    synthetic_ends: usize,
     component: ComponentType,
     factory: ElementFactory,
 }
@@ -40,7 +40,6 @@ pub struct Editor(Rc<RefCell<_Editor>>);
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
         let inner = _Editor {
-            synthetic_ends: 0,
             component: DomStruct::new(
                 (
                     DomImage::new(factory.clone()),
@@ -79,10 +78,14 @@ impl Editor {
 
         ret.image_mut().set_attribute("class", "annotations");
 
+        ret.push_line("(func");
         ret.push_line("i32.const 5");
         ret.push_line("i32.const 6");
         ret.push_line("i32.add");
         ret.push_line("drop");
+        ret.push_line(")");
+
+        ret.on_change().expect("well-formed initial contents");
 
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
@@ -93,7 +96,6 @@ impl Editor {
     fn push_line(&mut self, string: &str) {
         let newline = CodeLine::new(string, &self.0.borrow().factory);
         self.text_mut().push(newline);
-        self.on_change().expect("well-formed after push_line");
     }
 
     fn get_lines_and_positions(
@@ -125,7 +127,8 @@ impl Editor {
             backup.push(self.line(i).suffix(Position::begin())?);
         }
 
-        self.image_mut().disable_animation(); // will be re-enabled if any indentation changes
+        // disable animations; will be re-enabled if any indentation changes
+        self.0.borrow_mut().component.remove_attribute("class");
 
         let mut new_cursor_pos = if start_line == end_line {
             // Single-line edit.
@@ -138,7 +141,7 @@ impl Editor {
 
             // Should we add a "courtesy" `end` (because of a newly added structured instruction)?
             let is_structured = self.line(start_line).info().is_structured();
-            let is_if = self.line(start_line).info().kind == InstrKind::If;
+            let is_if = self.line(start_line).info().kind == LineKind::Instr(InstrKind::If);
 
             if !was_structured
                 && is_structured
@@ -147,11 +150,13 @@ impl Editor {
                 // search for existing deactivated matching `end` (or `else` if the new instr is `if`)
                 let mut need_end = true;
                 for i in start_line + 1..self.text().len() {
-                    if self.line(i).info().kind == InstrKind::End && !self.line(i).info().active {
+                    if self.line(i).info().kind == LineKind::Instr(InstrKind::End)
+                        && !self.line(i).info().active
+                    {
                         need_end = false;
                     }
                     if is_if
-                        && self.line(i).info().kind == InstrKind::Else
+                        && self.line(i).info().kind == LineKind::Instr(InstrKind::Else)
                         && !self.line(i).info().active
                     {
                         need_end = false;
@@ -166,7 +171,7 @@ impl Editor {
                 // Should we delete an unnecessary subsequent `end` (because of a removed structured instr)?
                 if self.len() > start_line + 1
                     && self.line(start_line + 1).info().active
-                    && self.line(start_line + 1).info().kind == InstrKind::End
+                    && self.line(start_line + 1).info().kind == LineKind::Instr(InstrKind::End)
                     && self.line(start_line + 1).comment().is_empty()
                 {
                     self.text_mut().remove(start_line + 1);
@@ -183,6 +188,10 @@ impl Editor {
             new_pos
         } else if start_line < end_line {
             // Multi-line edit.
+
+            if self.line(start_line).all_whitespace() {
+                self.line_mut(start_line).unset_indent();
+            }
 
             // Step 1: Add surviving portion of end line to the start line.
             let end_pos_in_line = self.line(start_line).end_position();
@@ -404,24 +413,21 @@ impl Editor {
     }
 
     // get the "instructions" (active, well-formed lines) as text
-    fn instructions_as_text(&self) -> impl Iterator<Item = Ref<'_, str>> {
+    fn buffer_as_text(&self) -> impl Iterator<Item = Ref<'_, str>> {
         InstructionTextIterator {
             editor: self.text(),
-            index: 0,
+            line_idx: 0,
+            active_str_idx: 0,
         }
-        .chain(
-            std::iter::repeat_with(move || Ref::map(self.0.borrow(), |_| "end"))
-                .take(self.0.borrow().synthetic_ends),
-        )
     }
 
     fn on_change(&mut self) -> Result<()> {
         // repair syntax
-        fix_frames(self);
+        fix_syntax(self);
 
         // create binary
         let text = self
-            .instructions_as_text()
+            .buffer_as_text()
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
         let wasm_bin = str_to_binary(text)?;
 
@@ -437,6 +443,9 @@ impl Editor {
             log_1(&format!("Generating types table failed: {e}").into());
         }
         Self::execute(&instruction_table.build_executable_binary()?);
+
+        // find frames in the function
+        find_frames(self);
 
         #[cfg(debug_assertions)]
         {
@@ -466,23 +475,17 @@ impl Editor {
 
         //match each operator with its idx in the editor
         let mut instruction_table = Vec::new();
-        let mut line_idx = 0;
-        let component = &self.text();
-        for op in ops {
-            while line_idx < component.len()
-                && !component
-                    .get(line_idx)
-                    .ok_or(anyhow!("expected line at idx"))?
-                    .info()
-                    .is_instr()
-            {
-                line_idx += 1;
+        let mut ops_iter = ops.into_iter();
+
+        for line_idx in 0..self.len() {
+            for _ in 0..self.line(line_idx).num_ops() {
+                let op = ops_iter.next().context("not enough operators")?;
+                instruction_table.push(CodillonInstruction { op, line_idx });
             }
-            if line_idx >= component.len() + self.0.borrow().synthetic_ends {
-                bail!("not enough instructions");
-            }
-            instruction_table.push(CodillonInstruction { op, line_idx });
-            line_idx += 1;
+        }
+
+        if ops_iter.next().is_some() {
+            bail!("not enough instructions");
         }
 
         Ok(InstructionTable {
@@ -525,26 +528,32 @@ impl Editor {
 
 pub struct InstructionTextIterator<'a> {
     editor: Ref<'a, TextType>,
-    index: usize,
+    line_idx: usize,
+    active_str_idx: usize,
 }
 
 impl<'a> Iterator for InstructionTextIterator<'a> {
     type Item = Ref<'a, str>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.index < self.editor.len() && !self.editor[self.index].info().is_instr() {
-            self.index += 1;
+        while self.line_idx < self.editor.len()
+            && self.active_str_idx >= self.editor[self.line_idx].num_well_formed_strs()
+        {
+            self.line_idx += 1;
+            self.active_str_idx = 0;
         }
 
-        if self.index < self.editor.len() {
-            let ret = Some(Ref::map(Ref::clone(&self.editor), |x| {
-                x[self.index].instr().get()
-            }));
-            self.index += 1;
-            ret
-        } else {
-            None
+        if self.line_idx == self.editor.len() {
+            return None;
         }
+
+        let ret = Some(Ref::map(Ref::clone(&self.editor), |x| {
+            x[self.line_idx].well_formed_str(self.active_str_idx)
+        }));
+
+        self.active_str_idx += 1;
+
+        ret
     }
 }
 
@@ -560,10 +569,6 @@ impl LineInfos for Editor {
     fn info(&self, index: usize) -> impl Deref<Target = LineInfo> {
         Ref::map(self.line(index), |x| x.info())
     }
-
-    fn synthetic_ends(&self) -> usize {
-        self.0.borrow().synthetic_ends
-    }
 }
 
 impl LineInfosMut for Editor {
@@ -571,13 +576,23 @@ impl LineInfosMut for Editor {
         self.line_mut(index).set_active_status(is_active)
     }
 
-    fn set_synthetic_ends(&mut self, num: usize) {
-        self.0.borrow_mut().synthetic_ends = num;
+    fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm) {
+        self.line_mut(index).set_synthetic_before(synth);
+        // self.image_mut().set_synthetic_before(index, synth);
     }
 
+    fn push(&mut self) {
+        self.push_line("");
+    }
+}
+
+impl FrameInfosMut for Editor {
     fn set_indent(&mut self, index: usize, num: usize) {
         if self.line_mut(index).set_indent(num) {
-            self.image_mut().enable_animation();
+            self.0
+                .borrow_mut()
+                .component
+                .set_attribute("class", "animated");
         }
     }
 

@@ -37,64 +37,42 @@ div.textentry:focus {
     box-shadow: none;
 }
 
-.malformed-line {
+.line {
     color: gray;
 }
-.inactive-line { 
-    color: gray;
-    text-decoration: underline;
-    text-decoration-style: wavy;
-    text-decoration-color: gray;
-}
-.empty-line {
-    color: gray;
-}
+
 .good-line {
     color: black;
+}
+
+.instr-line {
     counter-increment: codelines;
 }
 
-.malformed-line::before {
+.line::before {
     font-size: 20pt;
     color: darkred;
     display: inline-block;
     width: 50px;
     text-align: right;
-
-    content: "\1d11e    ";
+    content: " ";
 }
 
-.inactive-line::before {
-    font-size: 20pt;
+.malformed-line::before {
+    content: "\1d11e        ";
+}
+
+.numbered-line::before {
     color: gray;
-    display: inline-block;
-    width: 50px;
-    text-align: right;
-
-    content: "   ";
+    content: counter(codelines) "        ";
 }
 
-.empty-line::before {
-    font-size: 20pt;
-    color: gray;
-    display: inline-block;
-    width: 50px;
-    text-align: right;
-
-    content: "   ";
+.line:has(span.instr[data-synthetic-before])::before {
+    color: darkred;
+    content: "\1d160        ";
 }
 
-.good-line::before {
-    font-size: 20pt;
-    color: gray;
-    display: inline-block;
-    width: 50px;
-    text-align: right;
-
-    content: counter(codelines) "   ";
-}
-
-span.instr {
+.animated .instr {
     transition: 0.2s;
 }
 
@@ -102,14 +80,27 @@ span.comment {
     color: darkblue;
     font-family: 'MLMSansDemiCond10-Regular';
     font-size: 18pt;
+    margin-left: 1px;
 }
 
-div.malformed-line span.comment::after {
+span.instr[data-synthetic-before]::before {
+    content: attr(data-synthetic-before);
+    border: 1px dashed darkred;
+    color: darkred;
+    position: absolute;
+    left: 30px;
+    padding: 3px;
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 12pt;
+    transform: translateY(10px);
+    content: attr(data-synthetic-before);
+}
+
+span.comment[data-commentary]::after {
     font-family: 'MLMRoman10-Regular';
     font-size: 12pt;
     color: darkred;
     float: right;
-    text-align: right;
     border: 1px solid darkred;
     padding: 4px;
     margin-top: 10px;
