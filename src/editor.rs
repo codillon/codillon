@@ -10,9 +10,10 @@ use crate::{
         get_selection, set_selection_range,
     },
     line::{CodeLine, LineInfo, Position},
+    syntax::{InstrKind, LineKind},
     utils::{
-        CodillonInstruction, FmtError, FrameInfo, InstrKind, InstructionTable, LineInfos,
-        LineInfosMut, LineKind, fix_frames, str_to_binary,
+        CodillonInstruction, FmtError, FrameInfo, InstructionTable, LineInfos, LineInfosMut,
+        fix_frames, str_to_binary,
     },
 };
 use anyhow::{Context, Result, anyhow, bail};

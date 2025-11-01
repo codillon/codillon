@@ -7,4 +7,4 @@ pub mod utils;
 pub mod editor;
 pub mod graphics;
 pub mod line;
-pub mod modular;
+pub mod syntax;

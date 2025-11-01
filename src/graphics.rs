@@ -6,7 +6,8 @@ use crate::{
     dom_vec::DomVec,
     editor::LINE_SPACING,
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement},
-    utils::{FrameInfo, InstrKind},
+    syntax::InstrKind,
+    utils::FrameInfo,
 };
 use delegate::delegate;
 use std::cmp::max;

@@ -7,7 +7,8 @@ use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
     jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
-    utils::{InstrKind, LineKind, find_comment, parse_line},
+    syntax::{InstrKind, LineKind},
+    utils::{find_comment, parse_line},
 };
 use anyhow::{Result, bail};
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
