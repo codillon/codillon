@@ -94,8 +94,6 @@ impl<'a> InstructionTable<'a> {
     }
 
     pub fn build_executable_binary(&self) -> Result<Vec<u8>> {
-        const MAX_STEP_COUNT: i32 = 1000;
-
         let mut module: wasm_encoder::Module = Default::default();
 
         // Encode the type section.
@@ -103,12 +101,23 @@ impl<'a> InstructionTable<'a> {
         let params = vec![];
         let results = vec![];
         types.ty().function(params, results);
+        types.ty().function(vec![wasm_encoder::ValType::I32], vec![]);
+        types.ty().function(vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32], vec![]);
         module.section(&types);
 
-        // Encode the function section.
+        // Encode the instrumentation functions as imports.
+        let mut imports = wasm_encoder::ImportSection::new();
+        imports.import("codillon_debug", "step", wasm_encoder::EntityType::Function(1));
+        imports.import("codillon_debug", "set_local", wasm_encoder::EntityType::Function(2));
+        imports.import("codillon_debug", "set_global", wasm_encoder::EntityType::Function(2));
+        imports.import("codillon_debug", "push_i32", wasm_encoder::EntityType::Function(1));
+        imports.import("codillon_debug", "pop_one", wasm_encoder::EntityType::Function(0));
+        module.section(&imports);
+
+        // Encode the main function section.
         let mut functions = FunctionSection::new();
-        let type_index = 0;
-        functions.function(type_index);
+        let main_type_index = 0;
+        functions.function(main_type_index);
         module.section(&functions);
 
         // Encode the global section.
@@ -125,28 +134,46 @@ impl<'a> InstructionTable<'a> {
 
         // Encode the export section.
         let mut exports = ExportSection::new();
-        exports.export("main", wasm_encoder::ExportKind::Func, 0);
+        exports.export("main", wasm_encoder::ExportKind::Func, 5);
         module.section(&exports);
 
         // Encode the code section.
         let mut codes = CodeSection::new();
-        let locals = vec![];
+        // Avoid conflict for the temporary variable used for LocalTee duplication
+        let local_index = 0u32;
+        let locals = vec![(local_index + 1, wasm_encoder::ValType::I32)];
         let mut f = wasm_encoder::Function::new(locals);
         for codillon_instruction in &self.table {
+            // Step after each instruction evaluation
+            let line_idx = codillon_instruction.line_idx as i32;
+            f.instruction(&EncoderInstruction::I32Const(line_idx));
+            f.instruction(&EncoderInstruction::Call(0));
+
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
-            // Instrument to prevent infinite execution.
-            f.instruction(&EncoderInstruction::GlobalGet(0));
-            f.instruction(&EncoderInstruction::I32Const(1));
-            f.instruction(&EncoderInstruction::I32Add);
-            f.instruction(&EncoderInstruction::GlobalSet(0));
-            f.instruction(&EncoderInstruction::GlobalGet(0));
-            f.instruction(&EncoderInstruction::I32Const(MAX_STEP_COUNT));
-            f.instruction(&EncoderInstruction::I32GtU);
-            f.instruction(&EncoderInstruction::If(wasm_encoder::BlockType::Empty));
-            // Throw unreachable if step count reached.
-            f.instruction(&EncoderInstruction::Unreachable);
-            f.instruction(&EncoderInstruction::End);
-            f.instruction(&instruction);
+            match &codillon_instruction.op {
+                wasmparser::Operator::LocalSet { local_index } |
+                wasmparser::Operator::LocalTee { local_index } => {
+                    f.instruction(&instruction);
+                    f.instruction(&EncoderInstruction::I32Const(*local_index as i32));
+                    f.instruction(&EncoderInstruction::LocalGet(*local_index));
+                    f.instruction(&EncoderInstruction::Call(1));
+                }
+                wasmparser::Operator::GlobalSet { global_index } => {
+                    f.instruction(&instruction);
+                    f.instruction(&EncoderInstruction::I32Const(*global_index as i32));
+                    f.instruction(&EncoderInstruction::GlobalGet(*global_index));
+                    f.instruction(&EncoderInstruction::Call(2));
+                }
+                wasmparser::Operator::I32Const { value: _ } => {
+                    f.instruction(&instruction);
+                    f.instruction(&EncoderInstruction::LocalTee(local_index));
+                    f.instruction(&EncoderInstruction::LocalGet(local_index));
+                    f.instruction(&EncoderInstruction::Call(3));
+                }
+                _ => {
+                    f.instruction(&instruction);
+                }
+            }
         }
         f.instruction(&EncoderInstruction::End);
         codes.function(&f);

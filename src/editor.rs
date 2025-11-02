@@ -511,7 +511,7 @@ impl Editor {
         //create Instruction Table
         let instruction_table = self.to_instruction_table(&wasm_bin)?;
 
-        //annotation and instrumentation
+        // annotation and instrumentation
         // For now, don't return Err even if `to_types_table` fails.
         // Otherwise, keystrokes that create well-formed-but-invalid
         // modules will be rejected and cause the "shake" animation.
@@ -574,7 +574,9 @@ impl Editor {
         async fn run_binary(binary: &[u8]) -> Result<String, wasm_bindgen::JsValue> {
             use js_sys::{Function, Reflect};
             use wasm_bindgen::JsValue;
-            let promise = js_sys::WebAssembly::instantiate_buffer(binary, &js_sys::Object::new());
+            // Build import objects for the instrumented module.
+            let imports = crate::debug::make_imports().map_err(|e| JsValue::from(e))?;
+            let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
             let js_value = wasm_bindgen_futures::JsFuture::from(promise).await?;
             let instance = Reflect::get(&js_value, &JsValue::from_str("instance"))
                 .map_err(|_| "failed to get instance")?;
