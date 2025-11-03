@@ -41,11 +41,12 @@ div.textentry:focus {
     color: gray;
 }
 
-.good-line {
-    color: black;
+.meta-line {
+    color: indigo;
 }
 
 .instr-line {
+    color: black;
     counter-increment: codelines;
 }
 
@@ -84,7 +85,6 @@ span.comment {
 }
 
 span.instr[data-synthetic-before]::before {
-    content: attr(data-synthetic-before);
     border: 1px dashed darkred;
     color: darkred;
     position: absolute;

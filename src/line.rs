@@ -268,8 +268,9 @@ impl CodeLine {
         } else {
             match self.info.kind {
                 LineKind::Malformed(_) => "line malformed-line",
-                LineKind::Empty | LineKind::Other(_) => "line good-line",
-                LineKind::Instr(_) => "line good-line instr-line numbered-line",
+                LineKind::Empty => "line",
+                LineKind::Other(_) => "line meta-line",
+                LineKind::Instr(_) => "line instr-line numbered-line",
             }
         }
         .to_string();

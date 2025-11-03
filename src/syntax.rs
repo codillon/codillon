@@ -100,7 +100,7 @@ impl<'a> Parse<'a> for ModulePart {
         } else if parser.peek::<Id<'a>>()? {
             Ok(parser.parse::<Id<'a>>()?.into())
         } else {
-            Err(parser.error("malformed syntax, or mixes instructions and non-instructions"))
+            Err(parser.error("expected a non-instruction token"))
         }
     }
 }
@@ -677,11 +677,11 @@ mod tests {
         );
         assert_eq!(
             parse_line("(i32.const 4)"),
-            malf("malformed syntax, or mixes instructions and non-instructions")
+            malf("expected a non-instruction token")
         );
         assert_eq!(
             parse_line("(i32.add (i32.const 4) (i32.const 5))"),
-            malf("malformed syntax, or mixes instructions and non-instructions")
+            malf("expected a non-instruction token")
         );
         //spaces before and after, comments, and empty lines are well-formed
         assert_eq!(
