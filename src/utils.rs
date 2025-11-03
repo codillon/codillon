@@ -1,4 +1,7 @@
-use crate::line::LineInfo;
+use crate::{
+    line::{Activity, LineInfo},
+    syntax::{InstrKind, SyntheticWasm},
+};
 use anyhow::{Result, anyhow};
 use std::ops::{Deref, RangeInclusive};
 use wasm_encoder::{
@@ -7,9 +10,9 @@ use wasm_encoder::{
     reencode::{Reencode, RoundtripReencoder},
 };
 use wasm_tools::parse_binary_wasm;
-use wasmparser::{Operator, Parser, ValType, ValidPayload, Validator};
+use wasmparser::{Operator, ValType, ValidPayload, Validator};
 use wast::{
-    core::{Instruction, Module},
+    core::Module,
     parser::{self, ParseBuffer},
 };
 
@@ -34,7 +37,7 @@ impl<'a> InstructionTable<'a> {
     /// TODO: insert synthetic instructions to make function well-typed
     pub fn to_types_table(&self, wasm_bin: &[u8]) -> Result<TypesTable> {
         let mut validator = Validator::new();
-        let parser = Parser::new(0);
+        let parser = wasmparser::Parser::new(0);
         let dummy_offset = 1; // no need to track offsets, but validator has safety checks against 0
         let mut result = Vec::new();
 
@@ -172,62 +175,11 @@ pub struct TypesTable {
 }
 
 pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
-    let txt = format!("module (func (export \"main\")\n{s})");
+    let txt = format!("module {s}");
     let binding = ParseBuffer::new(&txt)?;
     let mut module = parser::parse::<Module>(&binding)?;
 
     Ok(module.encode()?)
-}
-
-#[derive(Debug, PartialEq, Eq, Default, Clone)]
-pub enum InstrKind {
-    #[default]
-    Empty,
-    If,
-    Else,
-    End,
-    OtherStructured,   // block, loop, or try_table
-    Other,             // any other instruction
-    Malformed(String), // explanation
-}
-
-impl InstrKind {
-    fn stripped_clone(&self) -> InstrKind {
-        use InstrKind::*;
-
-        match self {
-            Malformed(_) => Malformed(String::new()),
-            If => If,
-            Else => Else,
-            End => End,
-            OtherStructured => OtherStructured,
-            Other => Other,
-            Empty => Empty,
-        }
-    }
-}
-
-impl From<Instruction<'_>> for InstrKind {
-    fn from(instr: Instruction<'_>) -> Self {
-        match instr {
-            Instruction::If(_) => InstrKind::If,
-            Instruction::Else(_) => InstrKind::Else,
-            Instruction::End(_) => InstrKind::End,
-            Instruction::Block(_) | Instruction::Loop(_) | Instruction::TryTable(_) => {
-                InstrKind::OtherStructured
-            }
-            Instruction::Try(_) | Instruction::Catch(_) | Instruction::CatchAll => {
-                panic!("legacy-exceptions not supported");
-            }
-            _ => InstrKind::Other,
-        }
-    }
-}
-
-impl From<wast::Error> for InstrKind {
-    fn from(e: wast::Error) -> Self {
-        InstrKind::Malformed(format!("{e}").lines().next().unwrap_or_default().into())
-    }
 }
 
 // Find the line comment separator in these string slices.
@@ -238,31 +190,6 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
         Some(s1.len() - 1)
     } else {
         s2.find(";;").map(|idx| s1.len() + idx)
-    }
-}
-
-/// Parse one code line as instruction
-/// (only accepts plain instructions)
-///
-/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Instruction
-///
-/// # Parameters
-/// s: A string slice representing a Wasm instruction
-///
-/// # Returns
-/// InstrKind: instruction (or malformed "instruction") of given category
-pub fn parse_instr(s: &str) -> InstrKind {
-    let s = s.trim(); // get rid of spaces
-    if s.is_empty() {
-        InstrKind::Empty // no instruction on this line
-    } else {
-        match ParseBuffer::new(s) {
-            Ok(buf) => match parser::parse::<Instruction>(&buf) {
-                Ok(instr) => instr.into(),
-                Err(e) => e.into(),
-            },
-            Err(e) => e.into(),
-        }
     }
 }
 
@@ -283,7 +210,7 @@ pub fn is_well_formed_func(lines: &str) -> bool {
     let parse_text = || {
         let text = format!("module (func {lines})");
         let binary = parser::parse::<Module>(&ParseBuffer::new(&text)?)?.encode()?;
-        parse_binary_wasm(Parser::new(0), &binary)
+        parse_binary_wasm(wasmparser::Parser::new(0), &binary)
     };
     parse_text().is_ok()
 }
@@ -305,7 +232,7 @@ pub type InstrOps = Vec<(Vec<(ValType, usize)>, Vec<ValType>)>;
 // TODO: use Operators in OkModule instead of re-parsing the binary, and annotate each Operator in OkModule with its type instead of returning a vector
 pub fn collect_operands<'a>(wasm_bin: &[u8], ops: &Vec<(Operator<'a>, usize)>) -> Result<InstrOps> {
     let mut validator = Validator::new();
-    let parser = Parser::new(0);
+    let parser = wasmparser::Parser::new(0);
     let mut result = Vec::new();
     let dummy_offset = 1; // no need to track offsets, but validator has safety checks against 0
 
@@ -368,10 +295,15 @@ pub trait LineInfos {
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
     fn info(&self, index: usize) -> impl Deref<Target = LineInfo>;
-    fn synthetic_ends(&self) -> usize;
 }
 
-#[derive(PartialEq, Clone, Default, Debug)]
+pub trait LineInfosMut: LineInfos {
+    fn set_active_status(&mut self, index: usize, new_val: Activity);
+    fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm);
+    fn push(&mut self);
+}
+
+#[derive(PartialEq, Clone, Debug)]
 pub struct FrameInfo {
     pub indent: usize,
     pub start: usize,
@@ -380,120 +312,10 @@ pub struct FrameInfo {
     pub kind: InstrKind,
 }
 
-pub trait LineInfosMut: LineInfos {
-    fn set_active_status(&mut self, index: usize, is_active: bool);
-    fn set_synthetic_ends(&mut self, num: usize);
+pub trait FrameInfosMut: LineInfos {
     fn set_indent(&mut self, index: usize, num: usize);
     fn set_frame_count(&mut self, count: usize);
     fn set_frame_info(&mut self, num: usize, frame: FrameInfo);
-}
-
-/// Fix frames by deactivated unmatched instrs and appending ends as necessary to close all open frames
-pub fn fix_frames(instrs: &mut impl LineInfosMut) {
-    struct OpenFrame {
-        num: usize,
-        line_no: usize,
-        kind: InstrKind,
-    }
-
-    let mut frame_stack: Vec<OpenFrame> = Vec::new();
-    let mut frame_count = 0;
-    let len = instrs.len();
-
-    for line_no in 0..instrs.len() {
-        let kind = instrs.info(line_no).kind.stripped_clone();
-        match kind {
-            InstrKind::If | InstrKind::OtherStructured => {
-                instrs.set_indent(line_no, frame_stack.len());
-                instrs.set_active_status(line_no, true);
-                frame_stack.push(OpenFrame {
-                    num: frame_count,
-                    line_no,
-                    kind,
-                });
-                frame_count += 1;
-            }
-            InstrKind::Else => {
-                if let Some(OpenFrame {
-                    num,
-                    line_no: start,
-                    kind: InstrKind::If,
-                }) = frame_stack.last()
-                {
-                    instrs.set_frame_info(
-                        *num,
-                        FrameInfo {
-                            indent: frame_stack.len() - 1,
-                            start: *start,
-                            end: line_no,
-                            unclosed: false,
-                            kind: InstrKind::If,
-                        },
-                    );
-                    frame_stack.pop();
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, true);
-                    frame_stack.push(OpenFrame {
-                        num: frame_count,
-                        line_no,
-                        kind: InstrKind::Else,
-                    });
-                    frame_count += 1;
-                } else {
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, false);
-                }
-            }
-            InstrKind::End => {
-                if let Some(OpenFrame {
-                    num,
-                    line_no: start,
-                    kind,
-                    ..
-                }) = frame_stack.pop()
-                {
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, true);
-                    instrs.set_frame_info(
-                        num,
-                        FrameInfo {
-                            indent: frame_stack.len(),
-                            start,
-                            end: line_no,
-                            unclosed: false,
-                            kind,
-                        },
-                    );
-                } else {
-                    instrs.set_indent(line_no, frame_stack.len());
-                    instrs.set_active_status(line_no, false);
-                }
-            }
-            InstrKind::Other | InstrKind::Empty | InstrKind::Malformed(_) => {
-                instrs.set_indent(line_no, frame_stack.len());
-                instrs.set_active_status(line_no, true);
-            }
-        }
-    }
-
-    instrs.set_synthetic_ends(frame_stack.len());
-    instrs.set_frame_count(frame_count);
-
-    while let Some(OpenFrame {
-        num, line_no, kind, ..
-    }) = frame_stack.pop()
-    {
-        instrs.set_frame_info(
-            num,
-            FrameInfo {
-                indent: frame_stack.len(),
-                start: line_no,
-                end: len,
-                unclosed: true,
-                kind,
-            },
-        );
-    }
 }
 
 pub trait FmtError {
@@ -508,143 +330,9 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use wasmparser::BlockType;
-
-    struct TestLineInfos {
-        lines: Vec<LineInfo>,
-        synthetic_ends: usize,
-        frames: Vec<FrameInfo>,
-    }
-
-    impl TestLineInfos {
-        fn new<const N: usize>(instrs: [&str; N]) -> Self {
-            Self {
-                lines: instrs
-                    .into_iter()
-                    .map(|x| LineInfo {
-                        kind: parse_instr(x),
-                        active: true,
-                        ..Default::default()
-                    })
-                    .collect(),
-                synthetic_ends: 0,
-                frames: Vec::new(),
-            }
-        }
-    }
-
-    impl LineInfos for TestLineInfos {
-        fn is_empty(&self) -> bool {
-            self.lines.is_empty()
-        }
-
-        fn len(&self) -> usize {
-            self.lines.len()
-        }
-
-        #[allow(refining_impl_trait)]
-        fn info(&self, index: usize) -> &LineInfo {
-            &self.lines[index]
-        }
-
-        fn synthetic_ends(&self) -> usize {
-            self.synthetic_ends
-        }
-    }
-
-    impl LineInfosMut for TestLineInfos {
-        fn set_active_status(&mut self, index: usize, is_active: bool) {
-            self.lines[index].active = is_active;
-        }
-
-        fn set_synthetic_ends(&mut self, num: usize) {
-            self.synthetic_ends = num;
-        }
-
-        fn set_indent(&mut self, index: usize, num: usize) {
-            self.lines[index].indent = Some(num.try_into().unwrap());
-        }
-
-        fn set_frame_info(&mut self, num: usize, frame: FrameInfo) {
-            if num >= self.frames.len() {
-                self.frames.resize(num + 1, FrameInfo::default());
-            }
-            self.frames[num] = frame;
-        }
-
-        fn set_frame_count(&mut self, count: usize) {
-            self.frames.truncate(count);
-        }
-    }
-
-    fn malf(s: &str) -> InstrKind {
-        InstrKind::Malformed(String::from(s))
-    }
-
-    #[test]
-    fn test_is_well_formed_instr() -> Result<()> {
-        //well-formed instructions
-        assert_eq!(parse_instr("i32.add"), InstrKind::Other);
-        assert_eq!(parse_instr("i32.const 5"), InstrKind::Other);
-        //not well-formed "instructions"
-        assert_eq!(
-            parse_instr("i32.bogus"),
-            malf("unknown operator or unexpected token")
-        );
-        assert_eq!(parse_instr("i32.const"), malf("expected a i32"));
-        assert_eq!(parse_instr("i32.const x"), malf("expected a i32"));
-        //not well-formed "instructions": multiple instructions per line, folded instructions
-        assert_eq!(
-            parse_instr("i32.const 4 i32.const 5"),
-            malf("extra tokens remaining after parse")
-        );
-        assert_eq!(
-            parse_instr("(i32.const 4)"),
-            malf("expected an instruction")
-        );
-        assert_eq!(
-            parse_instr("(i32.add (i32.const 4) (i32.const 5))"),
-            malf("expected an instruction")
-        );
-        //spaces before and after, comments, and empty lines are well-formed
-        assert_eq!(parse_instr("    i32.const 5"), InstrKind::Other);
-        assert_eq!(parse_instr("    i32.const 5 ;; hello "), InstrKind::Other);
-        assert_eq!(parse_instr("i32.const 5     "), InstrKind::Other);
-        assert_eq!(parse_instr(";;Hello"), malf("expected an instruction"));
-        assert_eq!(parse_instr("   ;; Hello "), malf("expected an instruction"));
-        assert_eq!(
-            parse_instr("i32.const 5   ;;this is a const"),
-            InstrKind::Other
-        );
-        assert_eq!(parse_instr(""), InstrKind::Empty);
-        assert_eq!(parse_instr("   "), InstrKind::Empty);
-        assert_eq!(parse_instr("if"), InstrKind::If);
-        assert_eq!(parse_instr("if (result i32)"), InstrKind::If);
-        assert_eq!(parse_instr("   else   "), InstrKind::Else);
-        assert_eq!(parse_instr("   end   "), InstrKind::End);
-        assert_eq!(parse_instr("   block   "), InstrKind::OtherStructured);
-        assert_eq!(parse_instr("   loop   "), InstrKind::OtherStructured);
-        assert_eq!(parse_instr("   try_table   "), InstrKind::OtherStructured);
-        Ok(())
-    }
-
-    #[test]
-    fn test_find_comment() {
-        assert_eq!(find_comment("abc", "def"), None);
-        assert_eq!(find_comment("abc", ";;def"), Some(3));
-        assert_eq!(find_comment(";;abc", ";;def"), Some(0));
-        assert_eq!(find_comment(";;abc", "def"), Some(0));
-        assert_eq!(find_comment(";", "def"), None);
-        assert_eq!(find_comment(";", ";def"), Some(0));
-        assert_eq!(find_comment("abc;", ";def"), Some(3));
-        assert_eq!(find_comment("abc;;", ""), Some(3));
-        assert_eq!(find_comment("abc;;", ";"), Some(3));
-        assert_eq!(find_comment("abc;", ";"), Some(3));
-        assert_eq!(find_comment("abc; ", ";"), None);
-        assert_eq!(find_comment("abc; ", "; ;;"), Some(7));
-    }
 
     #[test]
     fn test_is_well_formed_func() {
@@ -671,172 +359,6 @@ mod tests {
         assert!(!is_well_formed_func("block\ni32.const 1\nend\nend"));
         //unrecognized instructions
         assert!(!is_well_formed_func("i32.const 1\ni32.adx"));
-    }
-
-    #[test]
-    fn test_fix_frames() {
-        {
-            let mut infos1 = TestLineInfos::new(["block", "i32.const 42", "drop"]);
-            fix_frames(&mut infos1);
-            assert!(infos1.lines.iter().all(|x| x.active));
-            assert_eq!(
-                infos1
-                    .lines
-                    .iter()
-                    .map(|x| x.indent.unwrap())
-                    .collect::<Vec<_>>(),
-                [0, 1, 1]
-            );
-            assert_eq!(infos1.synthetic_ends, 1);
-            assert_eq!(
-                infos1.frames,
-                [FrameInfo {
-                    indent: 0,
-                    start: 0,
-                    end: 3,
-                    unclosed: true,
-                    kind: InstrKind::OtherStructured
-                }]
-            );
-        }
-
-        {
-            let mut infos2 = TestLineInfos::new([
-                "if",    // 0
-                "block", // 1
-                "else",  // 2
-                "end",   // 3
-            ]);
-            fix_frames(&mut infos2);
-            assert_eq!(infos2.synthetic_ends, 1);
-            assert_eq!(
-                infos2.lines.iter().map(|x| x.active).collect::<Vec<_>>(),
-                [true, true, false, true]
-            );
-            assert_eq!(
-                infos2
-                    .lines
-                    .iter()
-                    .map(|x| x.indent.unwrap())
-                    .collect::<Vec<_>>(),
-                [0, 1, 2, 1]
-            );
-            assert_eq!(
-                infos2.frames,
-                [
-                    FrameInfo {
-                        indent: 0,
-                        start: 0,
-                        end: 4,
-                        unclosed: true,
-                        kind: InstrKind::If
-                    },
-                    FrameInfo {
-                        indent: 1,
-                        start: 1,
-                        end: 3,
-                        unclosed: false,
-                        kind: InstrKind::OtherStructured
-                    }
-                ]
-            );
-        }
-
-        {
-            let mut infos3 = TestLineInfos::new(["end"]);
-            fix_frames(&mut infos3);
-            assert!(!infos3.lines[0].active);
-            assert!(infos3.frames.is_empty());
-        }
-
-        {
-            // Test case 4: Simple block
-            let mut infos4 = TestLineInfos::new(["block", "i32.const 42", "drop", "end"]);
-            fix_frames(&mut infos4);
-            assert_eq!(
-                infos4.frames,
-                [FrameInfo {
-                    indent: 0,
-                    start: 0,
-                    end: 3,
-                    unclosed: false,
-                    kind: InstrKind::OtherStructured
-                }]
-            );
-        }
-
-        {
-            // Test case 5: Complex nested structure
-            let mut infos5 = TestLineInfos::new([
-                "block",        // 0
-                "i32.const 42", // 1
-                "drop",         // 2
-                "end",          // 3
-                "block",        // 4
-                "loop",         // 5
-                "if",           // 6
-                "i32.const 43", // 7
-                "drop",         // 8
-                "else",         // 9
-                "i32.const 44", // 10
-                "drop",         // 11
-                "end",          // 12
-                "end",          // 13
-                "end",          // 14
-            ]);
-            fix_frames(&mut infos5);
-            assert_eq!(infos5.frames.len(), 5);
-            assert_eq!(
-                infos5.frames[0],
-                FrameInfo {
-                    start: 0,
-                    end: 3,
-                    unclosed: false,
-                    indent: 0,
-                    kind: InstrKind::OtherStructured
-                }
-            );
-            assert_eq!(
-                infos5.frames[1],
-                FrameInfo {
-                    start: 4,
-                    end: 14,
-                    unclosed: false,
-                    indent: 0,
-                    kind: InstrKind::OtherStructured
-                }
-            );
-            assert_eq!(
-                infos5.frames[2],
-                FrameInfo {
-                    start: 5,
-                    end: 13,
-                    unclosed: false,
-                    indent: 1,
-                    kind: InstrKind::OtherStructured
-                }
-            );
-            assert_eq!(
-                infos5.frames[3],
-                FrameInfo {
-                    start: 6,
-                    end: 9,
-                    unclosed: false,
-                    indent: 2,
-                    kind: InstrKind::If
-                }
-            );
-            assert_eq!(
-                infos5.frames[4],
-                FrameInfo {
-                    start: 9,
-                    end: 12,
-                    unclosed: false,
-                    indent: 2,
-                    kind: InstrKind::Else
-                }
-            );
-        }
     }
 
     #[test]

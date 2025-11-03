@@ -6,7 +6,8 @@ use crate::{
     dom_vec::DomVec,
     editor::LINE_SPACING,
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement},
-    utils::{FrameInfo, InstrKind},
+    syntax::InstrKind,
+    utils::FrameInfo,
 };
 use delegate::delegate;
 use std::cmp::max;
@@ -184,18 +185,6 @@ impl DomImage {
         ret.contents.get_mut().0.push(icon);
 
         ret
-    }
-
-    pub fn enable_animation(&mut self) {
-        self.contents
-            .get_mut()
-            .1
-            .0
-            .set_attribute("class", "animated");
-    }
-
-    pub fn disable_animation(&mut self) {
-        self.contents.get_mut().1.0.remove_attribute("class");
     }
 
     fn make_height_at_least(&mut self, height: usize) {

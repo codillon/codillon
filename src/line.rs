@@ -7,7 +7,8 @@ use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
     jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
-    utils::{InstrKind, find_comment, parse_instr},
+    syntax::{InstrKind, LineKind, ModulePart, SyntheticWasm, parse_line},
+    utils::find_comment,
 };
 use anyhow::{Result, bail};
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
@@ -16,28 +17,86 @@ type DomBr = DomStruct<(), HtmlBrElement>;
 type TextSpan = DomStruct<(DomText, ()), HtmlSpanElement>;
 type LinePara = DomStruct<(TextSpan, (TextSpan, (DomBr, ()))), HtmlDivElement>;
 
+#[derive(Default, Copy, Clone, PartialEq, Debug)]
+pub enum Activity {
+    #[default]
+    Active,
+    Inactive(&'static str), // reason
+}
+
+impl PartialEq<bool> for Activity {
+    fn eq(&self, val: &bool) -> bool {
+        (self == &Activity::Active) == *val
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct LineInfo {
-    pub kind: InstrKind,
-    pub active: bool,
+    pub kind: LineKind,
+    pub active: Activity,
     pub indent: Option<u16>,
+    pub synthetic_before: SyntheticWasm,
 }
 
 impl LineInfo {
-    pub fn new(kind: InstrKind, active: bool) -> Self {
+    pub fn new(kind: LineKind) -> Self {
         Self {
             kind,
-            active,
-            indent: None,
+            ..Default::default()
         }
     }
 
+    pub fn is_active(&self) -> bool {
+        self.active == true
+    }
+
+    pub fn is_well_formed(&self) -> bool {
+        self.is_active() && matches!(self.kind, LineKind::Instr(_) | LineKind::Other(_))
+    }
+
     pub fn is_instr(&self) -> bool {
-        self.active && !matches!(self.kind, InstrKind::Empty | InstrKind::Malformed(_))
+        self.is_active() && matches!(self.kind, LineKind::Instr(_))
     }
 
     pub fn is_structured(&self) -> bool {
-        self.active && matches!(self.kind, InstrKind::If | InstrKind::OtherStructured)
+        self.is_active()
+            && matches!(
+                self.kind,
+                LineKind::Instr(InstrKind::If) | LineKind::Instr(InstrKind::OtherStructured)
+            )
+    }
+
+    pub fn paren_depths(&self) -> (i32, i32) {
+        // indent change before first displayed char, other indent changes
+        let mut initial = 0;
+        if let Some(s) = &self.synthetic_before.module_field_syntax {
+            for ch in s.chars() {
+                match ch {
+                    '(' => initial += 1,
+                    ')' => initial -= 1,
+                    _ => {}
+                }
+            }
+        }
+
+        let mut rest = 0;
+        match &self.kind {
+            LineKind::Other(parts) if self.is_active() => {
+                let mut first_letter = true;
+                for part in parts {
+                    match part {
+                        ModulePart::RParen if first_letter => initial -= 1,
+                        ModulePart::RParen => rest -= 1,
+                        ModulePart::LParen => rest += 1,
+                        _ => {}
+                    }
+                    first_letter = false;
+                }
+            }
+            _ => {}
+        }
+
+        (initial, rest)
     }
 }
 
@@ -89,16 +148,18 @@ impl Position {
 
 impl Component for CodeLine {
     fn audit(&self) {
-        assert_eq!(self.info.kind, parse_instr(self.instr().get()));
+        assert_eq!(self.info.kind, parse_line(self.instr().get()));
         assert_eq!(self.contents.get_attribute("class").unwrap(), &self.class());
-        assert_eq!(
-            self.contents.get().1.0.get_attribute("data-commentary"),
-            if let InstrKind::Malformed(reason) = &self.info.kind {
-                Some(reason)
-            } else {
-                None
-            }
-        );
+        let comment = self.contents.get().1.0.get_attribute("data-commentary");
+        if let LineKind::Malformed(reason) = &self.info.kind {
+            assert_eq!(comment, Some(reason));
+        } else if let Activity::Inactive(reason) = &self.info.active
+            && !reason.is_empty()
+        {
+            assert_eq!(comment, Some(reason.to_string()).as_ref());
+        } else {
+            assert_eq!(comment, None);
+        }
 
         self.contents.audit();
     }
@@ -119,6 +180,26 @@ impl CodeLine {
 
     fn comment_mut(&mut self) -> &mut DomText {
         &mut self.contents.get_mut().1.0.get_mut().0
+    }
+
+    pub fn num_well_formed_strs(&self) -> usize {
+        self.info.synthetic_before.num_strs() + self.info.is_well_formed() as usize
+    }
+
+    // Return well-formed (non-comment) Wasm string #n (both instructions and module-scope syntax)
+    pub fn well_formed_str(&self, idx: usize) -> &str {
+        if idx < self.info.synthetic_before.num_strs() {
+            self.info.synthetic_before.str(idx)
+        } else if self.info.is_well_formed() && idx == self.info.synthetic_before.num_strs() {
+            self.instr().get()
+        } else {
+            panic!("index out of range");
+        }
+    }
+
+    // Number of opcodes (synthetic and user-entered) in the line
+    pub fn num_ops(&self) -> usize {
+        self.info.synthetic_before.num_ops() + self.info.is_instr() as usize
     }
 
     pub fn end_position(&self) -> Position {
@@ -182,13 +263,13 @@ impl CodeLine {
     }
 
     fn class(&self) -> String {
-        let prefix = if !self.info.active {
-            "inactive-line"
+        let prefix = if !self.info.is_active() {
+            "line malformed-line"
         } else {
             match self.info.kind {
-                InstrKind::Empty => "empty-line",
-                InstrKind::Malformed(_) => "malformed-line",
-                _ => "good-line",
+                LineKind::Malformed(_) => "line malformed-line",
+                LineKind::Empty | LineKind::Other(_) => "line good-line",
+                LineKind::Instr(_) => "line good-line instr-line numbered-line",
             }
         }
         .to_string();
@@ -213,7 +294,7 @@ impl CodeLine {
             Shake(false) => Shake(true),
             _ => Shake(false),
         };
-        self.conform_activity();
+        self.conform();
     }
 
     pub fn reveal(&mut self) {
@@ -222,7 +303,7 @@ impl CodeLine {
             Reveal(false) => Reveal(true),
             _ => Reveal(false),
         };
-        self.conform_activity();
+        self.conform();
     }
 
     pub fn fly_end(&mut self) {
@@ -231,7 +312,7 @@ impl CodeLine {
             FlyEnd(false) => FlyEnd(true),
             _ => FlyEnd(false),
         };
-        self.conform_activity();
+        self.conform();
     }
 
     pub fn new(contents: &str, factory: &ElementFactory) -> Self {
@@ -257,14 +338,18 @@ impl CodeLine {
         ret
     }
 
-    // Make the element presentation (CSS class) match the "is_instr" status.
+    // Make the element presentation (CSS class) match the status.
     // This needs to happen when the active status changes.
-    fn conform_activity(&mut self) {
-        self.contents.set_attribute("class", &self.class());
-    }
-
-    fn conform_commentary(&mut self) {
-        if let InstrKind::Malformed(reason) = &self.info.kind {
+    fn conform(&mut self) {
+        if let LineKind::Malformed(reason) = &self.info.kind {
+            self.contents
+                .get_mut()
+                .1
+                .0
+                .set_attribute("data-commentary", reason);
+        } else if let Activity::Inactive(reason) = &self.info.active
+            && !reason.is_empty()
+        {
             self.contents
                 .get_mut()
                 .1
@@ -277,6 +362,8 @@ impl CodeLine {
                 .0
                 .remove_attribute("data-commentary");
         }
+
+        self.contents.set_attribute("class", &self.class());
     }
 
     // Make the instr/comment split, the kind, and the CSS presentation consistent with the text contents.
@@ -307,18 +394,34 @@ impl CodeLine {
             self.instr_mut().replace_range_bytes(0, ws_bytes, "")?;
         }
         // Update kind, commentary, and active status
-        self.info.kind = parse_instr(self.instr().get());
-        self.conform_commentary();
-        self.conform_activity();
+        self.info.kind = parse_line(self.instr().get());
+        self.conform();
         Ok(ws_bytes)
     }
 
     // Activate or deactivate the line.
-    pub fn set_active_status(&mut self, is_active: bool) {
-        if is_active != self.info.active {
-            self.info.active = is_active;
-            self.conform_activity();
+    pub fn set_active_status(&mut self, new_val: Activity) {
+        if new_val != self.info.active {
+            self.info.active = new_val;
+            self.conform();
         }
+    }
+
+    pub fn set_synthetic_before(&mut self, synth: SyntheticWasm) {
+        if let Some(extra) = &synth.module_field_syntax {
+            self.contents
+                .get_mut()
+                .0
+                .set_attribute("data-synthetic-before", extra);
+        } else {
+            self.contents
+                .get_mut()
+                .0
+                .remove_attribute("data-synthetic-before");
+        }
+
+        self.info.synthetic_before = synth;
+        self.conform();
     }
 
     pub fn suffix(&self, pos: Position) -> Result<String> {
@@ -422,5 +525,9 @@ impl CodeLine {
             .set_attribute("style", &format!("margin-left: {}px;", val * 25));
 
         old_indent.is_some() && old_indent != self.info.indent && !self.all_whitespace()
+    }
+
+    pub fn unset_indent(&mut self) {
+        self.info.indent = None;
     }
 }
