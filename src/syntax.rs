@@ -100,7 +100,7 @@ impl<'a> Parse<'a> for ModulePart {
         } else if parser.peek::<Id<'a>>()? {
             Ok(parser.parse::<Id<'a>>()?.into())
         } else {
-            Err(parser.error("malformed syntax, or mixes instructions and non-instructions"))
+            Err(parser.error("expected a non-instruction token"))
         }
     }
 }
