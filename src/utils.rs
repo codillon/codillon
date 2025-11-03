@@ -1,5 +1,5 @@
 use crate::{
-    line::LineInfo,
+    line::{Activity, LineInfo},
     syntax::{InstrKind, SyntheticWasm},
 };
 use anyhow::{Result, anyhow};
@@ -298,7 +298,7 @@ pub trait LineInfos {
 }
 
 pub trait LineInfosMut: LineInfos {
-    fn set_active_status(&mut self, index: usize, is_active: bool);
+    fn set_active_status(&mut self, index: usize, new_val: Activity);
     fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm);
     fn push(&mut self);
 }

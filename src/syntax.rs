@@ -21,6 +21,7 @@ pub enum InstrKind {
     Other,           // any other instruction
 }
 
+// TODO: FunctionType, export, locals, etc.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ModulePart {
     LParen,
@@ -203,6 +204,7 @@ enum SyntaxState {
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     let mut state = SyntaxState::Initial;
     let mut frame_stack: Vec<InstrKind> = Vec::new();
+    use crate::line::Activity::*;
 
     assert!(lines.len() > 0);
 
@@ -211,11 +213,11 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         lines.set_synthetic_before(line_no, SyntheticWasm::default());
         match line_kind {
             LineKind::Empty | LineKind::Malformed(_) => {
-                lines.set_active_status(line_no, true);
+                lines.set_active_status(line_no, Active);
             }
             // Fix the module-field syntax, by enforcing parseability or disabling the line.
             LineKind::Other(parts) => {
-                let mut active = true;
+                let mut active = Active;
                 let mut close_outstanding_frames = false;
                 let original_state = state;
                 for part in parts {
@@ -239,13 +241,13 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             close_outstanding_frames = !frame_stack.is_empty();
                         }
                         _ => {
-                            active = false;
+                            active = Inactive("");
                             break;
                         }
                     }
                 }
                 lines.set_active_status(line_no, active);
-                if active {
+                if lines.info(line_no).is_active() {
                     if close_outstanding_frames {
                         // Add enough `end` opcodes to close all open frames.
                         lines.set_synthetic_before(
@@ -268,27 +270,34 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             LineKind::Instr(kind) => {
                 match kind {
                     InstrKind::If | InstrKind::OtherStructured => {
-                        lines.set_active_status(line_no, true);
+                        lines.set_active_status(line_no, Active);
                         frame_stack.push(kind);
                     }
                     InstrKind::Else => {
                         if let Some(InstrKind::If) = frame_stack.last() {
                             frame_stack.pop();
-                            lines.set_active_status(line_no, true);
+                            lines.set_active_status(line_no, Active);
                             frame_stack.push(InstrKind::Else);
                         } else {
-                            lines.set_active_status(line_no, false);
+                            lines.set_active_status(line_no, Inactive("‘else’ outside ‘if’"));
                         }
                     }
                     InstrKind::End => {
-                        lines.set_active_status(line_no, frame_stack.pop().is_some());
+                        lines.set_active_status(
+                            line_no,
+                            if frame_stack.pop().is_some() {
+                                Active
+                            } else {
+                                Inactive("nothing to end")
+                            },
+                        );
                     }
                     InstrKind::Other => {
-                        lines.set_active_status(line_no, true);
+                        lines.set_active_status(line_no, Active);
                     }
                 };
 
-                if lines.info(line_no).active
+                if lines.info(line_no).is_active()
                     && matches!(
                         state,
                         SyntaxState::Initial | SyntaxState::AfterModuleFieldLParen
@@ -309,7 +318,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     state = SyntaxState::AfterFuncKeyword;
                 }
 
-                if lines.info(line_no).active {
+                if lines.info(line_no).is_active() {
                     state = SyntaxState::AfterInstruction;
                 }
             }
@@ -327,7 +336,9 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         for line_no in 0..lines.len() {
             let line_kind = lines.info(line_no).kind.stripped_clone();
             match line_kind {
-                LineKind::Instr(_) | LineKind::Other(_) => lines.set_active_status(line_no, false),
+                LineKind::Instr(_) | LineKind::Other(_) => {
+                    lines.set_active_status(line_no, Inactive(""))
+                }
                 LineKind::Empty | LineKind::Malformed(_) => {}
             }
         }
@@ -347,7 +358,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         if !matches!(lines.info(lines.len() - 1).kind, LineKind::Empty) {
             lines.push();
         }
-        lines.set_active_status(lines.len() - 1, true);
+        lines.set_active_status(lines.len() - 1, Active);
         lines.set_synthetic_before(
             lines.len() - 1,
             SyntheticWasm {
@@ -389,7 +400,7 @@ pub fn find_frames(code: &mut impl FrameInfosMut) {
             );
         }
 
-        let active = code.info(line_no).active;
+        let active = code.info(line_no).is_active();
         let line_kind = code.info(line_no).kind.stripped_clone();
         match line_kind {
             LineKind::Instr(kind) if active => match kind {
@@ -481,7 +492,7 @@ pub fn parse_line(s: &str) -> LineKind {
 mod tests {
     use super::*;
     use crate::{
-        line::LineInfo,
+        line::{Activity, LineInfo},
         utils::{FrameInfosMut, LineInfos},
     };
     use wast::parser::parse;
@@ -498,7 +509,7 @@ mod tests {
                     .into_iter()
                     .map(|x| LineInfo {
                         kind: crate::syntax::parse_line(x),
-                        active: true,
+                        active: crate::line::Activity::Active,
                         ..Default::default()
                     })
                     .collect(),
@@ -523,8 +534,8 @@ mod tests {
     }
 
     impl LineInfosMut for TestLineInfos {
-        fn set_active_status(&mut self, index: usize, is_active: bool) {
-            self.lines[index].active = is_active;
+        fn set_active_status(&mut self, index: usize, new_val: Activity) {
+            self.lines[index].active = new_val;
         }
 
         fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm) {
@@ -721,7 +732,7 @@ mod tests {
             let mut infos1 = TestLineInfos::new(["(func", "block", "i32.const 42", "drop", ")"]);
             fix_syntax(&mut infos1);
             find_frames(&mut infos1);
-            assert!(infos1.lines.iter().all(|x| x.active));
+            assert!(infos1.lines.iter().all(|x| x.is_active()));
             assert_eq!(
                 infos1
                     .lines
@@ -756,7 +767,11 @@ mod tests {
             find_frames(&mut infos2);
             assert_eq!(infos2.lines[5].synthetic_before.end_opcodes, 1);
             assert_eq!(
-                infos2.lines.iter().map(|x| x.active).collect::<Vec<_>>(),
+                infos2
+                    .lines
+                    .iter()
+                    .map(|x| x.is_active())
+                    .collect::<Vec<_>>(),
                 [true, true, true, false, true, true]
             );
             assert_eq!(
@@ -792,7 +807,7 @@ mod tests {
             let mut infos3 = TestLineInfos::new(["end"]);
             fix_syntax(&mut infos3);
             find_frames(&mut infos3);
-            assert!(!infos3.lines[0].active);
+            assert!(!infos3.lines[0].is_active());
             assert!(infos3.frames.is_empty());
         }
 

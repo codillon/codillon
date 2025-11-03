@@ -9,7 +9,7 @@ use crate::{
         RangeLike, ReactiveComponent, StaticRangeHandle, WithElement, compare_document_position,
         get_selection, set_selection_range,
     },
-    line::{CodeLine, LineInfo, Position},
+    line::{Activity, CodeLine, LineInfo, Position},
     syntax::{InstrKind, LineKind, SyntheticWasm, find_frames, fix_syntax},
     utils::{
         CodillonInstruction, FmtError, FrameInfo, FrameInfosMut, InstructionTable, LineInfos,
@@ -151,13 +151,13 @@ impl Editor {
                 let mut need_end = true;
                 for i in start_line + 1..self.text().len() {
                     if self.line(i).info().kind == LineKind::Instr(InstrKind::End)
-                        && !self.line(i).info().active
+                        && !self.line(i).info().is_active()
                     {
                         need_end = false;
                     }
                     if is_if
                         && self.line(i).info().kind == LineKind::Instr(InstrKind::Else)
-                        && !self.line(i).info().active
+                        && !self.line(i).info().is_active()
                     {
                         need_end = false;
                     }
@@ -170,7 +170,7 @@ impl Editor {
             } else if was_structured && !is_structured {
                 // Should we delete an unnecessary subsequent `end` (because of a removed structured instr)?
                 if self.len() > start_line + 1
-                    && self.line(start_line + 1).info().active
+                    && self.line(start_line + 1).info().is_active()
                     && self.line(start_line + 1).info().kind == LineKind::Instr(InstrKind::End)
                     && self.line(start_line + 1).comment().is_empty()
                 {
@@ -572,8 +572,8 @@ impl LineInfos for Editor {
 }
 
 impl LineInfosMut for Editor {
-    fn set_active_status(&mut self, index: usize, is_active: bool) {
-        self.line_mut(index).set_active_status(is_active)
+    fn set_active_status(&mut self, index: usize, new_val: Activity) {
+        self.line_mut(index).set_active_status(new_val)
     }
 
     fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm) {
