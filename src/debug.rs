@@ -19,7 +19,7 @@ pub enum WebAssemblyTypes {
     I64(i64),
     F32(f32),
     F64(f64),
-    V128([u32; 4]),
+    V128(u128),
 }
 
 struct Change {
@@ -165,12 +165,7 @@ fn type_to_string(value: &WebAssemblyTypes) -> String {
         WebAssemblyTypes::I64(v) => format!("i64({})", v),
         WebAssemblyTypes::F32(v) => format!("f32({})", v),
         WebAssemblyTypes::F64(v) => format!("f64({})", v),
-        WebAssemblyTypes::V128(lanes) => {
-            format!(
-                "v128(0x{:08x}{:08x}{:08x}{:08x})",
-                lanes[0], lanes[1], lanes[2], lanes[3]
-            )
-        }
+        WebAssemblyTypes::V128(v) => format!("v128({}", v),
     }
 }
 
