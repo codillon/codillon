@@ -1,6 +1,7 @@
 // The Codillon code editor
 
 use crate::{
+    debug::{get_state_js, last_step},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
@@ -498,6 +499,14 @@ impl Editor {
         }
     }
 
+    // TODO: Remove temporary function for debugging
+    fn log_last_state() {
+        let last_step = last_step();
+        if last_step != 0 {
+            log_1(&get_state_js(last_step));
+        }
+    }
+
     fn on_change(&mut self) -> Result<()> {
         // repair syntax
         fix_syntax(self);
@@ -528,6 +537,7 @@ impl Editor {
         {
             self.audit();
             log_1(&"successful audit".into());
+            Self::log_last_state();
         }
 
         Ok(())
