@@ -585,7 +585,7 @@ impl Editor {
             use js_sys::{Function, Reflect};
             use wasm_bindgen::JsValue;
             // Build import objects for the instrumented module.
-            let imports = crate::debug::make_imports().map_err(|e| JsValue::from(e))?;
+            let imports = crate::debug::make_imports()?;
             let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
             let js_value = wasm_bindgen_futures::JsFuture::from(promise).await?;
             let instance = Reflect::get(&js_value, &JsValue::from_str("instance"))
