@@ -101,18 +101,46 @@ impl<'a> InstructionTable<'a> {
         let params = vec![];
         let results = vec![];
         types.ty().function(params, results);
-        types.ty().function(vec![wasm_encoder::ValType::I32], vec![]);
-        types.ty().function(vec![wasm_encoder::ValType::I32], vec![wasm_encoder::ValType::I32]);
-        types.ty().function(vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32], vec![]);
+        types
+            .ty()
+            .function(vec![wasm_encoder::ValType::I32], vec![]);
+        types.ty().function(
+            vec![wasm_encoder::ValType::I32],
+            vec![wasm_encoder::ValType::I32],
+        );
+        types.ty().function(
+            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
+            vec![],
+        );
         module.section(&types);
 
         // Encode the instrumentation functions as imports.
         let mut imports = wasm_encoder::ImportSection::new();
-        imports.import("codillon_debug", "step", wasm_encoder::EntityType::Function(2));
-        imports.import("codillon_debug", "pop_i", wasm_encoder::EntityType::Function(1));
-        imports.import("codillon_debug", "set_local_i32", wasm_encoder::EntityType::Function(3));
-        imports.import("codillon_debug", "set_global_i32", wasm_encoder::EntityType::Function(3));
-        imports.import("codillon_debug", "push_i32", wasm_encoder::EntityType::Function(2));
+        imports.import(
+            "codillon_debug",
+            "step",
+            wasm_encoder::EntityType::Function(2),
+        );
+        imports.import(
+            "codillon_debug",
+            "pop_i",
+            wasm_encoder::EntityType::Function(1),
+        );
+        imports.import(
+            "codillon_debug",
+            "set_local_i32",
+            wasm_encoder::EntityType::Function(3),
+        );
+        imports.import(
+            "codillon_debug",
+            "set_global_i32",
+            wasm_encoder::EntityType::Function(3),
+        );
+        imports.import(
+            "codillon_debug",
+            "push_i32",
+            wasm_encoder::EntityType::Function(2),
+        );
         module.section(&imports);
 
         // Encode the main function section.
@@ -143,15 +171,15 @@ impl<'a> InstructionTable<'a> {
         let locals = vec![];
         let mut f = wasm_encoder::Function::new(locals);
         let pop_debug = |func: &mut wasm_encoder::Function, num_pop: i32| {
-                func.instruction(&EncoderInstruction::I32Const(num_pop));
-                func.instruction(&EncoderInstruction::Call(1));
-            };
+            func.instruction(&EncoderInstruction::I32Const(num_pop));
+            func.instruction(&EncoderInstruction::Call(1));
+        };
         for codillon_instruction in &self.table {
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
             match &codillon_instruction.op {
-                wasmparser::Operator::LocalSet { local_index } |
-                wasmparser::Operator::LocalTee { local_index } => {
+                wasmparser::Operator::LocalSet { local_index }
+                | wasmparser::Operator::LocalTee { local_index } => {
                     f.instruction(&instruction);
                     f.instruction(&EncoderInstruction::I32Const(*local_index as i32));
                     f.instruction(&EncoderInstruction::LocalGet(*local_index));
@@ -170,40 +198,40 @@ impl<'a> InstructionTable<'a> {
                     f.instruction(&EncoderInstruction::Call(4));
                 }
                 // Binary i32 ops: pop 2, push 1
-                wasmparser::Operator::I32Add |
-                wasmparser::Operator::I32Sub |
-                wasmparser::Operator::I32Mul |
-                wasmparser::Operator::I32DivS |
-                wasmparser::Operator::I32DivU |
-                wasmparser::Operator::I32RemS |
-                wasmparser::Operator::I32RemU |
-                wasmparser::Operator::I32And |
-                wasmparser::Operator::I32Or |
-                wasmparser::Operator::I32Xor |
-                wasmparser::Operator::I32Shl |
-                wasmparser::Operator::I32ShrS |
-                wasmparser::Operator::I32ShrU |
-                wasmparser::Operator::I32Rotl |
-                wasmparser::Operator::I32Rotr |
-                wasmparser::Operator::I32Eq |
-                wasmparser::Operator::I32Ne |
-                wasmparser::Operator::I32LtS |
-                wasmparser::Operator::I32LtU |
-                wasmparser::Operator::I32GtS |
-                wasmparser::Operator::I32GtU |
-                wasmparser::Operator::I32LeS |
-                wasmparser::Operator::I32LeU |
-                wasmparser::Operator::I32GeS |
-                wasmparser::Operator::I32GeU => {
+                wasmparser::Operator::I32Add
+                | wasmparser::Operator::I32Sub
+                | wasmparser::Operator::I32Mul
+                | wasmparser::Operator::I32DivS
+                | wasmparser::Operator::I32DivU
+                | wasmparser::Operator::I32RemS
+                | wasmparser::Operator::I32RemU
+                | wasmparser::Operator::I32And
+                | wasmparser::Operator::I32Or
+                | wasmparser::Operator::I32Xor
+                | wasmparser::Operator::I32Shl
+                | wasmparser::Operator::I32ShrS
+                | wasmparser::Operator::I32ShrU
+                | wasmparser::Operator::I32Rotl
+                | wasmparser::Operator::I32Rotr
+                | wasmparser::Operator::I32Eq
+                | wasmparser::Operator::I32Ne
+                | wasmparser::Operator::I32LtS
+                | wasmparser::Operator::I32LtU
+                | wasmparser::Operator::I32GtS
+                | wasmparser::Operator::I32GtU
+                | wasmparser::Operator::I32LeS
+                | wasmparser::Operator::I32LeU
+                | wasmparser::Operator::I32GeS
+                | wasmparser::Operator::I32GeU => {
                     f.instruction(&instruction);
                     f.instruction(&EncoderInstruction::Call(4));
                     pop_debug(&mut f, 2);
                 }
                 // Unary i32 ops: pop 1, push 1
-                wasmparser::Operator::I32Clz |
-                wasmparser::Operator::I32Ctz |
-                wasmparser::Operator::I32Popcnt |
-                wasmparser::Operator::I32Eqz => {
+                wasmparser::Operator::I32Clz
+                | wasmparser::Operator::I32Ctz
+                | wasmparser::Operator::I32Popcnt
+                | wasmparser::Operator::I32Eqz => {
                     f.instruction(&instruction);
                     f.instruction(&EncoderInstruction::Call(4));
                     pop_debug(&mut f, 1);

@@ -2,8 +2,8 @@
 
 use js_sys::{Array, Object, Reflect};
 use std::cell::RefCell;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::console::log_1;
 
 const MAX_STEP_COUNT: usize = 1000;
@@ -37,7 +37,7 @@ struct DebugState {
     globals_change: Option<(u32, WebAssemblyTypes)>,
     num_pops: u32,
     // Chronological per-step changes
-    changes: Vec<Change>
+    changes: Vec<Change>,
 }
 
 impl DebugState {
@@ -82,7 +82,12 @@ pub fn make_imports() -> Result<Object, JsValue> {
             1
         })
     }) as Box<dyn Fn(i32) -> i32>);
-    Reflect::set(&debug_numbers, &JsValue::from_str("step"), step_closure.as_ref().unchecked_ref()).ok();
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("step"),
+        step_closure.as_ref().unchecked_ref(),
+    )
+    .ok();
     step_closure.forget();
 
     let set_local_i32 = Closure::wrap(Box::new(move |idx: i32, value: i32| {
@@ -90,25 +95,44 @@ pub fn make_imports() -> Result<Object, JsValue> {
             cur_state.borrow_mut().locals_change = Some((idx as u32, WebAssemblyTypes::I32(value)));
         });
     }) as Box<dyn Fn(i32, i32)>);
-    Reflect::set(&debug_numbers, &JsValue::from_str("set_local_i32"), set_local_i32.as_ref().unchecked_ref()).ok();
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("set_local_i32"),
+        set_local_i32.as_ref().unchecked_ref(),
+    )
+    .ok();
     set_local_i32.forget();
 
     let set_global_i32 = Closure::wrap(Box::new(move |idx: i32, value: i32| {
         STATE.with(|cur_state| {
-            cur_state.borrow_mut().globals_change = Some((idx as u32, WebAssemblyTypes::I32(value)));
+            cur_state.borrow_mut().globals_change =
+                Some((idx as u32, WebAssemblyTypes::I32(value)));
         });
     }) as Box<dyn Fn(i32, i32)>);
-    Reflect::set(&debug_numbers, &JsValue::from_str("set_global_i32"), set_global_i32.as_ref().unchecked_ref()).ok();
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("set_global_i32"),
+        set_global_i32.as_ref().unchecked_ref(),
+    )
+    .ok();
     set_global_i32.forget();
 
     // Store i32.const expressions
     let push_i32 = Closure::wrap(Box::new(move |value: i32| {
-        STATE.with(|cur_state| { 
-            cur_state.borrow_mut().stack_pushes.push(WebAssemblyTypes::I32(value));
+        STATE.with(|cur_state| {
+            cur_state
+                .borrow_mut()
+                .stack_pushes
+                .push(WebAssemblyTypes::I32(value));
         });
         value
     }) as Box<dyn Fn(i32) -> i32>);
-    Reflect::set(&debug_numbers, &JsValue::from_str("push_i32"), push_i32.as_ref().unchecked_ref()).ok();
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("push_i32"),
+        push_i32.as_ref().unchecked_ref(),
+    )
+    .ok();
     push_i32.forget();
 
     let pop_i = Closure::wrap(Box::new(move |pop_num: i32| {
@@ -116,10 +140,18 @@ pub fn make_imports() -> Result<Object, JsValue> {
             cur_state.borrow_mut().num_pops = pop_num as u32;
         });
     }) as Box<dyn Fn(i32)>);
-    Reflect::set(&debug_numbers, &JsValue::from_str("pop_i"), pop_i.as_ref().unchecked_ref())?;
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("pop_i"),
+        pop_i.as_ref().unchecked_ref(),
+    )?;
     pop_i.forget();
 
-    Reflect::set(&imports, &JsValue::from_str("codillon_debug"), &debug_numbers)?;
+    Reflect::set(
+        &imports,
+        &JsValue::from_str("codillon_debug"),
+        &debug_numbers,
+    )?;
     Ok(imports)
 }
 
@@ -127,19 +159,22 @@ pub fn last_step() -> usize {
     STATE.with(|cur_state| cur_state.borrow().changes.len().saturating_sub(1))
 }
 
-fn type_to_string( value: &WebAssemblyTypes ) -> String {
+fn type_to_string(value: &WebAssemblyTypes) -> String {
     match value {
         WebAssemblyTypes::I32(v) => format!("i32({})", v),
         WebAssemblyTypes::I64(v) => format!("i64({})", v),
         WebAssemblyTypes::F32(v) => format!("f32({})", v),
         WebAssemblyTypes::F64(v) => format!("f64({})", v),
         WebAssemblyTypes::V128(lanes) => {
-            format!("v128(0x{:08x}{:08x}{:08x}{:08x})", lanes[0], lanes[1], lanes[2], lanes[3])
+            format!(
+                "v128(0x{:08x}{:08x}{:08x}{:08x})",
+                lanes[0], lanes[1], lanes[2], lanes[3]
+            )
         }
     }
 }
 
-fn vec_to_array( cur_vec: &Vec<WebAssemblyTypes>) ->Array {
+fn vec_to_array(cur_vec: &Vec<WebAssemblyTypes>) -> Array {
     let output_arr = Array::new();
     for value in cur_vec {
         let result = type_to_string(value);
@@ -150,7 +185,7 @@ fn vec_to_array( cur_vec: &Vec<WebAssemblyTypes>) ->Array {
 
 // Converts snapshot and reconstructs locals and globals from changes
 pub fn get_state_js(step_idx: usize) -> JsValue {
-    if step_idx > MAX_STEP_COUNT || step_idx > last_step(){
+    if step_idx > MAX_STEP_COUNT || step_idx > last_step() {
         return JsValue::NULL;
     }
     STATE.with(|cur_state| {
@@ -177,10 +212,25 @@ pub fn get_state_js(step_idx: usize) -> JsValue {
                 globals[global_idx as usize] = global_value;
             }
         }
-        Reflect::set(&output, &JsValue::from_str("line_number"), &JsValue::from_f64(state.changes[step_idx].line_number as f64)).ok();
+        Reflect::set(
+            &output,
+            &JsValue::from_str("line_number"),
+            &JsValue::from_f64(state.changes[step_idx].line_number as f64),
+        )
+        .ok();
         Reflect::set(&output, &JsValue::from_str("stack"), &vec_to_array(&stack)).ok();
-        Reflect::set(&output, &JsValue::from_str("locals"), &vec_to_array(&locals)).ok();
-        Reflect::set(&output, &JsValue::from_str("globals"), &vec_to_array(&globals)).ok();
+        Reflect::set(
+            &output,
+            &JsValue::from_str("locals"),
+            &vec_to_array(&locals),
+        )
+        .ok();
+        Reflect::set(
+            &output,
+            &JsValue::from_str("globals"),
+            &vec_to_array(&globals),
+        )
+        .ok();
         JsValue::from(output)
     })
 }

@@ -4,8 +4,8 @@ pub mod dom_vec;
 pub mod jet;
 pub mod utils;
 
+pub mod debug;
 pub mod editor;
 pub mod graphics;
 pub mod line;
 pub mod syntax;
-pub mod debug;
