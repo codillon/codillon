@@ -2,7 +2,7 @@
 
 use wast::{
     Error, annotation,
-    core::{Instruction, LocalParser, ValType},
+    core::{InlineImport, Instruction, LocalParser, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
     token::{Id, Index, NameAnnotation},
@@ -29,6 +29,7 @@ pub enum ModulePart {
     Id,
     Name,
     Export,
+    Import,
     Type,
     Param,
     Result,
@@ -47,9 +48,15 @@ impl<'a> From<Id<'a>> for ModulePart {
     }
 }
 
-impl<'a> From<NameAnnotation<'a>> for ModulePart {
-    fn from(_: NameAnnotation) -> Self {
+impl<'a> From<Option<NameAnnotation<'a>>> for ModulePart {
+    fn from(_: Option<NameAnnotation>) -> Self {
         ModulePart::Name
+    }
+}
+
+impl<'a> From<InlineImport<'a>> for ModulePart {
+    fn from(_: InlineImport) -> Self {
+        ModulePart::Import
     }
 }
 
@@ -102,10 +109,12 @@ impl From<Error> for LineKind {
 
 impl<'a> Parse<'a> for ModulePart {
     fn parse(parser: Parser<'a>) -> Result<Self, Error> {
-        // Parse fields of format "(...)" first, then parse single tokens
+        let _r = parser.register_annotation("name");
+
+        // Prioritize fields of format "(...)" over single "(" token
 
         if parser.peek2::<annotation::name>()? {
-            parser.parens(|_| return Ok(parser.parse::<NameAnnotation<'a>>()?.into()))
+            Ok(parser.parse::<Option<NameAnnotation<'a>>>()?.into())
         } else if parser.peek2::<kw::export>()? {
             // Modified from InlineExport parser
             parser.parens(|p| {
@@ -113,6 +122,8 @@ impl<'a> Parse<'a> for ModulePart {
                 p.parse::<&str>()?;
                 return Ok(ModulePart::Export);
             })
+        } else if parser.peek2::<kw::import>()? {
+            Ok(parser.parse::<InlineImport<'a>>()?.into())
         } else if parser.peek2::<kw::r#type>()? {
             // Modified from TypeUse parser
             parser.parens(|p| {
@@ -664,12 +675,16 @@ mod tests {
             ModulePart::Id
         );
         assert_eq!(
-            parse::<ModulePart>(&ParseBuffer::new("    ( @name \"foo\"  )    ")?)?,
+            parse::<ModulePart>(&ParseBuffer::new("    ( @name \"foo\")    ")?)?,
             ModulePart::Name
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("  ( export \"main\")    ")?)?,
             ModulePart::Export
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("  ( import \"foo\" \"bar\" )    ")?)?,
+            ModulePart::Import
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("   (type 1)    ")?)?,
@@ -747,6 +762,24 @@ mod tests {
                 ModulePart::LParen,
                 ModulePart::FuncKeyword,
                 ModulePart::RParen
+            ])
+        );
+
+        assert_eq!(
+            parse::<LineKind>(&ParseBuffer::new(
+                " ( func $foo (@name \"name\") ( export \"main\") (import \"modu\" \"bar\") (type 0) (param $x i32) (result i32 f64) (local $tmp i64)"
+            )?)?,
+            LineKind::Other(vec![
+                ModulePart::LParen,
+                ModulePart::FuncKeyword,
+                ModulePart::Id,
+                ModulePart::Name,
+                ModulePart::Export,
+                ModulePart::Import,
+                ModulePart::Type,
+                ModulePart::Param,
+                ModulePart::Result,
+                ModulePart::Local
             ])
         );
 
