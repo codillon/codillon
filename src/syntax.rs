@@ -1,11 +1,11 @@
 // Structures and utilities to support multi-function/multi-module text buffers.
 
 use wast::{
-    Error,
-    core::Instruction,
+    Error, annotation,
+    core::{Instruction, LocalParser, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
-    token::Id,
+    token::{Id, Index, NameAnnotation},
 };
 
 use anyhow::Result;
@@ -21,13 +21,18 @@ pub enum InstrKind {
     Other,           // any other instruction
 }
 
-// TODO: FunctionType, export, locals, etc.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ModulePart {
     LParen,
     RParen,
     FuncKeyword,
     Id,
+    Name,
+    Export,
+    Type,
+    Param,
+    Result,
+    Local,
 }
 
 impl From<kw::func> for ModulePart {
@@ -39,6 +44,18 @@ impl From<kw::func> for ModulePart {
 impl<'a> From<Id<'a>> for ModulePart {
     fn from(_: Id) -> Self {
         ModulePart::Id
+    }
+}
+
+impl<'a> From<NameAnnotation<'a>> for ModulePart {
+    fn from(_: NameAnnotation) -> Self {
+        ModulePart::Name
+    }
+}
+
+impl<'a> From<LocalParser<'a>> for ModulePart {
+    fn from(_: LocalParser) -> Self {
+        ModulePart::Local
     }
 }
 
@@ -85,7 +102,58 @@ impl From<Error> for LineKind {
 
 impl<'a> Parse<'a> for ModulePart {
     fn parse(parser: Parser<'a>) -> Result<Self, Error> {
-        if parser.step(|cursor| match cursor.lparen()? {
+        // Parse fields of format "(...)" first, then parse single tokens
+
+        if parser.peek2::<annotation::name>()? {
+            parser.parens(|_| return Ok(parser.parse::<NameAnnotation<'a>>()?.into()))
+        } else if parser.peek2::<kw::export>()? {
+            // Modified from InlineExport parser
+            parser.parens(|p| {
+                p.parse::<kw::export>()?;
+                p.parse::<&str>()?;
+                return Ok(ModulePart::Export);
+            })
+        } else if parser.peek2::<kw::r#type>()? {
+            // Modified from TypeUse parser
+            parser.parens(|p| {
+                p.parse::<kw::r#type>()?;
+                p.parse::<Index<'a>>()?;
+                return Ok(ModulePart::Type);
+            })
+        } else if parser.peek2::<kw::param>()? {
+            // Modified from FunctionType parser
+            parser.parens(|p| {
+                p.parse::<kw::param>()?;
+                if p.is_empty() {
+                    return Ok(ModulePart::Param);
+                }
+
+                let (id, name) = (
+                    p.parse::<Option<Id<'a>>>()?,
+                    p.parse::<Option<NameAnnotation<'a>>>()?,
+                );
+                let parse_more = id.is_none() && name.is_none();
+                p.parse::<ValType<'a>>()?;
+                while parse_more && !p.is_empty() {
+                    p.parse::<ValType<'a>>()?;
+                }
+
+                return Ok(ModulePart::Param);
+            })
+        } else if parser.peek2::<kw::result>()? {
+            // Modified from FunctionType parser
+            parser.parens(|p| {
+                p.parse::<kw::result>()?;
+                while !p.is_empty() {
+                    p.parse::<ValType<'a>>()?;
+                }
+
+                return Ok(ModulePart::Result);
+            })
+        } else if parser.peek2::<kw::local>()? {
+            // Modified from Local parse_remainder
+            parser.parens(|_| return Ok(parser.parse::<LocalParser<'a>>()?.into()))
+        } else if parser.step(|cursor| match cursor.lparen()? {
             Some(rest) => Ok((true, rest)),
             None => Ok((false, cursor)),
         })? {
@@ -481,7 +549,7 @@ pub fn find_frames(code: &mut impl FrameInfosMut) {
 pub fn parse_line(s: &str) -> LineKind {
     match ParseBuffer::new(s) {
         Ok(buf) => match parser::parse::<LineKind>(&buf) {
-            Ok(instr) => instr,
+            Ok(kind) => kind,
             Err(e) => e.into(),
         },
         Err(e) => e.into(),
@@ -591,6 +659,35 @@ mod tests {
             parse::<ModulePart>(&ParseBuffer::new("    func    ")?)?,
             ModulePart::FuncKeyword
         );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("    $x    ")?)?,
+            ModulePart::Id
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("    ( @name \"foo\"  )    ")?)?,
+            ModulePart::Name
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("  ( export \"main\")    ")?)?,
+            ModulePart::Export
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("   (type 1)    ")?)?,
+            ModulePart::Type
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("    (param $x i32)    ")?)?,
+            ModulePart::Param
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("    ( result i32 f32 i64   )    ")?)?,
+            ModulePart::Result
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("    (local $x    f64 )    ")?)?,
+            ModulePart::Local
+        );
+        assert!(parse::<ModulePart>(&ParseBuffer::new("( param")?).is_err());
         assert!(parse::<ModulePart>(&ParseBuffer::new("()")?).is_err());
         Ok(())
     }
