@@ -31,6 +31,8 @@ type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), Ht
 
 pub const LINE_SPACING: usize = 40;
 pub const GROUP_INTERVAL_MS: f64 = 150.0;
+// 10 minutes
+pub const KEEP_DURATION_MS: f64 = 10.0 * 60.0 * 1000.0;
 
 #[derive(Clone)]
 struct Selection {
@@ -43,12 +45,12 @@ struct Selection {
 #[derive(Clone)]
 struct Edit {
     start_line: usize,
-    // lines replaced
-    before: Vec<String>,
+    old_lines: Vec<String>,
     // new lines
-    after: Vec<String>,
+    new_lines: Vec<String>,
     selection_before: Selection,
     selection_after: Selection,
+    time_ms: f64,
 }
 
 struct _Editor {
@@ -264,28 +266,37 @@ impl Editor {
         match self.on_change() {
             Ok(()) => {
                 self.line(fixup_line).set_cursor_position(new_cursor_pos);
-                let mut after = Vec::new();
+                let mut new_lines = Vec::new();
                 for i in start_line..=fixup_line {
-                    after.push(self.line(i).suffix(Position::begin())?);
+                    new_lines.push(self.line(i).suffix(Position::begin())?);
                 }
                 // Store new edit
-                self.store_edit(Edit {
-                    start_line,
-                    before: backup,
-                    after,
-                    selection_before: Selection {
-                        start_line: saved_selection.0,
-                        start_pos: saved_selection.1,
-                        end_line: saved_selection.2,
-                        end_pos: saved_selection.3,
+                let now_ms = web_sys::window()
+                    .expect("Window doesn't")
+                    .performance()
+                    .expect("Performance not available")
+                    .now();
+                self.store_edit(
+                    Edit {
+                        start_line,
+                        old_lines: backup,
+                        new_lines,
+                        selection_before: Selection {
+                            start_line: saved_selection.0,
+                            start_pos: saved_selection.1,
+                            end_line: saved_selection.2,
+                            end_pos: saved_selection.3,
+                        },
+                        selection_after: Selection {
+                            start_line: fixup_line,
+                            start_pos: new_cursor_pos,
+                            end_line: fixup_line,
+                            end_pos: new_cursor_pos,
+                        },
+                        time_ms: now_ms,
                     },
-                    selection_after: Selection {
-                        start_line: fixup_line,
-                        start_pos: new_cursor_pos,
-                        end_line: fixup_line,
-                        end_pos: new_cursor_pos,
-                    },
-                });
+                    now_ms,
+                );
             }
             Err(_) => {
                 // restore backup
@@ -590,25 +601,30 @@ impl Editor {
         });
     }
 
-    fn store_edit(&mut self, edit: Edit) {
-        let now_ms = web_sys::window()
-            .expect("Window doesn't")
-            .performance()
-            .expect("Performance not available")
-            .now();
+    fn store_edit(&mut self, edit: Edit, now_ms: f64) {
         let mut inner = self.0.borrow_mut();
         inner.redo_stack.clear();
         // Combine edit if close together
         if now_ms - inner.last_time_ms <= GROUP_INTERVAL_MS
             && let Some(last_edit) = inner.undo_stack.last_mut()
             && last_edit.start_line == edit.start_line
-            && last_edit.after.len() == 1
-            && edit.after.len() == 1
+            && last_edit.new_lines.len() == 1
+            && edit.new_lines.len() == 1
         {
-            last_edit.after = edit.after;
+            last_edit.new_lines = edit.new_lines;
             last_edit.selection_after = edit.selection_after;
+            last_edit.time_ms = now_ms;
         } else {
             inner.undo_stack.push(edit);
+        }
+        // Remove old edits
+        let num_discard = inner
+            .undo_stack
+            .iter()
+            .position(|ed| (now_ms - ed.time_ms) < KEEP_DURATION_MS)
+            .unwrap_or(0);
+        if num_discard > 0 {
+            inner.undo_stack.drain(0..num_discard);
         }
         inner.last_time_ms = now_ms;
     }
@@ -670,8 +686,8 @@ impl Editor {
             drop(inner);
             self.apply_selection(
                 edit.start_line,
-                edit.after.len(),
-                &edit.before,
+                edit.new_lines.len(),
+                &edit.old_lines,
                 &edit.selection_before,
             )?;
             let mut inner = self.0.borrow_mut();
@@ -688,8 +704,8 @@ impl Editor {
             drop(inner);
             self.apply_selection(
                 edit.start_line,
-                edit.before.len(),
-                &edit.after,
+                edit.old_lines.len(),
+                &edit.new_lines,
                 &edit.selection_after,
             )?;
             let mut inner = self.0.borrow_mut();
