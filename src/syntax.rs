@@ -273,6 +273,13 @@ enum SyntaxState {
     AfterModuleFieldLParen,
     AfterFuncKeyword,
     AfterFuncId,
+    AfterFuncName,
+    AfterFuncExport,
+    AfterFuncImport,
+    AfterFuncType,
+    AfterFuncParam,
+    AfterFuncResult,
+    AfterFuncLocal,
     AfterInstruction,
     AfterModuleFieldRParen,
 }
@@ -311,8 +318,84 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             state = SyntaxState::AfterFuncId;
                         }
                         (
+                            SyntaxState::AfterFuncKeyword | SyntaxState::AfterFuncId,
+                            ModulePart::Name,
+                        ) => {
+                            state = SyntaxState::AfterFuncName;
+                        }
+                        (
                             SyntaxState::AfterFuncKeyword
                             | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncName,
+                            ModulePart::Export,
+                        ) => {
+                            state = SyntaxState::AfterFuncExport;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncName
+                            | SyntaxState::AfterFuncExport,
+                            ModulePart::Import,
+                        ) => {
+                            state = SyntaxState::AfterFuncImport;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncName
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport,
+                            ModulePart::Type,
+                        ) => {
+                            state = SyntaxState::AfterFuncType;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncName
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport
+                            | SyntaxState::AfterFuncType,
+                            ModulePart::Param,
+                        ) => {
+                            state = SyntaxState::AfterFuncParam;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncName
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport
+                            | SyntaxState::AfterFuncType
+                            | SyntaxState::AfterFuncParam,
+                            ModulePart::Result,
+                        ) => {
+                            state = SyntaxState::AfterFuncResult;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncName
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport
+                            | SyntaxState::AfterFuncType
+                            | SyntaxState::AfterFuncParam
+                            | SyntaxState::AfterFuncResult,
+                            ModulePart::Local,
+                        ) => {
+                            state = SyntaxState::AfterFuncLocal;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncName
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport
+                            | SyntaxState::AfterFuncType
+                            | SyntaxState::AfterFuncParam
+                            | SyntaxState::AfterFuncResult
+                            | SyntaxState::AfterFuncLocal
                             | SyntaxState::AfterInstruction,
                             ModulePart::RParen,
                         ) => {
