@@ -19,9 +19,9 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::{
     cell::{Ref, RefCell, RefMut},
+    cmp::min,
     ops::Deref,
     rc::Rc,
-    cmp::min,
 };
 use wasmparser::{Parser, Payload};
 use web_sys::{HtmlDivElement, console::log_1};
@@ -259,7 +259,7 @@ impl Editor {
 
         // Is the new module well-formed? Otherwise, revert this entire change.
         match self.on_change() {
-            Ok(()) => { 
+            Ok(()) => {
                 self.line(fixup_line).set_cursor_position(new_cursor_pos);
                 let mut after = Vec::new();
                 for i in start_line..=fixup_line {
@@ -589,7 +589,8 @@ impl Editor {
         });
     }
 
-    fn apply_selection ( &mut self,
+    fn apply_selection(
+        &mut self,
         start_line: usize,
         remove_len: usize,
         insert_lines: &[String],
@@ -600,7 +601,12 @@ impl Editor {
             bail!("start_line {start_line} out of range");
         }
         // Removing ending
-        let end = min(start_line.checked_add(remove_len).unwrap_or(document_length), self.len());
+        let end = min(
+            start_line
+                .checked_add(remove_len)
+                .unwrap_or(document_length),
+            self.len(),
+        );
         if end > start_line {
             self.text_mut().remove_range(start_line, end);
         }
@@ -615,10 +621,20 @@ impl Editor {
         let end_index = min(selection_after.end_line, document_length);
         // Restore caret position
         set_selection_range(
-            self.line(start_index).position_to_node(selection_after.start_pos),
-            selection_after.start_pos.offset.try_into().expect("offset -> u32"),
-            self.line(end_index).position_to_node(selection_after.end_pos),
-            selection_after.end_pos.offset.try_into().expect("offset -> u32"),
+            self.line(start_index)
+                .position_to_node(selection_after.start_pos),
+            selection_after
+                .start_pos
+                .offset
+                .try_into()
+                .expect("offset -> u32"),
+            self.line(end_index)
+                .position_to_node(selection_after.end_pos),
+            selection_after
+                .end_pos
+                .offset
+                .try_into()
+                .expect("offset -> u32"),
         );
         Ok(())
     }
@@ -628,7 +644,12 @@ impl Editor {
         let mut inner = self.0.borrow_mut();
         if let Some(edit) = inner.undo_stack.pop() {
             drop(inner);
-            self.apply_selection(edit.start_line, edit.after.len(), &edit.before, &edit.selection_before)?;
+            self.apply_selection(
+                edit.start_line,
+                edit.after.len(),
+                &edit.before,
+                &edit.selection_before,
+            )?;
             let mut inner = self.0.borrow_mut();
             inner.redo_stack.push(edit);
         }
@@ -640,7 +661,12 @@ impl Editor {
         let mut inner = self.0.borrow_mut();
         if let Some(edit) = inner.redo_stack.pop() {
             drop(inner);
-            self.apply_selection(edit.start_line, edit.before.len(), &edit.after, &edit.selection_after)?;
+            self.apply_selection(
+                edit.start_line,
+                edit.before.len(),
+                &edit.after,
+                &edit.selection_after,
+            )?;
             let mut inner = self.0.borrow_mut();
             inner.undo_stack.push(edit);
         }
