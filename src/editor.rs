@@ -21,6 +21,7 @@ use std::{
     cell::{Ref, RefCell, RefMut},
     ops::Deref,
     rc::Rc,
+    cmp::min,
 };
 use wasmparser::{Parser, Payload};
 use web_sys::{HtmlDivElement, console::log_1};
@@ -30,9 +31,32 @@ type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), Ht
 
 pub const LINE_SPACING: usize = 40;
 
+#[derive(Clone)]
+struct Selection {
+    start_line: usize,
+    start_pos: Position,
+    end_line: usize,
+    end_pos: Position,
+}
+
+#[derive(Clone)]
+struct Edit {
+    start_line: usize,
+    // lines replaced
+    before: Vec<String>,
+    // new lines
+    after: Vec<String>,
+    selection_before: Selection,
+    selection_after: Selection,
+}
+
 struct _Editor {
     component: ComponentType,
     factory: ElementFactory,
+
+    // Storing changes
+    undo_stack: Vec<Edit>,
+    redo_stack: Vec<Edit>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -48,6 +72,8 @@ impl Editor {
                 factory.div(),
             ),
             factory,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -233,7 +259,33 @@ impl Editor {
 
         // Is the new module well-formed? Otherwise, revert this entire change.
         match self.on_change() {
-            Ok(()) => self.line(fixup_line).set_cursor_position(new_cursor_pos),
+            Ok(()) => { 
+                self.line(fixup_line).set_cursor_position(new_cursor_pos);
+                let mut after = Vec::new();
+                for i in start_line..=fixup_line {
+                    after.push(self.line(i).suffix(Position::begin())?);
+                }
+                // Store new edit
+                let mut inner = self.0.borrow_mut();
+                inner.undo_stack.push(Edit {
+                    start_line,
+                    before: backup,
+                    after,
+                    selection_before: Selection {
+                        start_line: saved_selection.0,
+                        start_pos: saved_selection.1,
+                        end_line: saved_selection.2,
+                        end_pos: saved_selection.3,
+                    },
+                    selection_after: Selection {
+                        start_line: fixup_line,
+                        start_pos: new_cursor_pos,
+                        end_line: fixup_line,
+                        end_pos: new_cursor_pos,
+                    },
+                });
+                inner.redo_stack.clear();
+            }
             Err(_) => {
                 // restore backup
                 self.text_mut().remove_range(start_line, fixup_line + 1);
@@ -342,6 +394,18 @@ impl Editor {
                         self.line(line_idx - 1)
                             .set_cursor_position(self.line(line_idx - 1).end_position());
                     }
+                }
+            }
+
+            "z" => {
+                if ev.ctrl_key() || ev.meta_key() {
+                    ev.prevent_default();
+                    if ev.shift_key() {
+                        self.redo()?;
+                    } else {
+                        self.undo()?;
+                    }
+                    return Ok(());
                 }
             }
 
@@ -523,6 +587,64 @@ impl Editor {
                 Err(e) => web_sys::console::log_1(&e),
             }
         });
+    }
+
+    fn apply_selection ( &mut self,
+        start_line: usize,
+        remove_len: usize,
+        insert_lines: &[String],
+        selection_after: &Selection,
+    ) -> Result<()> {
+        let mut document_length = self.len();
+        if start_line > document_length {
+            bail!("start_line {start_line} out of range");
+        }
+        // Removing ending
+        let end = min(start_line.checked_add(remove_len).unwrap_or(document_length), self.len());
+        if end > start_line {
+            self.text_mut().remove_range(start_line, end);
+        }
+        // Add new lines
+        for (index, value) in insert_lines.iter().enumerate() {
+            let newline = CodeLine::new(value, &self.0.borrow().factory);
+            self.text_mut().insert(start_line + index, newline);
+        }
+        self.on_change()?;
+        document_length = self.len().saturating_sub(1);
+        let start_index = min(selection_after.start_line, document_length);
+        let end_index = min(selection_after.end_line, document_length);
+        // Restore caret position
+        set_selection_range(
+            self.line(start_index).position_to_node(selection_after.start_pos),
+            selection_after.start_pos.offset.try_into().expect("offset -> u32"),
+            self.line(end_index).position_to_node(selection_after.end_pos),
+            selection_after.end_pos.offset.try_into().expect("offset -> u32"),
+        );
+        Ok(())
+    }
+
+    // Undo the most recent edit.
+    pub fn undo(&mut self) -> Result<()> {
+        let mut inner = self.0.borrow_mut();
+        if let Some(edit) = inner.undo_stack.pop() {
+            drop(inner);
+            self.apply_selection(edit.start_line, edit.after.len(), &edit.before, &edit.selection_before)?;
+            let mut inner = self.0.borrow_mut();
+            inner.redo_stack.push(edit);
+        }
+        Ok(())
+    }
+
+    // Re-apply most recently undone edit
+    pub fn redo(&mut self) -> Result<()> {
+        let mut inner = self.0.borrow_mut();
+        if let Some(edit) = inner.redo_stack.pop() {
+            drop(inner);
+            self.apply_selection(edit.start_line, edit.before.len(), &edit.after, &edit.selection_after)?;
+            let mut inner = self.0.borrow_mut();
+            inner.undo_stack.push(edit);
+        }
+        Ok(())
     }
 }
 
