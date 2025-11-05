@@ -30,6 +30,7 @@ type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), HtmlDivElement>;
 
 pub const LINE_SPACING: usize = 40;
+pub const GROUP_INTERVAL_MS: f64 = 150.0;
 
 #[derive(Clone)]
 struct Selection {
@@ -57,6 +58,7 @@ struct _Editor {
     // Storing changes
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
+    last_time_ms: f64,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -74,6 +76,7 @@ impl Editor {
             factory,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            last_time_ms: 0.0,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -266,8 +269,7 @@ impl Editor {
                     after.push(self.line(i).suffix(Position::begin())?);
                 }
                 // Store new edit
-                let mut inner = self.0.borrow_mut();
-                inner.undo_stack.push(Edit {
+                self.store_edit(Edit {
                     start_line,
                     before: backup,
                     after,
@@ -284,7 +286,6 @@ impl Editor {
                         end_pos: new_cursor_pos,
                     },
                 });
-                inner.redo_stack.clear();
             }
             Err(_) => {
                 // restore backup
@@ -589,6 +590,29 @@ impl Editor {
         });
     }
 
+    fn store_edit(&mut self, edit: Edit) {
+        let now_ms = web_sys::window()
+            .expect("Window doesn't")
+            .performance()
+            .expect("Performance not available")
+            .now();
+        let mut inner = self.0.borrow_mut();
+        inner.redo_stack.clear();
+        // Combine edit if close together
+        if now_ms - inner.last_time_ms <= GROUP_INTERVAL_MS
+            && let Some(last_edit) = inner.undo_stack.last_mut()
+            && last_edit.start_line == edit.start_line
+            && last_edit.after.len() == 1
+            && edit.after.len() == 1
+        {
+            last_edit.after = edit.after;
+            last_edit.selection_after = edit.selection_after;
+        } else {
+            inner.undo_stack.push(edit);
+        }
+        inner.last_time_ms = now_ms;
+    }
+
     fn apply_selection(
         &mut self,
         start_line: usize,
@@ -652,6 +676,7 @@ impl Editor {
             )?;
             let mut inner = self.0.borrow_mut();
             inner.redo_stack.push(edit);
+            inner.last_time_ms = 0.0;
         }
         Ok(())
     }
@@ -669,6 +694,7 @@ impl Editor {
             )?;
             let mut inner = self.0.borrow_mut();
             inner.undo_stack.push(edit);
+            inner.last_time_ms = 0.0;
         }
         Ok(())
     }
