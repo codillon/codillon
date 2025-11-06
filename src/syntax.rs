@@ -120,7 +120,7 @@ impl<'a> Parse<'a> for ModulePart {
             parser.parens(|p| {
                 p.parse::<kw::export>()?;
                 p.parse::<&str>()?;
-                return Ok(ModulePart::Export);
+                Ok(ModulePart::Export)
             })
         } else if parser.peek2::<kw::import>()? {
             Ok(parser.parse::<InlineImport<'a>>()?.into())
@@ -129,7 +129,7 @@ impl<'a> Parse<'a> for ModulePart {
             parser.parens(|p| {
                 p.parse::<kw::r#type>()?;
                 p.parse::<Index<'a>>()?;
-                return Ok(ModulePart::Type);
+                Ok(ModulePart::Type)
             })
         } else if parser.peek2::<kw::param>()? {
             // Modified from FunctionType parser
@@ -149,7 +149,7 @@ impl<'a> Parse<'a> for ModulePart {
                     p.parse::<ValType<'a>>()?;
                 }
 
-                return Ok(ModulePart::Param);
+                Ok(ModulePart::Param)
             })
         } else if parser.peek2::<kw::result>()? {
             // Modified from FunctionType parser
@@ -159,11 +159,11 @@ impl<'a> Parse<'a> for ModulePart {
                     p.parse::<ValType<'a>>()?;
                 }
 
-                return Ok(ModulePart::Result);
+                Ok(ModulePart::Result)
             })
         } else if parser.peek2::<kw::local>()? {
             // Modified from Local parse_remainder
-            parser.parens(|_| return Ok(parser.parse::<LocalParser<'a>>()?.into()))
+            parser.parens(|_| Ok(parser.parse::<LocalParser<'a>>()?.into()))
         } else if parser.step(|cursor| match cursor.lparen()? {
             Some(rest) => Ok((true, rest)),
             None => Ok((false, cursor)),
