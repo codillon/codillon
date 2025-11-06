@@ -230,7 +230,6 @@ pub fn get_state_js(step_idx: usize) -> JsValue {
     })
 }
 
-
 pub fn get_all_changes() -> JsValue {
     STATE.with(|cur_state| {
         let state = cur_state.borrow();
@@ -258,19 +257,44 @@ pub fn get_all_changes() -> JsValue {
             .ok();
             if let Some((idx, val)) = &change.locals_change {
                 let local_obj = Object::new();
-                Reflect::set(&local_obj, &JsValue::from_str("idx"), &JsValue::from_f64(*idx as f64)).ok();
-                Reflect::set(&local_obj, &JsValue::from_str("value"), &JsValue::from_str(&type_to_string(val))).ok();
+                Reflect::set(
+                    &local_obj,
+                    &JsValue::from_str("idx"),
+                    &JsValue::from_f64(*idx as f64),
+                )
+                .ok();
+                Reflect::set(
+                    &local_obj,
+                    &JsValue::from_str("value"),
+                    &JsValue::from_str(&type_to_string(val)),
+                )
+                .ok();
                 Reflect::set(&output, &JsValue::from_str("locals_change"), &local_obj).ok();
             } else {
                 Reflect::set(&output, &JsValue::from_str("locals_change"), &JsValue::NULL).ok();
             }
             if let Some((idx, val)) = &change.globals_change {
                 let global_obj = Object::new();
-                Reflect::set(&global_obj, &JsValue::from_str("idx"), &JsValue::from_f64(*idx as f64)).ok();
-                Reflect::set(&global_obj, &JsValue::from_str("value"), &JsValue::from_str(&type_to_string(val))).ok();
+                Reflect::set(
+                    &global_obj,
+                    &JsValue::from_str("idx"),
+                    &JsValue::from_f64(*idx as f64),
+                )
+                .ok();
+                Reflect::set(
+                    &global_obj,
+                    &JsValue::from_str("value"),
+                    &JsValue::from_str(&type_to_string(val)),
+                )
+                .ok();
                 Reflect::set(&output, &JsValue::from_str("globals_change"), &global_obj).ok();
             } else {
-                Reflect::set(&output, &JsValue::from_str("globals_change"), &JsValue::NULL).ok();
+                Reflect::set(
+                    &output,
+                    &JsValue::from_str("globals_change"),
+                    &JsValue::NULL,
+                )
+                .ok();
             }
             result.push(&output);
         }

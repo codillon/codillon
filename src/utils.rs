@@ -105,14 +105,17 @@ impl<'a> InstructionTable<'a> {
     fn classify(operation: &wasmparser::Operator) -> InstrumentationTypes {
         use wasmparser::Operator::*;
         match operation {
-            LocalSet { local_index } | LocalTee { local_index } => InstrumentationTypes::LocalSet(*local_index),
+            LocalSet { local_index } | LocalTee { local_index } => {
+                InstrumentationTypes::LocalSet(*local_index)
+            }
             GlobalSet { global_index } => InstrumentationTypes::GlobalSet(*global_index),
             I32Const { .. } => InstrumentationTypes::I32Const,
             // Binary i32 ops: pop 2, push 1
-            I32Add | I32Sub | I32Mul | I32DivS | I32DivU | I32RemS | I32RemU
-            | I32And | I32Or | I32Xor | I32Shl | I32ShrS | I32ShrU | I32Rotl | I32Rotr
-            | I32Eq | I32Ne | I32LtS | I32LtU | I32GtS | I32GtU | I32LeS | I32LeU | I32GeS | I32GeU
-                => InstrumentationTypes::BinaryI32,
+            I32Add | I32Sub | I32Mul | I32DivS | I32DivU | I32RemS | I32RemU | I32And | I32Or
+            | I32Xor | I32Shl | I32ShrS | I32ShrU | I32Rotl | I32Rotr | I32Eq | I32Ne | I32LtS
+            | I32LtU | I32GtS | I32GtU | I32LeS | I32LeU | I32GeS | I32GeU => {
+                InstrumentationTypes::BinaryI32
+            }
             // Unary i32 ops: pop 1, push 1
             I32Clz | I32Ctz | I32Popcnt | I32Eqz => InstrumentationTypes::UnaryI32,
             _ => InstrumentationTypes::Other,

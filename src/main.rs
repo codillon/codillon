@@ -17,11 +17,22 @@ fn setup() -> Result<()> {
         doc.set_body(Body::new((Editor::new(factory), ()), body));
         doc.audit();
     });
-    let document = web_sys::window().expect("window exists").document().expect("document exists");
-    let debug_div = document.create_element("div").expect("debug delement created").dyn_into::<web_sys::HtmlDivElement>().expect("dynamic cast");
+    let document = web_sys::window()
+        .expect("window exists")
+        .document()
+        .expect("document exists");
+    let debug_div = document
+        .create_element("div")
+        .expect("debug delement created")
+        .dyn_into::<web_sys::HtmlDivElement>()
+        .expect("dynamic cast");
     debug_div.set_attribute("id", "codillon-debug").ok();
     debug_div.set_text_content(Some("Debug panel"));
-    document.body().expect("body exists").append_child(&debug_div).ok();
+    document
+        .body()
+        .expect("body exists")
+        .append_child(&debug_div)
+        .ok();
 
     web_sys::console::log_1(&"successful audit".into());
 

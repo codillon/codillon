@@ -724,10 +724,10 @@ impl Editor {
             .ok()
             .and_then(|j| j.as_string())
             .unwrap_or_else(|| "[]".to_string());
-        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
-            if let Some(element) = document.get_element_by_id("codillon-debug") {
-                element.set_text_content(Some(&string_changes));
-            }
+        if let Some(document) = web_sys::window().and_then(|window| window.document())
+            && let Some(element) = document.get_element_by_id("codillon-debug")
+        {
+            element.set_text_content(Some(&string_changes));
         }
     }
 }
