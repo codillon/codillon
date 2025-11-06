@@ -334,8 +334,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         (
                             SyntaxState::AfterFuncKeyword
                             | SyntaxState::AfterFuncId
-                            | SyntaxState::AfterFuncName
-                            | SyntaxState::AfterFuncExport,
+                            | SyntaxState::AfterFuncName,
                             ModulePart::Import,
                         ) => {
                             state = SyntaxState::AfterFuncImport;
