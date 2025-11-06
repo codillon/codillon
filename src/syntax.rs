@@ -406,7 +406,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         | (SyntaxState::AfterFuncParam, ModulePart::Param)
                         | (SyntaxState::AfterFuncLocal, ModulePart::Local) => (),
                         _ => {
-                            active = Inactive("");
+                            active = Inactive("invalid field order");
                             break;
                         }
                     }
