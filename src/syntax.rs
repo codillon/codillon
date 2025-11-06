@@ -402,6 +402,9 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             state = SyntaxState::AfterModuleFieldRParen;
                             close_outstanding_frames = !frame_stack.is_empty();
                         }
+                        (SyntaxState::AfterFuncExport, ModulePart::Export)
+                        | (SyntaxState::AfterFuncParam, ModulePart::Param)
+                        | (SyntaxState::AfterFuncLocal, ModulePart::Local) => (),
                         _ => {
                             active = Inactive("");
                             break;
