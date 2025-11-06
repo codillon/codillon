@@ -1,7 +1,6 @@
 // The Codillon code editor
 
 use crate::{
-    debug::{get_state_js, last_step},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
@@ -499,14 +498,6 @@ impl Editor {
         }
     }
 
-    // TODO: Remove temporary function for debugging
-    fn log_last_state() {
-        let last_step = last_step();
-        if last_step != 0 {
-            log_1(&get_state_js(last_step));
-        }
-    }
-
     fn on_change(&mut self) -> Result<()> {
         // repair syntax
         fix_syntax(self);
@@ -529,6 +520,7 @@ impl Editor {
             log_1(&format!("Generating types table failed: {e}").into());
         }
         Self::execute(&instruction_table.build_executable_binary()?);
+        self.update_debug_panel();
 
         // find frames in the function
         find_frames(self);
@@ -537,7 +529,6 @@ impl Editor {
         {
             self.audit();
             log_1(&"successful audit".into());
-            Self::log_last_state();
         }
 
         Ok(())
@@ -726,6 +717,18 @@ impl Editor {
             inner.last_time_ms = 0.0;
         }
         Ok(())
+    }
+    fn update_debug_panel(&self) {
+        let js_changes = crate::debug::get_all_changes();
+        let string_changes = js_sys::JSON::stringify(&js_changes)
+            .ok()
+            .and_then(|j| j.as_string())
+            .unwrap_or_else(|| "[]".to_string());
+        if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+            if let Some(element) = document.get_element_by_id("codillon-debug") {
+                element.set_text_content(Some(&string_changes));
+            }
+        }
     }
 }
 

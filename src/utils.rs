@@ -16,6 +16,15 @@ use wast::{
     parser::{self, ParseBuffer},
 };
 
+enum InstrumentationTypes {
+    LocalSet(u32),
+    GlobalSet(u32),
+    I32Const,
+    BinaryI32,
+    UnaryI32,
+    Other,
+}
+
 pub struct CodillonInstruction<'a> {
     pub op: Operator<'a>,
     pub line_idx: usize,
@@ -91,6 +100,23 @@ impl<'a> InstructionTable<'a> {
             }
         }
         Ok(TypesTable { _table: result })
+    }
+
+    fn classify(operation: &wasmparser::Operator) -> InstrumentationTypes {
+        use wasmparser::Operator::*;
+        match operation {
+            LocalSet { local_index } | LocalTee { local_index } => InstrumentationTypes::LocalSet(*local_index),
+            GlobalSet { global_index } => InstrumentationTypes::GlobalSet(*global_index),
+            I32Const { .. } => InstrumentationTypes::I32Const,
+            // Binary i32 ops: pop 2, push 1
+            I32Add | I32Sub | I32Mul | I32DivS | I32DivU | I32RemS | I32RemU
+            | I32And | I32Or | I32Xor | I32Shl | I32ShrS | I32ShrU | I32Rotl | I32Rotr
+            | I32Eq | I32Ne | I32LtS | I32LtU | I32GtS | I32GtU | I32LeS | I32LeU | I32GeS | I32GeU
+                => InstrumentationTypes::BinaryI32,
+            // Unary i32 ops: pop 1, push 1
+            I32Clz | I32Ctz | I32Popcnt | I32Eqz => InstrumentationTypes::UnaryI32,
+            _ => InstrumentationTypes::Other,
+        }
     }
 
     pub fn build_executable_binary(&self) -> Result<Vec<u8>> {
@@ -177,66 +203,39 @@ impl<'a> InstructionTable<'a> {
         for codillon_instruction in &self.table {
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
-            match &codillon_instruction.op {
-                wasmparser::Operator::LocalSet { local_index }
-                | wasmparser::Operator::LocalTee { local_index } => {
+            let operation_type = Self::classify(&codillon_instruction.op);
+            match operation_type {
+                InstrumentationTypes::LocalSet(local_index) => {
                     f.instruction(&instruction);
-                    f.instruction(&EncoderInstruction::I32Const(*local_index as i32));
-                    f.instruction(&EncoderInstruction::LocalGet(*local_index));
+                    f.instruction(&EncoderInstruction::I32Const(local_index as i32));
+                    f.instruction(&EncoderInstruction::LocalGet(local_index));
                     f.instruction(&EncoderInstruction::Call(2));
                     pop_debug(&mut f, 1);
                 }
-                wasmparser::Operator::GlobalSet { global_index } => {
+                InstrumentationTypes::GlobalSet(global_index) => {
                     f.instruction(&instruction);
-                    f.instruction(&EncoderInstruction::I32Const(*global_index as i32));
-                    f.instruction(&EncoderInstruction::GlobalGet(*global_index));
+                    f.instruction(&EncoderInstruction::I32Const(global_index as i32));
+                    f.instruction(&EncoderInstruction::GlobalGet(global_index));
                     f.instruction(&EncoderInstruction::Call(3));
                     pop_debug(&mut f, 1);
                 }
-                wasmparser::Operator::I32Const { value: _ } => {
+                InstrumentationTypes::I32Const => {
                     f.instruction(&instruction);
                     f.instruction(&EncoderInstruction::Call(4));
                 }
                 // Binary i32 ops: pop 2, push 1
-                wasmparser::Operator::I32Add
-                | wasmparser::Operator::I32Sub
-                | wasmparser::Operator::I32Mul
-                | wasmparser::Operator::I32DivS
-                | wasmparser::Operator::I32DivU
-                | wasmparser::Operator::I32RemS
-                | wasmparser::Operator::I32RemU
-                | wasmparser::Operator::I32And
-                | wasmparser::Operator::I32Or
-                | wasmparser::Operator::I32Xor
-                | wasmparser::Operator::I32Shl
-                | wasmparser::Operator::I32ShrS
-                | wasmparser::Operator::I32ShrU
-                | wasmparser::Operator::I32Rotl
-                | wasmparser::Operator::I32Rotr
-                | wasmparser::Operator::I32Eq
-                | wasmparser::Operator::I32Ne
-                | wasmparser::Operator::I32LtS
-                | wasmparser::Operator::I32LtU
-                | wasmparser::Operator::I32GtS
-                | wasmparser::Operator::I32GtU
-                | wasmparser::Operator::I32LeS
-                | wasmparser::Operator::I32LeU
-                | wasmparser::Operator::I32GeS
-                | wasmparser::Operator::I32GeU => {
+                InstrumentationTypes::BinaryI32 => {
                     f.instruction(&instruction);
                     f.instruction(&EncoderInstruction::Call(4));
                     pop_debug(&mut f, 2);
                 }
                 // Unary i32 ops: pop 1, push 1
-                wasmparser::Operator::I32Clz
-                | wasmparser::Operator::I32Ctz
-                | wasmparser::Operator::I32Popcnt
-                | wasmparser::Operator::I32Eqz => {
+                InstrumentationTypes::UnaryI32 => {
                     f.instruction(&instruction);
                     f.instruction(&EncoderInstruction::Call(4));
                     pop_debug(&mut f, 1);
                 }
-                _ => {
+                InstrumentationTypes::Other => {
                     f.instruction(&instruction);
                 }
             }
