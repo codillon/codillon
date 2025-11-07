@@ -417,7 +417,6 @@ impl Editor {
                     } else {
                         self.undo()?;
                     }
-                    return Ok(());
                 }
             }
 
