@@ -411,7 +411,6 @@ impl Editor {
 
             "z" | "Z" => {
                 if ev.ctrl_key() || ev.meta_key() {
-                    log_1(&ev);
                     ev.prevent_default();
                     if ev.shift_key() {
                         self.redo()?;
