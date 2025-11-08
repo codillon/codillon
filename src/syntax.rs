@@ -1,7 +1,7 @@
 // Structures and utilities to support multi-function/multi-module text buffers.
 
 use wast::{
-    Error, annotation,
+    Error,
     core::{InlineImport, Instruction, LocalParser, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
@@ -27,7 +27,6 @@ pub enum ModulePart {
     RParen,
     FuncKeyword,
     Id,
-    Name,
     Export,
     Import,
     Type,
@@ -45,12 +44,6 @@ impl From<kw::func> for ModulePart {
 impl<'a> From<Id<'a>> for ModulePart {
     fn from(_: Id) -> Self {
         ModulePart::Id
-    }
-}
-
-impl<'a> From<Option<NameAnnotation<'a>>> for ModulePart {
-    fn from(_: Option<NameAnnotation>) -> Self {
-        ModulePart::Name
     }
 }
 
@@ -109,13 +102,9 @@ impl From<Error> for LineKind {
 
 impl<'a> Parse<'a> for ModulePart {
     fn parse(parser: Parser<'a>) -> Result<Self, Error> {
-        let _r = parser.register_annotation("name");
-
         // Prioritize fields of format "(...)" over single "(" token
 
-        if parser.peek2::<annotation::name>()? {
-            Ok(parser.parse::<Option<NameAnnotation<'a>>>()?.into())
-        } else if parser.peek2::<kw::export>()? {
+        if parser.peek2::<kw::export>()? {
             // Modified from InlineExport parser
             parser.parens(|p| {
                 p.parse::<kw::export>()?;
@@ -273,7 +262,6 @@ enum SyntaxState {
     AfterModuleFieldLParen,
     AfterFuncKeyword,
     AfterFuncId,
-    AfterFuncName,
     AfterFuncExport,
     AfterFuncImport,
     AfterFuncType,
@@ -319,22 +307,12 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         }
                         (
                             SyntaxState::AfterFuncKeyword | SyntaxState::AfterFuncId,
-                            ModulePart::Name,
-                        ) => {
-                            state = SyntaxState::AfterFuncName;
-                        }
-                        (
-                            SyntaxState::AfterFuncKeyword
-                            | SyntaxState::AfterFuncId
-                            | SyntaxState::AfterFuncName,
                             ModulePart::Export,
                         ) => {
                             state = SyntaxState::AfterFuncExport;
                         }
                         (
-                            SyntaxState::AfterFuncKeyword
-                            | SyntaxState::AfterFuncId
-                            | SyntaxState::AfterFuncName,
+                            SyntaxState::AfterFuncKeyword | SyntaxState::AfterFuncId,
                             ModulePart::Import,
                         ) => {
                             state = SyntaxState::AfterFuncImport;
@@ -342,7 +320,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         (
                             SyntaxState::AfterFuncKeyword
                             | SyntaxState::AfterFuncId
-                            | SyntaxState::AfterFuncName
                             | SyntaxState::AfterFuncExport
                             | SyntaxState::AfterFuncImport,
                             ModulePart::Type,
@@ -352,7 +329,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         (
                             SyntaxState::AfterFuncKeyword
                             | SyntaxState::AfterFuncId
-                            | SyntaxState::AfterFuncName
                             | SyntaxState::AfterFuncExport
                             | SyntaxState::AfterFuncImport
                             | SyntaxState::AfterFuncType,
@@ -363,7 +339,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         (
                             SyntaxState::AfterFuncKeyword
                             | SyntaxState::AfterFuncId
-                            | SyntaxState::AfterFuncName
                             | SyntaxState::AfterFuncExport
                             | SyntaxState::AfterFuncImport
                             | SyntaxState::AfterFuncType
@@ -375,7 +350,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         (
                             SyntaxState::AfterFuncKeyword
                             | SyntaxState::AfterFuncId
-                            | SyntaxState::AfterFuncName
                             | SyntaxState::AfterFuncExport
                             | SyntaxState::AfterFuncImport
                             | SyntaxState::AfterFuncType
@@ -388,7 +362,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         (
                             SyntaxState::AfterFuncKeyword
                             | SyntaxState::AfterFuncId
-                            | SyntaxState::AfterFuncName
                             | SyntaxState::AfterFuncExport
                             | SyntaxState::AfterFuncImport
                             | SyntaxState::AfterFuncType
@@ -760,10 +733,6 @@ mod tests {
             ModulePart::Id
         );
         assert_eq!(
-            parse::<ModulePart>(&ParseBuffer::new("    ( @name \"foo\")    ")?)?,
-            ModulePart::Name
-        );
-        assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("  ( export \"main\")    ")?)?,
             ModulePart::Export
         );
@@ -852,13 +821,12 @@ mod tests {
 
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new(
-                " ( func $foo (@name \"name\") ( export \"main\") (import \"modu\" \"bar\") (type 0) (param $x i32) (result i32 f64) (local $tmp i64)"
+                " ( func $foo ( export \"main\") (import \"modu\" \"bar\") (type 0) (param $x i32) (result i32 f64) (local $tmp i64)"
             )?)?,
             LineKind::Other(vec![
                 ModulePart::LParen,
                 ModulePart::FuncKeyword,
                 ModulePart::Id,
-                ModulePart::Name,
                 ModulePart::Export,
                 ModulePart::Import,
                 ModulePart::Type,
