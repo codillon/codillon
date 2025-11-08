@@ -30,8 +30,10 @@ type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), HtmlDivElement>;
 
 pub const LINE_SPACING: usize = 40;
+// Chrome uses 1 second and VSCode uses 300 - 500 ms, but for comparatively short 
+// WebAssembly lines, 150 ms felt more natural.
 pub const GROUP_INTERVAL_MS: f64 = 150.0;
-// 10 minutes
+// 10 minutes - arbitrary
 pub const KEEP_DURATION_MS: f64 = 10.0 * 60.0 * 1000.0;
 
 #[derive(Clone)]
@@ -620,8 +622,8 @@ impl Editor {
         let num_discard = inner
             .undo_stack
             .iter()
-            .position(|ed| (now_ms - ed.time_ms) < KEEP_DURATION_MS)
-            .unwrap_or(0);
+            .take_while(|ed| (now_ms - ed.time_ms) > KEEP_DURATION_MS)
+            .count();
         if num_discard > 0 {
             inner.undo_stack.drain(0..num_discard);
         }
