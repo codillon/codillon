@@ -23,7 +23,7 @@ pub enum WebAssemblyTypes {
 }
 
 pub struct Change {
-    line_number: i32,
+    pub line_number: i32,
     stack_pushes: Vec<WebAssemblyTypes>,
     locals_change: Option<(u32, WebAssemblyTypes)>,
     globals_change: Option<(u32, WebAssemblyTypes)>,
@@ -159,6 +159,13 @@ pub fn last_step() -> usize {
     STATE.with(|cur_state| cur_state.borrow().changes.len().saturating_sub(1))
 }
 
+pub fn with_changes<T, F>(get_iter: F) -> T
+where
+    F: FnOnce(std::slice::Iter<'_, Change>) -> T,
+{
+    STATE.with(|cur_state| get_iter(cur_state.borrow().changes.iter()))
+}
+
 fn type_to_string(value: &WebAssemblyTypes) -> String {
     match value {
         WebAssemblyTypes::I32(v) => format!("i32({})", v),
@@ -230,74 +237,61 @@ pub fn get_state_js(step_idx: usize) -> JsValue {
     })
 }
 
-pub fn get_all_changes() -> JsValue {
-    STATE.with(|cur_state| {
-        let state = cur_state.borrow();
-        let result = Array::new();
-        // Changes need to be reconstructed
-        for change in &state.changes {
-            let output = Object::new();
-            Reflect::set(
-                &output,
-                &JsValue::from_str("line_number"),
-                &JsValue::from_f64(change.line_number as f64),
-            )
-            .ok();
-            Reflect::set(
-                &output,
-                &JsValue::from_str("stack_pushes"),
-                &vec_to_array(&change.stack_pushes),
-            )
-            .ok();
-            Reflect::set(
-                &output,
-                &JsValue::from_str("num_pops"),
-                &JsValue::from_f64(change.num_pops as f64),
-            )
-            .ok();
-            if let Some((idx, val)) = &change.locals_change {
-                let local_obj = Object::new();
-                Reflect::set(
-                    &local_obj,
-                    &JsValue::from_str("idx"),
-                    &JsValue::from_f64(*idx as f64),
-                )
-                .ok();
-                Reflect::set(
-                    &local_obj,
-                    &JsValue::from_str("value"),
-                    &JsValue::from_str(&type_to_string(val)),
-                )
-                .ok();
-                Reflect::set(&output, &JsValue::from_str("locals_change"), &local_obj).ok();
-            } else {
-                Reflect::set(&output, &JsValue::from_str("locals_change"), &JsValue::NULL).ok();
-            }
-            if let Some((idx, val)) = &change.globals_change {
-                let global_obj = Object::new();
-                Reflect::set(
-                    &global_obj,
-                    &JsValue::from_str("idx"),
-                    &JsValue::from_f64(*idx as f64),
-                )
-                .ok();
-                Reflect::set(
-                    &global_obj,
-                    &JsValue::from_str("value"),
-                    &JsValue::from_str(&type_to_string(val)),
-                )
-                .ok();
-                Reflect::set(&output, &JsValue::from_str("globals_change"), &global_obj).ok();
-            } else {
-                Reflect::set(
-                    &output,
-                    &JsValue::from_str("globals_change"),
-                    &JsValue::NULL,
-                )
-                .ok();
-            }
-            result.push(&output);
-        }
-        JsValue::from(result)
-    })
+pub fn change_to_js(change: &Change) -> JsValue {
+    let output = Object::new();
+    Reflect::set(
+        &output,
+        &JsValue::from_str("line#"),
+        &JsValue::from_f64(change.line_number as f64),
+    )
+    .ok();
+    Reflect::set(
+        &output,
+        &JsValue::from_str("pushes"),
+        &vec_to_array(&change.stack_pushes),
+    )
+    .ok();
+    Reflect::set(
+        &output,
+        &JsValue::from_str("pops"),
+        &JsValue::from_f64(change.num_pops as f64),
+    )
+    .ok();
+    if let Some((idx, val)) = &change.locals_change {
+        let local_obj = Object::new();
+        Reflect::set(
+            &local_obj,
+            &JsValue::from_str("idx"),
+            &JsValue::from_f64(*idx as f64),
+        )
+        .ok();
+        Reflect::set(
+            &local_obj,
+            &JsValue::from_str("value"),
+            &JsValue::from_str(&type_to_string(val)),
+        )
+        .ok();
+        Reflect::set(&output, &JsValue::from_str("locals"), &local_obj).ok();
+    } else {
+        Reflect::set(&output, &JsValue::from_str("locals"), &JsValue::NULL).ok();
+    }
+    if let Some((idx, val)) = &change.globals_change {
+        let global_obj = Object::new();
+        Reflect::set(
+            &global_obj,
+            &JsValue::from_str("idx"),
+            &JsValue::from_f64(*idx as f64),
+        )
+        .ok();
+        Reflect::set(
+            &global_obj,
+            &JsValue::from_str("value"),
+            &JsValue::from_str(&type_to_string(val)),
+        )
+        .ok();
+        Reflect::set(&output, &JsValue::from_str("globals"), &global_obj).ok();
+    } else {
+        Reflect::set(&output, &JsValue::from_str("globals"), &JsValue::NULL).ok();
+    }
+    JsValue::from(output)
 }

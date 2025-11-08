@@ -519,8 +519,7 @@ impl Editor {
         if let Err(e) = _types_table {
             log_1(&format!("Generating types table failed: {e}").into());
         }
-        Self::execute(&instruction_table.build_executable_binary()?);
-        self.update_debug_panel();
+        self.execute(&instruction_table.build_executable_binary()?);
 
         // find frames in the function
         find_frames(self);
@@ -571,7 +570,7 @@ impl Editor {
         })
     }
 
-    fn execute(binary: &[u8]) {
+    fn execute(&self, binary: &[u8]) {
         async fn run_binary(binary: &[u8]) -> Result<String, wasm_bindgen::JsValue> {
             use js_sys::{Function, Reflect};
             use wasm_bindgen::JsValue;
@@ -588,19 +587,59 @@ impl Editor {
             let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
                 .ok_or("main is not an exported function")?;
             let res = main.apply(&JsValue::null(), &js_sys::Array::new())?;
-            let string = js_sys::JSON::stringify(&res)?;
-            let string = string
-                .as_string()
-                .ok_or(JsValue::from("stringify did not return string"))?;
+            let string = match js_sys::JSON::stringify(&res) {
+                Ok(jsstr) => jsstr.as_string().unwrap_or_else(|| format!("{:?}", res)),
+                Err(_) => res.as_string().unwrap_or_else(|| format!("{:?}", res)),
+            };
 
             Ok(string)
         }
 
         let binary = binary.to_vec();
+        let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
             match run_binary(&binary).await {
-                Ok(v) => web_sys::console::log_1(&format!("Ran successfully: {}", v).into()),
-                Err(e) => web_sys::console::log_1(&e),
+                Ok(_) => {
+                    editor_handle.update_debug_panel(&wasm_bindgen::JsValue::NULL);
+                    web_sys::console::log_1(&"Ran successfully".into());
+                }
+                Err(e) => {
+                    editor_handle.update_debug_panel(&e);
+                    web_sys::console::log_1(&e);
+                }
+            }
+        });
+    }
+
+    fn update_debug_panel(&self, error: &wasm_bindgen::JsValue) {
+        let mut textentry: RefMut<ReactiveComponent<TextType>> =
+            RefMut::map(self.0.borrow_mut(), |comp| {
+                &mut comp.component.get_mut().1.0
+            });
+        let lines: &mut TextType = textentry.inner_mut();
+        // Print error at top
+        if error != &wasm_bindgen::JsValue::NULL {
+            for text in lines.iter_mut() {
+                text.set_debug_annotation(None);
+            }
+            use js_sys::Reflect;
+            let message = Reflect::get(error, &wasm_bindgen::JsValue::from_str("message"))
+                .ok()
+                .and_then(|m| m.as_string())
+                .or_else(|| error.as_string())
+                .unwrap_or_else(|| format!("{:?}", error));
+            lines[0].set_debug_annotation(Some(&message));
+            return;
+        }
+        lines[0].set_debug_annotation(None);
+        crate::debug::with_changes(|changes| {
+            for change in changes {
+                let idx = change.line_number as usize;
+                let data = js_sys::JSON::stringify(&crate::debug::change_to_js(change))
+                    .ok()
+                    .and_then(|text| text.as_string())
+                    .unwrap_or_else(|| "{}".to_string());
+                lines[idx].set_debug_annotation(Some(&data));
             }
         });
     }
@@ -717,18 +756,6 @@ impl Editor {
             inner.last_time_ms = 0.0;
         }
         Ok(())
-    }
-    fn update_debug_panel(&self) {
-        let js_changes = crate::debug::get_all_changes();
-        let string_changes = js_sys::JSON::stringify(&js_changes)
-            .ok()
-            .and_then(|j| j.as_string())
-            .unwrap_or_else(|| "[]".to_string());
-        if let Some(document) = web_sys::window().and_then(|window| window.document())
-            && let Some(element) = document.get_element_by_id("codillon-debug")
-        {
-            element.set_text_content(Some(&string_changes));
-        }
     }
 }
 
