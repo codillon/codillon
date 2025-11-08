@@ -30,7 +30,7 @@ type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), HtmlDivElement>;
 
 pub const LINE_SPACING: usize = 40;
-// Chrome uses 1 second and VSCode uses 300 - 500 ms, but for comparatively short 
+// Chrome uses 1 second and VSCode uses 300 - 500 ms, but for comparatively short
 // WebAssembly lines, 150 ms felt more natural.
 pub const GROUP_INTERVAL_MS: f64 = 150.0;
 // 10 minutes - arbitrary
