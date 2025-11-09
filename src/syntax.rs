@@ -278,6 +278,7 @@ enum SyntaxState {
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     let mut state = SyntaxState::Initial;
     let mut frame_stack: Vec<InstrKind> = Vec::new();
+    let mut is_func_import = false;
     use crate::line::Activity::*;
 
     assert!(lines.len() > 0);
@@ -312,10 +313,13 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             state = SyntaxState::AfterFuncExport;
                         }
                         (
-                            SyntaxState::AfterFuncKeyword | SyntaxState::AfterFuncId,
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncExport,
                             ModulePart::Import,
                         ) => {
                             state = SyntaxState::AfterFuncImport;
+                            is_func_import = true;
                         }
                         (
                             SyntaxState::AfterFuncKeyword
@@ -357,7 +361,12 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             | SyntaxState::AfterFuncResult,
                             ModulePart::Local,
                         ) => {
-                            state = SyntaxState::AfterFuncLocal;
+                            if is_func_import {
+                                active = Inactive("import func cannot have locals");
+                                break;
+                            } else {
+                                state = SyntaxState::AfterFuncLocal;
+                            }
                         }
                         (
                             SyntaxState::AfterFuncKeyword
@@ -372,6 +381,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             ModulePart::RParen,
                         ) => {
                             state = SyntaxState::AfterModuleFieldRParen;
+                            is_func_import = false;
                             close_outstanding_frames = !frame_stack.is_empty();
                         }
                         (SyntaxState::AfterFuncExport, ModulePart::Export)
@@ -405,6 +415,14 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             // Also prepend "(" or "(func" as necessary before the first instruction,
             // and append ")" as necessary after the last one.
             LineKind::Instr(kind) => {
+                if is_func_import {
+                    lines.set_active_status(
+                        line_no,
+                        Inactive("import func cannot have instructions"),
+                    );
+                    continue;
+                }
+
                 match kind {
                     InstrKind::If | InstrKind::OtherStructured => {
                         lines.set_active_status(line_no, Active);
