@@ -518,8 +518,10 @@ impl Editor {
         let _types_table = instruction_table.to_types_table(&wasm_bin);
         if let Err(e) = _types_table {
             log_1(&format!("Generating types table failed: {e}").into());
+            self.update_debug_panel(Some(e.to_string()));
+        } else if let Ok(types) = _types_table {
+            self.execute(&instruction_table.build_executable_binary(&types)?);
         }
-        self.execute(&instruction_table.build_executable_binary()?);
 
         // find frames in the function
         find_frames(self);
@@ -600,48 +602,55 @@ impl Editor {
         wasm_bindgen_futures::spawn_local(async move {
             match run_binary(&binary).await {
                 Ok(_) => {
-                    editor_handle.update_debug_panel(&wasm_bindgen::JsValue::NULL);
+                    editor_handle.update_debug_panel(None);
                     web_sys::console::log_1(&"Ran successfully".into());
                 }
                 Err(e) => {
-                    editor_handle.update_debug_panel(&e);
                     web_sys::console::log_1(&e);
+                    use js_sys::Reflect;
+                    let message = Reflect::get(&e, &wasm_bindgen::JsValue::from_str("message"))
+                        .ok()
+                        .and_then(|m| m.as_string())
+                        .or_else(|| e.as_string())
+                        .unwrap_or_else(|| format!("{:?}", e));
+                    editor_handle.update_debug_panel(Some(message));
                 }
             }
         });
     }
 
-    fn update_debug_panel(&self, error: &wasm_bindgen::JsValue) {
+    fn update_debug_panel(&self, error: Option<String>) {
         let mut textentry: RefMut<ReactiveComponent<TextType>> =
             RefMut::map(self.0.borrow_mut(), |comp| {
                 &mut comp.component.get_mut().1.0
             });
         let lines: &mut TextType = textentry.inner_mut();
-        // Print error at top
-        if error != &wasm_bindgen::JsValue::NULL {
-            for text in lines.iter_mut() {
-                text.set_debug_annotation(None);
-            }
-            use js_sys::Reflect;
-            let message = Reflect::get(error, &wasm_bindgen::JsValue::from_str("message"))
-                .ok()
-                .and_then(|m| m.as_string())
-                .or_else(|| error.as_string())
-                .unwrap_or_else(|| format!("{:?}", error));
-            lines[0].set_debug_annotation(Some(&message));
+        if lines.is_empty() {
             return;
         }
-        lines[0].set_debug_annotation(None);
-        crate::debug::with_changes(|changes| {
-            for change in changes {
-                let idx = change.line_number as usize;
-                let data = js_sys::JSON::stringify(&crate::debug::change_to_js(change))
-                    .ok()
-                    .and_then(|text| text.as_string())
-                    .unwrap_or_else(|| "{}".to_string());
-                lines[idx].set_debug_annotation(Some(&data));
+        let mut annotations: Vec<Vec<String>> = vec![Vec::new(); lines.len()];
+        // Print error at top
+        if let Some(message) = error {
+            annotations[0].push(message);
+        } else {
+            crate::debug::with_changes(|changes| {
+                for change in changes {
+                    let idx = change.line_number as usize;
+                    let data = js_sys::JSON::stringify(&crate::debug::change_to_js(change))
+                        .ok()
+                        .and_then(|text| text.as_string())
+                        .unwrap_or_else(|| "{}".to_string());
+                    annotations[idx].push(data);
+                }
+            });
+        }
+        for (i, ann) in annotations.into_iter().enumerate() {
+            if ann.is_empty() {
+                lines[i].set_debug_annotation(None);
+            } else {
+                lines[i].set_debug_annotation(Some(&ann));
             }
-        });
+        }
     }
 
     fn store_edit(&mut self, edit: Edit, now_ms: f64) {

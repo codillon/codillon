@@ -532,13 +532,13 @@ impl CodeLine {
         self.info.indent = None;
     }
 
-    pub fn set_debug_annotation(&mut self, value: Option<&str>) {
+    pub fn set_debug_annotation(&mut self, value: Option<&[String]>) {
         if let Some(text) = value {
             self.contents
                 .get_mut()
                 .1
                 .0
-                .set_attribute("data-debug", text);
+                .set_attribute("data-debug", &text.join(" "));
         } else {
             self.contents.get_mut().1.0.remove_attribute("data-debug");
         }

@@ -16,13 +16,31 @@ use wast::{
     parser::{self, ParseBuffer},
 };
 
-enum InstrumentationTypes {
-    LocalSet(u32),
-    GlobalSet(u32),
+enum InstrumentationFuncs {
+    SetLocalI32(u32),
+    SetGlobalI32(u32),
     I32Const,
     BinaryI32,
     UnaryI32,
+    Drop,
     Other,
+}
+#[repr(u32)]
+enum InstrumentImports {
+    Step,
+    PopI,
+    SetLocalI32,
+    SetGlobalI32,
+    PushI32,
+}
+impl InstrumentImports {
+    pub const TYPE_INDICES: &'static [(&'static str, u32)] = &[
+        ("step", 1),
+        ("pop_i", 0),
+        ("set_local_i32", 2),
+        ("set_global_i32", 2),
+        ("push_i32", 1),
+    ];
 }
 
 pub struct CodillonInstruction<'a> {
@@ -102,80 +120,81 @@ impl<'a> InstructionTable<'a> {
         Ok(TypesTable { _table: result })
     }
 
-    fn classify(operation: &wasmparser::Operator) -> InstrumentationTypes {
+    fn classify(operation: &wasmparser::Operator, op_type: &CodillonType) -> InstrumentationFuncs {
         use wasmparser::Operator::*;
         match operation {
-            LocalSet { local_index } | LocalTee { local_index } => {
-                InstrumentationTypes::LocalSet(*local_index)
+            // Special Functions
+            LocalSet { local_index } | LocalTee { local_index } => match op_type.outputs[0] {
+                wasmparser::ValType::I32 => InstrumentationFuncs::SetLocalI32(*local_index),
+                _ => InstrumentationFuncs::Other,
+            },
+            GlobalSet { global_index } => match op_type.outputs[0] {
+                wasmparser::ValType::I32 => InstrumentationFuncs::SetGlobalI32(*global_index),
+                _ => InstrumentationFuncs::Other,
+            },
+            // Match based on inputs and outputs
+            _ => {
+                let input_types: Vec<ValType> =
+                    op_type.inputs.iter().map(|val| val.instr_type).collect();
+                if input_types.len() == 1 && op_type.outputs.is_empty() {
+                    return InstrumentationFuncs::Drop;
+                }
+                match (input_types.as_slice(), op_type.outputs.as_slice()) {
+                    ([], [wasmparser::ValType::I32]) => InstrumentationFuncs::I32Const,
+                    ([wasmparser::ValType::I32], [wasmparser::ValType::I32]) => {
+                        InstrumentationFuncs::UnaryI32
+                    }
+                    (
+                        [wasmparser::ValType::I32, wasmparser::ValType::I32],
+                        [wasmparser::ValType::I32],
+                    ) => InstrumentationFuncs::BinaryI32,
+                    _ => InstrumentationFuncs::Other,
+                }
             }
-            GlobalSet { global_index } => InstrumentationTypes::GlobalSet(*global_index),
-            I32Const { .. } => InstrumentationTypes::I32Const,
-            // Binary i32 ops: pop 2, push 1
-            I32Add | I32Sub | I32Mul | I32DivS | I32DivU | I32RemS | I32RemU | I32And | I32Or
-            | I32Xor | I32Shl | I32ShrS | I32ShrU | I32Rotl | I32Rotr | I32Eq | I32Ne | I32LtS
-            | I32LtU | I32GtS | I32GtU | I32LeS | I32LeU | I32GeS | I32GeU => {
-                InstrumentationTypes::BinaryI32
-            }
-            // Unary i32 ops: pop 1, push 1
-            I32Clz | I32Ctz | I32Popcnt | I32Eqz => InstrumentationTypes::UnaryI32,
-            _ => InstrumentationTypes::Other,
         }
     }
 
-    pub fn build_executable_binary(&self) -> Result<Vec<u8>> {
-        let mut module: wasm_encoder::Module = Default::default();
-
+    fn instr_func_types(&self) -> TypeSection {
         // Encode the type section.
         let mut types = TypeSection::new();
-        let params = vec![];
-        let results = vec![];
-        types.ty().function(params, results);
+        // 0: (i32) -> ()
         types
             .ty()
             .function(vec![wasm_encoder::ValType::I32], vec![]);
+        // 1: (i32) -> (i32)
         types.ty().function(
             vec![wasm_encoder::ValType::I32],
             vec![wasm_encoder::ValType::I32],
         );
+        // 2: (i32, i32) -> ()
         types.ty().function(
             vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
             vec![],
         );
-        module.section(&types);
+        types
+    }
 
+    fn instr_imports(&self) -> wasm_encoder::ImportSection {
         // Encode the instrumentation functions as imports.
         let mut imports = wasm_encoder::ImportSection::new();
-        imports.import(
-            "codillon_debug",
-            "step",
-            wasm_encoder::EntityType::Function(2),
-        );
-        imports.import(
-            "codillon_debug",
-            "pop_i",
-            wasm_encoder::EntityType::Function(1),
-        );
-        imports.import(
-            "codillon_debug",
-            "set_local_i32",
-            wasm_encoder::EntityType::Function(3),
-        );
-        imports.import(
-            "codillon_debug",
-            "set_global_i32",
-            wasm_encoder::EntityType::Function(3),
-        );
-        imports.import(
-            "codillon_debug",
-            "push_i32",
-            wasm_encoder::EntityType::Function(2),
-        );
-        module.section(&imports);
+        for (name, type_idx) in InstrumentImports::TYPE_INDICES.iter() {
+            imports.import(
+                "codillon_debug",
+                name,
+                wasm_encoder::EntityType::Function(*type_idx),
+            );
+        }
+        imports
+    }
+
+    pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
+        let mut module: wasm_encoder::Module = Default::default();
+        module.section(&self.instr_func_types());
+        module.section(&self.instr_imports());
 
         // Encode the main function section.
         let mut functions = FunctionSection::new();
-        let main_type_index = 0;
-        functions.function(main_type_index);
+        functions.function(0);
         module.section(&functions);
 
         // Encode the global section.
@@ -192,7 +211,11 @@ impl<'a> InstructionTable<'a> {
 
         // Encode the export section.
         let mut exports = ExportSection::new();
-        exports.export("main", wasm_encoder::ExportKind::Func, 5);
+        exports.export(
+            "main",
+            wasm_encoder::ExportKind::Func,
+            InstrumentImports::TYPE_INDICES.len() as u32,
+        );
         module.section(&exports);
 
         // Encode the code section.
@@ -201,50 +224,49 @@ impl<'a> InstructionTable<'a> {
         let mut f = wasm_encoder::Function::new(locals);
         let pop_debug = |func: &mut wasm_encoder::Function, num_pop: i32| {
             func.instruction(&EncoderInstruction::I32Const(num_pop));
-            func.instruction(&EncoderInstruction::Call(1));
+            func.instruction(&EncoderInstruction::Call(InstrumentImports::PopI as u32));
         };
-        for codillon_instruction in &self.table {
+        for (i, codillon_instruction) in self.table.iter().enumerate() {
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
-            let operation_type = Self::classify(&codillon_instruction.op);
+            let operation_type = Self::classify(&codillon_instruction.op, &types._table[i]);
+            f.instruction(&instruction);
             match operation_type {
-                InstrumentationTypes::LocalSet(local_index) => {
-                    f.instruction(&instruction);
+                InstrumentationFuncs::Drop => pop_debug(&mut f, 1),
+                InstrumentationFuncs::SetLocalI32(local_index) => {
                     f.instruction(&EncoderInstruction::I32Const(local_index as i32));
                     f.instruction(&EncoderInstruction::LocalGet(local_index));
-                    f.instruction(&EncoderInstruction::Call(2));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetLocalI32 as u32,
+                    ));
                     pop_debug(&mut f, 1);
                 }
-                InstrumentationTypes::GlobalSet(global_index) => {
-                    f.instruction(&instruction);
+                InstrumentationFuncs::SetGlobalI32(global_index) => {
                     f.instruction(&EncoderInstruction::I32Const(global_index as i32));
                     f.instruction(&EncoderInstruction::GlobalGet(global_index));
-                    f.instruction(&EncoderInstruction::Call(3));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetGlobalI32 as u32,
+                    ));
                     pop_debug(&mut f, 1);
                 }
-                InstrumentationTypes::I32Const => {
-                    f.instruction(&instruction);
-                    f.instruction(&EncoderInstruction::Call(4));
+                InstrumentationFuncs::I32Const => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushI32 as u32));
                 }
                 // Binary i32 ops: pop 2, push 1
-                InstrumentationTypes::BinaryI32 => {
-                    f.instruction(&instruction);
-                    f.instruction(&EncoderInstruction::Call(4));
+                InstrumentationFuncs::BinaryI32 => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushI32 as u32));
                     pop_debug(&mut f, 2);
                 }
                 // Unary i32 ops: pop 1, push 1
-                InstrumentationTypes::UnaryI32 => {
-                    f.instruction(&instruction);
-                    f.instruction(&EncoderInstruction::Call(4));
+                InstrumentationFuncs::UnaryI32 => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushI32 as u32));
                     pop_debug(&mut f, 1);
                 }
-                InstrumentationTypes::Other => {
-                    f.instruction(&instruction);
-                }
+                InstrumentationFuncs::Other => {}
             }
             // Step after each instruction evaluation
             f.instruction(&EncoderInstruction::I32Const(line_idx));
-            f.instruction(&EncoderInstruction::Call(0));
+            f.instruction(&EncoderInstruction::Call(InstrumentImports::Step as u32));
             f.instruction(&EncoderInstruction::I32Eqz);
             f.instruction(&EncoderInstruction::If(wasm_encoder::BlockType::Empty));
             f.instruction(&EncoderInstruction::Return);
