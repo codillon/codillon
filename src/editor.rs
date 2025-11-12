@@ -511,15 +511,17 @@ impl Editor {
         //create Instruction Table
         let instruction_table = self.to_instruction_table(&wasm_bin)?;
 
-        //annotation and instrumentation
+        // annotation and instrumentation
         // For now, don't return Err even if `to_types_table` fails.
         // Otherwise, keystrokes that create well-formed-but-invalid
         // modules will be rejected and cause the "shake" animation.
         let _types_table = instruction_table.to_types_table(&wasm_bin);
         if let Err(e) = _types_table {
             log_1(&format!("Generating types table failed: {e}").into());
+            self.update_debug_panel(Some(e.to_string()));
+        } else if let Ok(types) = _types_table {
+            self.execute(&instruction_table.build_executable_binary(&types)?);
         }
-        Self::execute(&instruction_table.build_executable_binary()?);
 
         // find frames in the function
         find_frames(self);
@@ -570,11 +572,13 @@ impl Editor {
         })
     }
 
-    fn execute(binary: &[u8]) {
+    fn execute(&self, binary: &[u8]) {
         async fn run_binary(binary: &[u8]) -> Result<String, wasm_bindgen::JsValue> {
             use js_sys::{Function, Reflect};
             use wasm_bindgen::JsValue;
-            let promise = js_sys::WebAssembly::instantiate_buffer(binary, &js_sys::Object::new());
+            // Build import objects for the instrumented module.
+            let imports = crate::debug::make_imports()?;
+            let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
             let js_value = wasm_bindgen_futures::JsFuture::from(promise).await?;
             let instance = Reflect::get(&js_value, &JsValue::from_str("instance"))
                 .map_err(|_| "failed to get instance")?;
@@ -585,21 +589,68 @@ impl Editor {
             let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
                 .ok_or("main is not an exported function")?;
             let res = main.apply(&JsValue::null(), &js_sys::Array::new())?;
-            let string = js_sys::JSON::stringify(&res)?;
-            let string = string
-                .as_string()
-                .ok_or(JsValue::from("stringify did not return string"))?;
+            let string = match js_sys::JSON::stringify(&res) {
+                Ok(jsstr) => jsstr.as_string().unwrap_or_else(|| format!("{:?}", res)),
+                Err(_) => res.as_string().unwrap_or_else(|| format!("{:?}", res)),
+            };
 
             Ok(string)
         }
 
         let binary = binary.to_vec();
+        let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
             match run_binary(&binary).await {
-                Ok(v) => web_sys::console::log_1(&format!("Ran successfully: {}", v).into()),
-                Err(e) => web_sys::console::log_1(&e),
+                Ok(_) => {
+                    editor_handle.update_debug_panel(None);
+                    web_sys::console::log_1(&"Ran successfully".into());
+                }
+                Err(e) => {
+                    web_sys::console::log_1(&e);
+                    use js_sys::Reflect;
+                    let message = Reflect::get(&e, &wasm_bindgen::JsValue::from_str("message"))
+                        .ok()
+                        .and_then(|m| m.as_string())
+                        .or_else(|| e.as_string())
+                        .unwrap_or_else(|| format!("{:?}", e));
+                    editor_handle.update_debug_panel(Some(message));
+                }
             }
         });
+    }
+
+    fn update_debug_panel(&self, error: Option<String>) {
+        let mut textentry: RefMut<ReactiveComponent<TextType>> =
+            RefMut::map(self.0.borrow_mut(), |comp| {
+                &mut comp.component.get_mut().1.0
+            });
+        let lines: &mut TextType = textentry.inner_mut();
+        if lines.is_empty() {
+            return;
+        }
+        let mut annotations: Vec<Vec<String>> = vec![Vec::new(); lines.len()];
+        // Print error at top
+        if let Some(message) = error {
+            annotations[0].push(message);
+        } else {
+            crate::debug::with_changes(|changes| {
+                for change in changes {
+                    let idx = change.line_number as usize;
+                    let data = js_sys::JSON::stringify(&crate::debug::change_to_js(change))
+                        .ok()
+                        .and_then(|text| text.as_string())
+                        .unwrap_or_else(|| "{}".to_string());
+                    annotations[idx].push(data);
+                }
+            });
+        }
+        for (i, ann) in annotations.into_iter().enumerate() {
+            if ann.is_empty() {
+                lines[i].set_debug_annotation(None);
+            } else {
+                lines[i].set_debug_annotation(Some(&ann));
+            }
+        }
     }
 
     fn store_edit(&mut self, edit: Edit, now_ms: f64) {

@@ -16,6 +16,39 @@ use wast::{
     parser::{self, ParseBuffer},
 };
 
+enum InstrumentationFuncs {
+    SetLocalI32(u32),
+    SetGlobalI32(u32),
+    PushI32,
+    PushF32,
+    PushI64,
+    PushF64,
+    Other,
+}
+#[repr(u32)]
+enum InstrumentImports {
+    Step,
+    PopI,
+    SetLocalI32,
+    SetGlobalI32,
+    PushI32,
+    PushF32,
+    PushI64,
+    PushF64,
+}
+impl InstrumentImports {
+    pub const TYPE_INDICES: &'static [(&'static str, u32)] = &[
+        ("step", 1),
+        ("pop_i", 0),
+        ("set_local_i32", 5),
+        ("set_global_i32", 5),
+        ("push_i32", 1),
+        ("push_f32", 2),
+        ("push_i64", 3),
+        ("push_f64", 4),
+    ];
+}
+
 pub struct CodillonInstruction<'a> {
     pub op: Operator<'a>,
     pub line_idx: usize,
@@ -93,22 +126,85 @@ impl<'a> InstructionTable<'a> {
         Ok(TypesTable { _table: result })
     }
 
-    pub fn build_executable_binary(&self) -> Result<Vec<u8>> {
-        const MAX_STEP_COUNT: i32 = 1000;
+    fn classify(operation: &wasmparser::Operator, op_type: &CodillonType) -> InstrumentationFuncs {
+        use wasmparser::Operator::*;
+        match operation {
+            // Special Functions
+            LocalSet { local_index } | LocalTee { local_index } => match op_type.outputs[0] {
+                wasmparser::ValType::I32 => InstrumentationFuncs::SetLocalI32(*local_index),
+                _ => InstrumentationFuncs::Other,
+            },
+            GlobalSet { global_index } => match op_type.outputs[0] {
+                wasmparser::ValType::I32 => InstrumentationFuncs::SetGlobalI32(*global_index),
+                _ => InstrumentationFuncs::Other,
+            },
+            // Match based on outputs
+            _ => match op_type.outputs.as_slice() {
+                [wasmparser::ValType::I32] => InstrumentationFuncs::PushI32,
+                [wasmparser::ValType::I64] => InstrumentationFuncs::PushI64,
+                [wasmparser::ValType::F32] => InstrumentationFuncs::PushF32,
+                [wasmparser::ValType::F64] => InstrumentationFuncs::PushF64,
+                _ => InstrumentationFuncs::Other,
+            },
+        }
+    }
 
-        let mut module: wasm_encoder::Module = Default::default();
-
+    fn instr_func_types(&self) -> TypeSection {
         // Encode the type section.
         let mut types = TypeSection::new();
-        let params = vec![];
-        let results = vec![];
-        types.ty().function(params, results);
-        module.section(&types);
+        // 0: (i32) -> ()
+        types
+            .ty()
+            .function(vec![wasm_encoder::ValType::I32], vec![]);
+        // 1: (i32) -> (i32)
+        types.ty().function(
+            vec![wasm_encoder::ValType::I32],
+            vec![wasm_encoder::ValType::I32],
+        );
+        // 2: (f32) -> (f32)
+        types.ty().function(
+            vec![wasm_encoder::ValType::F32],
+            vec![wasm_encoder::ValType::F32],
+        );
+        // 3: (i64) -> (i64)
+        types.ty().function(
+            vec![wasm_encoder::ValType::I64],
+            vec![wasm_encoder::ValType::I64],
+        );
+        // 4: (f64) -> (f64)
+        types.ty().function(
+            vec![wasm_encoder::ValType::F64],
+            vec![wasm_encoder::ValType::F64],
+        );
+        // 5: (i32, i32) -> ()
+        types.ty().function(
+            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
+            vec![],
+        );
+        types
+    }
 
-        // Encode the function section.
+    fn instr_imports(&self) -> wasm_encoder::ImportSection {
+        // Encode the instrumentation functions as imports.
+        let mut imports = wasm_encoder::ImportSection::new();
+        for (name, type_idx) in InstrumentImports::TYPE_INDICES.iter() {
+            imports.import(
+                "codillon_debug",
+                name,
+                wasm_encoder::EntityType::Function(*type_idx),
+            );
+        }
+        imports
+    }
+
+    pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
+        let mut module: wasm_encoder::Module = Default::default();
+        module.section(&self.instr_func_types());
+        module.section(&self.instr_imports());
+
+        // Encode the main function section.
         let mut functions = FunctionSection::new();
-        let type_index = 0;
-        functions.function(type_index);
+        functions.function(0);
         module.section(&functions);
 
         // Encode the global section.
@@ -125,28 +221,64 @@ impl<'a> InstructionTable<'a> {
 
         // Encode the export section.
         let mut exports = ExportSection::new();
-        exports.export("main", wasm_encoder::ExportKind::Func, 0);
+        exports.export(
+            "main",
+            wasm_encoder::ExportKind::Func,
+            InstrumentImports::TYPE_INDICES.len() as u32,
+        );
         module.section(&exports);
 
         // Encode the code section.
         let mut codes = CodeSection::new();
         let locals = vec![];
         let mut f = wasm_encoder::Function::new(locals);
-        for codillon_instruction in &self.table {
+        let pop_debug = |func: &mut wasm_encoder::Function, num_pop: i32| {
+            func.instruction(&EncoderInstruction::I32Const(num_pop));
+            func.instruction(&EncoderInstruction::Call(InstrumentImports::PopI as u32));
+        };
+        for (i, codillon_instruction) in self.table.iter().enumerate() {
+            let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
-            // Instrument to prevent infinite execution.
-            f.instruction(&EncoderInstruction::GlobalGet(0));
-            f.instruction(&EncoderInstruction::I32Const(1));
-            f.instruction(&EncoderInstruction::I32Add);
-            f.instruction(&EncoderInstruction::GlobalSet(0));
-            f.instruction(&EncoderInstruction::GlobalGet(0));
-            f.instruction(&EncoderInstruction::I32Const(MAX_STEP_COUNT));
-            f.instruction(&EncoderInstruction::I32GtU);
-            f.instruction(&EncoderInstruction::If(wasm_encoder::BlockType::Empty));
-            // Throw unreachable if step count reached.
-            f.instruction(&EncoderInstruction::Unreachable);
-            f.instruction(&EncoderInstruction::End);
+            let value_type = &types._table[i];
+            let operation_type = Self::classify(&codillon_instruction.op, value_type);
+            pop_debug(&mut f, value_type.inputs.len() as i32);
             f.instruction(&instruction);
+            match operation_type {
+                InstrumentationFuncs::SetLocalI32(local_index) => {
+                    f.instruction(&EncoderInstruction::I32Const(local_index as i32));
+                    f.instruction(&EncoderInstruction::LocalGet(local_index));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetLocalI32 as u32,
+                    ));
+                }
+                InstrumentationFuncs::SetGlobalI32(global_index) => {
+                    f.instruction(&EncoderInstruction::I32Const(global_index as i32));
+                    f.instruction(&EncoderInstruction::GlobalGet(global_index));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetGlobalI32 as u32,
+                    ));
+                }
+                InstrumentationFuncs::PushI32 => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushI32 as u32));
+                }
+                InstrumentationFuncs::PushF32 => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushF32 as u32));
+                }
+                InstrumentationFuncs::PushI64 => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushI64 as u32));
+                }
+                InstrumentationFuncs::PushF64 => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushF64 as u32));
+                }
+                InstrumentationFuncs::Other => {}
+            }
+            // Step after each instruction evaluation
+            f.instruction(&EncoderInstruction::I32Const(line_idx));
+            f.instruction(&EncoderInstruction::Call(InstrumentImports::Step as u32));
+            f.instruction(&EncoderInstruction::I32Eqz);
+            f.instruction(&EncoderInstruction::If(wasm_encoder::BlockType::Empty));
+            f.instruction(&EncoderInstruction::Return);
+            f.instruction(&EncoderInstruction::End);
         }
         f.instruction(&EncoderInstruction::End);
         codes.function(&f);

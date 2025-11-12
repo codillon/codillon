@@ -108,6 +108,12 @@ span.comment[data-commentary]::after {
     content: attr(data-commentary);
 }
 
+span.comment[data-debug]::after {
+    content: attr(data-debug);
+    margin-left: 10pt;
+    font-size: 15pt;
+}
+
 .shake-a {
     animation: shake-a 0.25s;
 }
