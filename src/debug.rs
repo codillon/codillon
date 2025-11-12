@@ -135,6 +135,60 @@ pub fn make_imports() -> Result<Object, JsValue> {
     .ok();
     push_i32.forget();
 
+    // Store f32.const expressions
+    let push_f32 = Closure::wrap(Box::new(move |value: f32| {
+        STATE.with(|cur_state| {
+            cur_state
+                .borrow_mut()
+                .stack_pushes
+                .push(WebAssemblyTypes::F32(value));
+        });
+        value
+    }) as Box<dyn Fn(f32) -> f32>);
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("push_f32"),
+        push_f32.as_ref().unchecked_ref(),
+    )
+    .ok();
+    push_f32.forget();
+
+    // Store i64.const expressions
+    let push_i64 = Closure::wrap(Box::new(move |value: i64| {
+        STATE.with(|cur_state| {
+            cur_state
+                .borrow_mut()
+                .stack_pushes
+                .push(WebAssemblyTypes::I64(value));
+        });
+        value
+    }) as Box<dyn Fn(i64) -> i64>);
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("push_i64"),
+        push_i64.as_ref().unchecked_ref(),
+    )
+    .ok();
+    push_i64.forget();
+
+    // Store f64.const expressions
+    let push_f64 = Closure::wrap(Box::new(move |value: f64| {
+        STATE.with(|cur_state| {
+            cur_state
+                .borrow_mut()
+                .stack_pushes
+                .push(WebAssemblyTypes::F64(value));
+        });
+        value
+    }) as Box<dyn Fn(f64) -> f64>);
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("push_f64"),
+        push_f64.as_ref().unchecked_ref(),
+    )
+    .ok();
+    push_f64.forget();
+
     let pop_i = Closure::wrap(Box::new(move |pop_num: i32| {
         STATE.with(|cur_state| {
             cur_state.borrow_mut().num_pops = pop_num as u32;

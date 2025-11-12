@@ -19,10 +19,10 @@ use wast::{
 enum InstrumentationFuncs {
     SetLocalI32(u32),
     SetGlobalI32(u32),
-    I32Const,
-    BinaryI32,
-    UnaryI32,
-    Drop,
+    PushI32,
+    PushF32,
+    PushI64,
+    PushF64,
     Other,
 }
 #[repr(u32)]
@@ -32,14 +32,20 @@ enum InstrumentImports {
     SetLocalI32,
     SetGlobalI32,
     PushI32,
+    PushF32,
+    PushI64,
+    PushF64,
 }
 impl InstrumentImports {
     pub const TYPE_INDICES: &'static [(&'static str, u32)] = &[
         ("step", 1),
         ("pop_i", 0),
-        ("set_local_i32", 2),
-        ("set_global_i32", 2),
+        ("set_local_i32", 5),
+        ("set_global_i32", 5),
         ("push_i32", 1),
+        ("push_f32", 2),
+        ("push_i64", 3),
+        ("push_f64", 4),
     ];
 }
 
@@ -132,25 +138,14 @@ impl<'a> InstructionTable<'a> {
                 wasmparser::ValType::I32 => InstrumentationFuncs::SetGlobalI32(*global_index),
                 _ => InstrumentationFuncs::Other,
             },
-            // Match based on inputs and outputs
-            _ => {
-                let input_types: Vec<ValType> =
-                    op_type.inputs.iter().map(|val| val.instr_type).collect();
-                if input_types.len() == 1 && op_type.outputs.is_empty() {
-                    return InstrumentationFuncs::Drop;
-                }
-                match (input_types.as_slice(), op_type.outputs.as_slice()) {
-                    ([], [wasmparser::ValType::I32]) => InstrumentationFuncs::I32Const,
-                    ([wasmparser::ValType::I32], [wasmparser::ValType::I32]) => {
-                        InstrumentationFuncs::UnaryI32
-                    }
-                    (
-                        [wasmparser::ValType::I32, wasmparser::ValType::I32],
-                        [wasmparser::ValType::I32],
-                    ) => InstrumentationFuncs::BinaryI32,
-                    _ => InstrumentationFuncs::Other,
-                }
-            }
+            // Match based on outputs
+            _ => match op_type.outputs.as_slice() {
+                [wasmparser::ValType::I32] => InstrumentationFuncs::PushI32,
+                [wasmparser::ValType::I64] => InstrumentationFuncs::PushI64,
+                [wasmparser::ValType::F32] => InstrumentationFuncs::PushF32,
+                [wasmparser::ValType::F64] => InstrumentationFuncs::PushF64,
+                _ => InstrumentationFuncs::Other,
+            },
         }
     }
 
@@ -166,7 +161,22 @@ impl<'a> InstructionTable<'a> {
             vec![wasm_encoder::ValType::I32],
             vec![wasm_encoder::ValType::I32],
         );
-        // 2: (i32, i32) -> ()
+        // 2: (f32) -> (f32)
+        types.ty().function(
+            vec![wasm_encoder::ValType::F32],
+            vec![wasm_encoder::ValType::F32],
+        );
+        // 3: (i64) -> (i64)
+        types.ty().function(
+            vec![wasm_encoder::ValType::I64],
+            vec![wasm_encoder::ValType::I64],
+        );
+        // 4: (f64) -> (f64)
+        types.ty().function(
+            vec![wasm_encoder::ValType::F64],
+            vec![wasm_encoder::ValType::F64],
+        );
+        // 5: (i32, i32) -> ()
         types.ty().function(
             vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
             vec![],
@@ -229,17 +239,17 @@ impl<'a> InstructionTable<'a> {
         for (i, codillon_instruction) in self.table.iter().enumerate() {
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
-            let operation_type = Self::classify(&codillon_instruction.op, &types._table[i]);
+            let value_type = &types._table[i];
+            let operation_type = Self::classify(&codillon_instruction.op, value_type);
+            pop_debug(&mut f, value_type.inputs.len() as i32);
             f.instruction(&instruction);
             match operation_type {
-                InstrumentationFuncs::Drop => pop_debug(&mut f, 1),
                 InstrumentationFuncs::SetLocalI32(local_index) => {
                     f.instruction(&EncoderInstruction::I32Const(local_index as i32));
                     f.instruction(&EncoderInstruction::LocalGet(local_index));
                     f.instruction(&EncoderInstruction::Call(
                         InstrumentImports::SetLocalI32 as u32,
                     ));
-                    pop_debug(&mut f, 1);
                 }
                 InstrumentationFuncs::SetGlobalI32(global_index) => {
                     f.instruction(&EncoderInstruction::I32Const(global_index as i32));
@@ -247,20 +257,18 @@ impl<'a> InstructionTable<'a> {
                     f.instruction(&EncoderInstruction::Call(
                         InstrumentImports::SetGlobalI32 as u32,
                     ));
-                    pop_debug(&mut f, 1);
                 }
-                InstrumentationFuncs::I32Const => {
+                InstrumentationFuncs::PushI32 => {
                     f.instruction(&EncoderInstruction::Call(InstrumentImports::PushI32 as u32));
                 }
-                // Binary i32 ops: pop 2, push 1
-                InstrumentationFuncs::BinaryI32 => {
-                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushI32 as u32));
-                    pop_debug(&mut f, 2);
+                InstrumentationFuncs::PushF32 => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushF32 as u32));
                 }
-                // Unary i32 ops: pop 1, push 1
-                InstrumentationFuncs::UnaryI32 => {
-                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushI32 as u32));
-                    pop_debug(&mut f, 1);
+                InstrumentationFuncs::PushI64 => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushI64 as u32));
+                }
+                InstrumentationFuncs::PushF64 => {
+                    f.instruction(&EncoderInstruction::Call(InstrumentImports::PushF64 as u32));
                 }
                 InstrumentationFuncs::Other => {}
             }
