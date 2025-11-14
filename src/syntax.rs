@@ -362,7 +362,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             ModulePart::Local,
                         ) => {
                             if is_func_import {
-                                active = Inactive("import func cannot have locals");
+                                active = Inactive("func import cannot have locals");
                                 break;
                             } else {
                                 state = SyntaxState::AfterFuncLocal;
@@ -418,7 +418,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 if is_func_import {
                     lines.set_active_status(
                         line_no,
-                        Inactive("import func cannot have instructions"),
+                        Inactive("func import cannot have instructions"),
                     );
                     continue;
                 }
@@ -506,6 +506,12 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             state,
             SyntaxState::AfterFuncKeyword
                 | SyntaxState::AfterFuncId
+                | SyntaxState::AfterFuncExport
+                | SyntaxState::AfterFuncImport
+                | SyntaxState::AfterFuncType
+                | SyntaxState::AfterFuncParam
+                | SyntaxState::AfterFuncResult
+                | SyntaxState::AfterFuncLocal
                 | SyntaxState::AfterInstruction
         )
     {
