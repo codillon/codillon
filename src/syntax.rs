@@ -2,10 +2,10 @@
 
 use wast::{
     Error,
-    core::Instruction,
+    core::{InlineImport, Instruction, LocalParser, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
-    token::Id,
+    token::{Id, Index},
 };
 
 use anyhow::Result;
@@ -21,13 +21,18 @@ pub enum InstrKind {
     Other,           // any other instruction
 }
 
-// TODO: FunctionType, export, locals, etc.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ModulePart {
     LParen,
     RParen,
     FuncKeyword,
     Id,
+    Export,
+    Import,
+    Type,
+    Param,
+    Result,
+    Local,
 }
 
 impl From<kw::func> for ModulePart {
@@ -39,6 +44,18 @@ impl From<kw::func> for ModulePart {
 impl<'a> From<Id<'a>> for ModulePart {
     fn from(_: Id) -> Self {
         ModulePart::Id
+    }
+}
+
+impl<'a> From<InlineImport<'a>> for ModulePart {
+    fn from(_: InlineImport) -> Self {
+        ModulePart::Import
+    }
+}
+
+impl<'a> From<LocalParser<'a>> for ModulePart {
+    fn from(_: LocalParser) -> Self {
+        ModulePart::Local
     }
 }
 
@@ -85,7 +102,55 @@ impl From<Error> for LineKind {
 
 impl<'a> Parse<'a> for ModulePart {
     fn parse(parser: Parser<'a>) -> Result<Self, Error> {
-        if parser.step(|cursor| match cursor.lparen()? {
+        // Prioritize fields of format "(...)" over single "(" token
+
+        if parser.peek2::<kw::export>()? {
+            // Modified from InlineExport parser
+            parser.parens(|p| {
+                p.parse::<kw::export>()?;
+                p.parse::<&str>()?;
+                Ok(ModulePart::Export)
+            })
+        } else if parser.peek2::<kw::import>()? {
+            Ok(parser.parse::<InlineImport<'a>>()?.into())
+        } else if parser.peek2::<kw::r#type>()? {
+            // Modified from TypeUse parser
+            parser.parens(|p| {
+                p.parse::<kw::r#type>()?;
+                p.parse::<Index<'a>>()?;
+                Ok(ModulePart::Type)
+            })
+        } else if parser.peek2::<kw::param>()? {
+            // Modified from FunctionType parser
+            parser.parens(|p| {
+                p.parse::<kw::param>()?;
+                if p.is_empty() {
+                    return Ok(ModulePart::Param);
+                }
+
+                let id = p.parse::<Option<Id<'a>>>()?;
+                let parse_more = id.is_none();
+                p.parse::<ValType<'a>>()?;
+                while parse_more && !p.is_empty() {
+                    p.parse::<ValType<'a>>()?;
+                }
+
+                Ok(ModulePart::Param)
+            })
+        } else if parser.peek2::<kw::result>()? {
+            // Modified from FunctionType parser
+            parser.parens(|p| {
+                p.parse::<kw::result>()?;
+                while !p.is_empty() {
+                    p.parse::<ValType<'a>>()?;
+                }
+
+                Ok(ModulePart::Result)
+            })
+        } else if parser.peek2::<kw::local>()? {
+            // Modified from Local parse_remainder
+            parser.parens(|_| Ok(parser.parse::<LocalParser<'a>>()?.into()))
+        } else if parser.step(|cursor| match cursor.lparen()? {
             Some(rest) => Ok((true, rest)),
             None => Ok((false, cursor)),
         })? {
@@ -194,6 +259,12 @@ enum SyntaxState {
     AfterModuleFieldLParen,
     AfterFuncKeyword,
     AfterFuncId,
+    AfterFuncExport,
+    AfterFuncImport,
+    AfterFuncType,
+    AfterFuncParam,
+    AfterFuncResult,
+    AfterFuncLocal,
     AfterInstruction,
     AfterModuleFieldRParen,
 }
@@ -204,6 +275,7 @@ enum SyntaxState {
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     let mut state = SyntaxState::Initial;
     let mut frame_stack: Vec<InstrKind> = Vec::new();
+    let mut is_func_import = false;
     use crate::line::Activity::*;
 
     assert!(lines.len() > 0);
@@ -232,16 +304,88 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             state = SyntaxState::AfterFuncId;
                         }
                         (
+                            SyntaxState::AfterFuncKeyword | SyntaxState::AfterFuncId,
+                            ModulePart::Export,
+                        ) => {
+                            state = SyntaxState::AfterFuncExport;
+                        }
+                        (
                             SyntaxState::AfterFuncKeyword
                             | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncExport,
+                            ModulePart::Import,
+                        ) => {
+                            state = SyntaxState::AfterFuncImport;
+                            is_func_import = true;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport,
+                            ModulePart::Type,
+                        ) => {
+                            state = SyntaxState::AfterFuncType;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport
+                            | SyntaxState::AfterFuncType,
+                            ModulePart::Param,
+                        ) => {
+                            state = SyntaxState::AfterFuncParam;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport
+                            | SyntaxState::AfterFuncType
+                            | SyntaxState::AfterFuncParam,
+                            ModulePart::Result,
+                        ) => {
+                            state = SyntaxState::AfterFuncResult;
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport
+                            | SyntaxState::AfterFuncType
+                            | SyntaxState::AfterFuncParam
+                            | SyntaxState::AfterFuncResult,
+                            ModulePart::Local,
+                        ) => {
+                            if is_func_import {
+                                active = Inactive("func import cannot have locals");
+                                break;
+                            } else {
+                                state = SyntaxState::AfterFuncLocal;
+                            }
+                        }
+                        (
+                            SyntaxState::AfterFuncKeyword
+                            | SyntaxState::AfterFuncId
+                            | SyntaxState::AfterFuncExport
+                            | SyntaxState::AfterFuncImport
+                            | SyntaxState::AfterFuncType
+                            | SyntaxState::AfterFuncParam
+                            | SyntaxState::AfterFuncResult
+                            | SyntaxState::AfterFuncLocal
                             | SyntaxState::AfterInstruction,
                             ModulePart::RParen,
                         ) => {
                             state = SyntaxState::AfterModuleFieldRParen;
+                            is_func_import = false;
                             close_outstanding_frames = !frame_stack.is_empty();
                         }
+                        (SyntaxState::AfterFuncExport, ModulePart::Export)
+                        | (SyntaxState::AfterFuncParam, ModulePart::Param)
+                        | (SyntaxState::AfterFuncLocal, ModulePart::Local) => (),
                         _ => {
-                            active = Inactive("");
+                            active = Inactive("invalid field order");
                             break;
                         }
                     }
@@ -268,6 +412,14 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             // Also prepend "(" or "(func" as necessary before the first instruction,
             // and append ")" as necessary after the last one.
             LineKind::Instr(kind) => {
+                if is_func_import {
+                    lines.set_active_status(
+                        line_no,
+                        Inactive("func import cannot have instructions"),
+                    );
+                    continue;
+                }
+
                 match kind {
                     InstrKind::If | InstrKind::OtherStructured => {
                         lines.set_active_status(line_no, Active);
@@ -351,6 +503,12 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             state,
             SyntaxState::AfterFuncKeyword
                 | SyntaxState::AfterFuncId
+                | SyntaxState::AfterFuncExport
+                | SyntaxState::AfterFuncImport
+                | SyntaxState::AfterFuncType
+                | SyntaxState::AfterFuncParam
+                | SyntaxState::AfterFuncResult
+                | SyntaxState::AfterFuncLocal
                 | SyntaxState::AfterInstruction
         )
     {
@@ -481,7 +639,7 @@ pub fn find_frames(code: &mut impl FrameInfosMut) {
 pub fn parse_line(s: &str) -> LineKind {
     match ParseBuffer::new(s) {
         Ok(buf) => match parser::parse::<LineKind>(&buf) {
-            Ok(instr) => instr,
+            Ok(kind) => kind,
             Err(e) => e.into(),
         },
         Err(e) => e.into(),
@@ -591,6 +749,35 @@ mod tests {
             parse::<ModulePart>(&ParseBuffer::new("    func    ")?)?,
             ModulePart::FuncKeyword
         );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("    $x    ")?)?,
+            ModulePart::Id
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("  ( export \"main\")    ")?)?,
+            ModulePart::Export
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("  ( import \"foo\" \"bar\" )    ")?)?,
+            ModulePart::Import
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("   (type 1)    ")?)?,
+            ModulePart::Type
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("    (param $x i32)    ")?)?,
+            ModulePart::Param
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("    ( result i32 f32 i64   )    ")?)?,
+            ModulePart::Result
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("    (local $x    f64 )    ")?)?,
+            ModulePart::Local
+        );
+        assert!(parse::<ModulePart>(&ParseBuffer::new("( param")?).is_err());
         assert!(parse::<ModulePart>(&ParseBuffer::new("()")?).is_err());
         Ok(())
     }
@@ -650,6 +837,23 @@ mod tests {
                 ModulePart::LParen,
                 ModulePart::FuncKeyword,
                 ModulePart::RParen
+            ])
+        );
+
+        assert_eq!(
+            parse::<LineKind>(&ParseBuffer::new(
+                " ( func $foo ( export \"main\") (import \"modu\" \"bar\") (type 0) (param $x i32) (result i32 f64) (local $tmp i64)"
+            )?)?,
+            LineKind::Other(vec![
+                ModulePart::LParen,
+                ModulePart::FuncKeyword,
+                ModulePart::Id,
+                ModulePart::Export,
+                ModulePart::Import,
+                ModulePart::Type,
+                ModulePart::Param,
+                ModulePart::Result,
+                ModulePart::Local
             ])
         );
 
