@@ -5,7 +5,7 @@ use wast::{
     core::{InlineImport, Instruction, LocalParser, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
-    token::{Id, Index, NameAnnotation},
+    token::{Id, Index},
 };
 
 use anyhow::Result;
@@ -128,11 +128,8 @@ impl<'a> Parse<'a> for ModulePart {
                     return Ok(ModulePart::Param);
                 }
 
-                let (id, name) = (
-                    p.parse::<Option<Id<'a>>>()?,
-                    p.parse::<Option<NameAnnotation<'a>>>()?,
-                );
-                let parse_more = id.is_none() && name.is_none();
+                let id = p.parse::<Option<Id<'a>>>()?;
+                let parse_more = id.is_none();
                 p.parse::<ValType<'a>>()?;
                 while parse_more && !p.is_empty() {
                     p.parse::<ValType<'a>>()?;
