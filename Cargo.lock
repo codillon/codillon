@@ -243,7 +243,6 @@ dependencies = [
  "delegate",
  "getrandom",
  "js-sys",
- "self_cell",
  "str_indices",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1063,12 +1062,6 @@ name = "ryu"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28d3b2b1366ec20994f1fd18c3c594f05c5dd4bc44d8bb0c1c632c8d6829481f"
-
-[[package]]
-name = "self_cell"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f7d95a54511e0c7be3f51e8867aa8cf35148d7b9445d44de2f943e2b206e749"
 
 [[package]]
 name = "semver"
