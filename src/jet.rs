@@ -720,6 +720,14 @@ pub fn get_selection() -> SelectionHandle {
     )
 }
 
+pub fn now_ms() -> f64 {
+    web_sys::window()
+        .expect("window")
+        .performance()
+        .expect("performance")
+        .now()
+}
+
 pub trait RangeLike {
     fn node1(&self) -> Option<NodeRef>;
     fn node2(&self) -> Option<NodeRef>;
