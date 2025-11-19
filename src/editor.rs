@@ -7,7 +7,7 @@ use crate::{
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
         RangeLike, ReactiveComponent, StaticRangeHandle, WithElement, compare_document_position,
-        get_selection, set_selection_range,
+        get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
@@ -273,11 +273,7 @@ impl Editor {
                     new_lines.push(self.line(i).suffix(Position::begin())?);
                 }
                 // Store new edit
-                let now_ms = web_sys::window()
-                    .expect("Window doesn't")
-                    .performance()
-                    .expect("Performance not available")
-                    .now();
+                let time_ms = now_ms();
                 self.store_edit(
                     Edit {
                         start_line,
@@ -295,9 +291,9 @@ impl Editor {
                             end_line: fixup_line,
                             end_pos: new_cursor_pos,
                         },
-                        time_ms: now_ms,
+                        time_ms,
                     },
-                    now_ms,
+                    time_ms,
                 );
             }
             Err(_) => {
@@ -573,58 +569,41 @@ impl Editor {
     }
 
     fn execute(&self, binary: &[u8]) {
-        async fn run_binary(binary: &[u8]) -> Result<String, wasm_bindgen::JsValue> {
+        async fn run_binary(binary: &[u8]) -> Result<String> {
             use js_sys::{Function, Reflect};
             use wasm_bindgen::JsValue;
             // Build import objects for the instrumented module.
-            let imports = crate::debug::make_imports()?;
+            let imports = crate::debug::make_imports().fmt_err()?;
             let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
-            let js_value = wasm_bindgen_futures::JsFuture::from(promise).await?;
-            let instance = Reflect::get(&js_value, &JsValue::from_str("instance"))
-                .map_err(|_| "failed to get instance")?;
-            let exports = Reflect::get(&instance, &JsValue::from_str("exports"))
-                .map_err(|_| "failed to get exports")?;
-            let main = Reflect::get(&exports, &JsValue::from_str("main"))
-                .map_err(|_| "failed to get main function")?;
+            let js_value = wasm_bindgen_futures::JsFuture::from(promise)
+                .await
+                .fmt_err()?;
+            let instance = Reflect::get(&js_value, &JsValue::from_str("instance")).fmt_err()?;
+            let exports = Reflect::get(&instance, &JsValue::from_str("exports")).fmt_err()?;
+            let main = Reflect::get(&exports, &JsValue::from_str("main")).fmt_err()?;
             let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
-                .ok_or("main is not an exported function")?;
-            let res = main.apply(&JsValue::null(), &js_sys::Array::new())?;
-            let string = match js_sys::JSON::stringify(&res) {
-                Ok(jsstr) => jsstr.as_string().unwrap_or_else(|| format!("{:?}", res)),
-                Err(_) => res.as_string().unwrap_or_else(|| format!("{:?}", res)),
-            };
-
-            Ok(string)
+                .context("main is not an exported function")?;
+            let res = main.apply(&JsValue::null(), &js_sys::Array::new());
+            res.map(|x| format!("{:?}", x)).fmt_err()
         }
 
         let binary = binary.to_vec();
-        let editor_handle = Editor(Rc::clone(&self.0));
+        let mut editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
             match run_binary(&binary).await {
-                Ok(_) => {
-                    editor_handle.update_debug_panel(None);
-                    web_sys::console::log_1(&"Ran successfully".into());
-                }
+                Ok(_) => editor_handle.update_debug_panel(None),
                 Err(e) => {
-                    web_sys::console::log_1(&e);
-                    use js_sys::Reflect;
-                    let message = Reflect::get(&e, &wasm_bindgen::JsValue::from_str("message"))
-                        .ok()
-                        .and_then(|m| m.as_string())
-                        .or_else(|| e.as_string())
-                        .unwrap_or_else(|| format!("{:?}", e));
-                    editor_handle.update_debug_panel(Some(message));
+                    log_1(&format!("Ran with error: {e}").into());
+                    editor_handle.update_debug_panel(Some(
+                        "validation or execution error (see console)".to_string(),
+                    ));
                 }
             }
         });
     }
 
-    fn update_debug_panel(&self, error: Option<String>) {
-        let mut textentry: RefMut<ReactiveComponent<TextType>> =
-            RefMut::map(self.0.borrow_mut(), |comp| {
-                &mut comp.component.get_mut().1.0
-            });
-        let lines: &mut TextType = textentry.inner_mut();
+    fn update_debug_panel(&mut self, error: Option<String>) {
+        let mut lines = self.text_mut();
         if lines.is_empty() {
             return;
         }
