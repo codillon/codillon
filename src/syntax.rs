@@ -262,8 +262,10 @@ enum SyntaxState {
     AfterModuleFieldRParen,
 }
 
-#[derive(Copy, Clone, PartialEq, Debug)]
+#[derive(Default, Copy, Clone, PartialEq, Debug)]
 pub struct FuncHeader {
+    /// Fields in a function header follows an order and some extra restrictions.
+    /// This structure tracks and transits states, where each state indicates new fields allowed.
     // Whether the function has (import ...) field
     is_import: bool,
     // Lowest possible index for next field in the expected order
@@ -282,13 +284,6 @@ impl FuncHeader {
         ModulePart::Result,      // 6 - Optional
         ModulePart::Local,       // 7 - Optional, Repeatable
     ];
-
-    pub fn new() -> Self {
-        Self {
-            is_import: false,
-            next_field: 0,
-        }
-    }
 
     pub fn transit_state(&mut self, part: ModulePart) -> Result<(), &'static str> {
         // Find position (index) of part in the order list
@@ -337,7 +332,7 @@ impl FuncHeader {
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     let mut state = SyntaxState::Initial;
     let mut frame_stack: Vec<InstrKind> = Vec::new();
-    let mut func_field_states = FuncHeader::new();
+    let mut func_field_states = FuncHeader::default();
     use crate::line::Activity::*;
 
     assert!(lines.len() > 0);
