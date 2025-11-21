@@ -249,7 +249,7 @@ impl SyntheticWasm {
 enum SyntaxState {
     Initial,
     AfterModuleFieldLParen,
-    InFuncField(FuncHeader),
+    InFuncHeader,
     AfterInstruction,
     AfterModuleFieldRParen,
 }
@@ -280,15 +280,15 @@ impl FuncHeader {
         // Find position (index) of part in the order list
         let part_pos = match Self::ORDER.iter().position(|&p| p == part) {
             Some(pos) => pos,
-            None => return Err("unknown module part"),
+            None => return Err("not a function header field"),
         };
 
-        // Check whether required func keyword is skipped
+        // Check for order
+        // whether required func keyword is skipped
         if self.next_field == 0 && part_pos > 0 {
             return Err("invalid field order");
         }
 
-        // Check for order
         let repeatable = matches!(
             part,
             ModulePart::Export | ModulePart::Param | ModulePart::Local
@@ -351,7 +351,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             state = SyntaxState::AfterModuleFieldLParen;
                         }
                         (
-                            SyntaxState::AfterModuleFieldLParen | SyntaxState::InFuncField(_),
+                            SyntaxState::AfterModuleFieldLParen | SyntaxState::InFuncHeader,
                             ModulePart::FuncKeyword
                             | ModulePart::Id
                             | ModulePart::Export
@@ -361,14 +361,14 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             | ModulePart::Local,
                         ) => match func_field_states.transit_state(part) {
                             Ok(()) => {
-                                state = SyntaxState::InFuncField(func_field_states);
+                                state = SyntaxState::InFuncHeader;
                             }
                             Err(e) => {
                                 active = Inactive(e);
                             }
                         },
                         (
-                            SyntaxState::InFuncField(_) | SyntaxState::AfterInstruction,
+                            SyntaxState::InFuncHeader | SyntaxState::AfterInstruction,
                             ModulePart::RParen,
                         ) => {
                             state = SyntaxState::AfterModuleFieldRParen;
@@ -459,7 +459,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     };
                     lines.set_synthetic_before(line_no, extra);
                     let _ = func_field_states.transit_state(ModulePart::FuncKeyword);
-                    state = SyntaxState::InFuncField(func_field_states);
+                    state = SyntaxState::InFuncHeader;
                 }
 
                 if lines.info(line_no).is_active() {
@@ -493,7 +493,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     if !frame_stack.is_empty()
         || matches!(
             state,
-            SyntaxState::InFuncField(_) | SyntaxState::AfterInstruction
+            SyntaxState::InFuncHeader | SyntaxState::AfterInstruction
         )
     {
         // Function wasn't ended above. Close outstanding frames, then close the function.
@@ -846,19 +846,19 @@ mod tests {
         // valid state transitions
         let mut header_valid = FuncHeader::default();
         let _ = header_valid.transit_state(ModulePart::FuncKeyword);
-        assert_eq!(header_valid.is_import, false);
+        assert!(!header_valid.is_import);
         assert_eq!(header_valid.next_field, 1);
         let _ = header_valid.transit_state(ModulePart::Export);
-        assert_eq!(header_valid.is_import, false);
+        assert!(!header_valid.is_import);
         assert_eq!(header_valid.next_field, 3);
         let _ = header_valid.transit_state(ModulePart::Export);
-        assert_eq!(header_valid.is_import, false);
+        assert!(!header_valid.is_import);
         assert_eq!(header_valid.next_field, 3);
         let _ = header_valid.transit_state(ModulePart::Import);
-        assert_eq!(header_valid.is_import, true);
+        assert!(header_valid.is_import);
         assert_eq!(header_valid.next_field, 4);
         let _ = header_valid.transit_state(ModulePart::Result);
-        assert_eq!(header_valid.is_import, true);
+        assert!(header_valid.is_import);
         assert_eq!(header_valid.next_field, 6);
 
         // local after import
@@ -866,7 +866,11 @@ mod tests {
 
         // no func keyword
         let mut header_no_func_keyword = FuncHeader::default();
-        assert!(header_no_func_keyword.transit_state(ModulePart::Param).is_err());
+        assert!(
+            header_no_func_keyword
+                .transit_state(ModulePart::Param)
+                .is_err()
+        );
 
         // invalid order
         let mut header_invalid_order = FuncHeader::default();
@@ -877,7 +881,11 @@ mod tests {
         // repeat non-repeatable field
         let mut header_non_repeatable = FuncHeader::default();
         let _ = header_non_repeatable.transit_state(ModulePart::FuncKeyword);
-        assert!(header_non_repeatable.transit_state(ModulePart::FuncKeyword).is_err());
+        assert!(
+            header_non_repeatable
+                .transit_state(ModulePart::FuncKeyword)
+                .is_err()
+        );
 
         Ok(())
     }
