@@ -5,7 +5,7 @@ use wast::{
     core::{InlineImport, Instruction, LocalParser, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
-    token::{Id, Index},
+    token::Id,
 };
 
 use anyhow::Result;
@@ -29,7 +29,6 @@ pub enum ModulePart {
     Id,
     Export,
     Import,
-    Type,
     Param,
     Result,
     Local,
@@ -113,13 +112,6 @@ impl<'a> Parse<'a> for ModulePart {
             })
         } else if parser.peek2::<kw::import>()? {
             Ok(parser.parse::<InlineImport<'a>>()?.into())
-        } else if parser.peek2::<kw::r#type>()? {
-            // Modified from TypeUse parser
-            parser.parens(|p| {
-                p.parse::<kw::r#type>()?;
-                p.parse::<Index<'a>>()?;
-                Ok(ModulePart::Type)
-            })
         } else if parser.peek2::<kw::param>()? {
             // Modified from FunctionType parser
             parser.parens(|p| {
@@ -263,7 +255,7 @@ enum SyntaxState {
 }
 
 #[derive(Default, Copy, Clone, PartialEq, Debug)]
-pub struct FuncHeader {
+struct FuncHeader {
     /// Fields in a function header follows an order and some extra restrictions.
     /// This structure tracks and transits states, where each state indicates new fields allowed.
     // Whether the function has (import ...) field
@@ -279,13 +271,12 @@ impl FuncHeader {
         ModulePart::Id,          // 1 - Optional
         ModulePart::Export,      // 2 - Optional, Repeatable
         ModulePart::Import,      // 3 - Optional
-        ModulePart::Type,        // 4 - Optional
-        ModulePart::Param,       // 5 - Optional, Repeatable
-        ModulePart::Result,      // 6 - Optional
-        ModulePart::Local,       // 7 - Optional, Repeatable
+        ModulePart::Param,       // 4 - Optional, Repeatable
+        ModulePart::Result,      // 5 - Optional
+        ModulePart::Local,       // 6 - Optional, Repeatable
     ];
 
-    pub fn transit_state(&mut self, part: ModulePart) -> Result<(), &'static str> {
+    fn transit_state(&mut self, part: ModulePart) -> Result<(), &'static str> {
         // Find position (index) of part in the order list
         let part_pos = match Self::ORDER.iter().position(|&p| p == part) {
             Some(pos) => pos,
@@ -320,7 +311,7 @@ impl FuncHeader {
         Ok(())
     }
 
-    pub fn reset(&mut self) {
+    fn reset(&mut self) {
         self.is_import = false;
         self.next_field = 0;
     }
@@ -360,7 +351,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             | ModulePart::Id
                             | ModulePart::Export
                             | ModulePart::Import
-                            | ModulePart::Type
                             | ModulePart::Param
                             | ModulePart::Result
                             | ModulePart::Local,
@@ -751,10 +741,6 @@ mod tests {
             ModulePart::Import
         );
         assert_eq!(
-            parse::<ModulePart>(&ParseBuffer::new("   (type 1)    ")?)?,
-            ModulePart::Type
-        );
-        assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    (param $x i32)    ")?)?,
             ModulePart::Param
         );
@@ -831,7 +817,7 @@ mod tests {
 
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new(
-                " ( func $foo ( export \"main\") (import \"modu\" \"bar\") (type 0) (param $x i32) (result i32 f64) (local $tmp i64)"
+                " ( func $foo ( export \"main\") (import \"modu\" \"bar\") (param $x i32) (result i32 f64) (local $tmp i64)"
             )?)?,
             LineKind::Other(vec![
                 ModulePart::LParen,
@@ -839,7 +825,6 @@ mod tests {
                 ModulePart::Id,
                 ModulePart::Export,
                 ModulePart::Import,
-                ModulePart::Type,
                 ModulePart::Param,
                 ModulePart::Result,
                 ModulePart::Local
