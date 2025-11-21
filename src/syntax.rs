@@ -249,7 +249,7 @@ impl SyntheticWasm {
 enum SyntaxState {
     Initial,
     AfterModuleFieldLParen,
-    InFuncHeader,
+    AfterFuncHeader,
     AfterInstruction,
     AfterModuleFieldRParen,
 }
@@ -351,7 +351,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             state = SyntaxState::AfterModuleFieldLParen;
                         }
                         (
-                            SyntaxState::AfterModuleFieldLParen | SyntaxState::InFuncHeader,
+                            SyntaxState::AfterModuleFieldLParen | SyntaxState::AfterFuncHeader,
                             ModulePart::FuncKeyword
                             | ModulePart::Id
                             | ModulePart::Export
@@ -361,14 +361,14 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             | ModulePart::Local,
                         ) => match func_field_states.transit_state(part) {
                             Ok(()) => {
-                                state = SyntaxState::InFuncHeader;
+                                state = SyntaxState::AfterFuncHeader;
                             }
                             Err(e) => {
                                 active = Inactive(e);
                             }
                         },
                         (
-                            SyntaxState::InFuncHeader | SyntaxState::AfterInstruction,
+                            SyntaxState::AfterFuncHeader | SyntaxState::AfterInstruction,
                             ModulePart::RParen,
                         ) => {
                             state = SyntaxState::AfterModuleFieldRParen;
@@ -459,7 +459,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     };
                     lines.set_synthetic_before(line_no, extra);
                     let _ = func_field_states.transit_state(ModulePart::FuncKeyword);
-                    state = SyntaxState::InFuncHeader;
+                    state = SyntaxState::AfterFuncHeader;
                 }
 
                 if lines.info(line_no).is_active() {
@@ -493,7 +493,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     if !frame_stack.is_empty()
         || matches!(
             state,
-            SyntaxState::InFuncHeader | SyntaxState::AfterInstruction
+            SyntaxState::AfterFuncHeader | SyntaxState::AfterInstruction
         )
     {
         // Function wasn't ended above. Close outstanding frames, then close the function.
