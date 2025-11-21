@@ -283,6 +283,11 @@ impl FuncHeader {
             None => return Err("unknown module part"),
         };
 
+        // Check whether required func keyword is skipped
+        if self.next_field == 0 && part_pos > 0 {
+            return Err("invalid field order");
+        }
+
         // Check for order
         let repeatable = matches!(
             part,
@@ -832,6 +837,47 @@ mod tests {
         );
 
         assert!(parse::<LineKind>(&ParseBuffer::new(") func i32.const 7")?).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_func_header() -> Result<()> {
+        // valid state transitions
+        let mut header_valid = FuncHeader::default();
+        let _ = header_valid.transit_state(ModulePart::FuncKeyword);
+        assert_eq!(header_valid.is_import, false);
+        assert_eq!(header_valid.next_field, 1);
+        let _ = header_valid.transit_state(ModulePart::Export);
+        assert_eq!(header_valid.is_import, false);
+        assert_eq!(header_valid.next_field, 3);
+        let _ = header_valid.transit_state(ModulePart::Export);
+        assert_eq!(header_valid.is_import, false);
+        assert_eq!(header_valid.next_field, 3);
+        let _ = header_valid.transit_state(ModulePart::Import);
+        assert_eq!(header_valid.is_import, true);
+        assert_eq!(header_valid.next_field, 4);
+        let _ = header_valid.transit_state(ModulePart::Result);
+        assert_eq!(header_valid.is_import, true);
+        assert_eq!(header_valid.next_field, 6);
+
+        // local after import
+        assert!(header_valid.transit_state(ModulePart::Local).is_err());
+
+        // no func keyword
+        let mut header_no_func_keyword = FuncHeader::default();
+        assert!(header_no_func_keyword.transit_state(ModulePart::Param).is_err());
+
+        // invalid order
+        let mut header_invalid_order = FuncHeader::default();
+        let _ = header_invalid_order.transit_state(ModulePart::FuncKeyword);
+        let _ = header_invalid_order.transit_state(ModulePart::Result);
+        assert!(header_invalid_order.transit_state(ModulePart::Id).is_err());
+
+        // repeat non-repeatable field
+        let mut header_non_repeatable = FuncHeader::default();
+        let _ = header_non_repeatable.transit_state(ModulePart::FuncKeyword);
+        assert!(header_non_repeatable.transit_state(ModulePart::FuncKeyword).is_err());
 
         Ok(())
     }
