@@ -297,7 +297,7 @@ impl FuncHeader {
         ModulePart::Export,      // 2 - Optional, Repeatable
         ModulePart::Import,      // 3 - Optional
         ModulePart::Param,       // 4 - Optional, Repeatable
-        ModulePart::Result,      // 5 - Optional
+        ModulePart::Result,      // 5 - Optional, Repeatable
         ModulePart::Local,       // 6 - Optional, Repeatable
     ];
 
@@ -316,7 +316,7 @@ impl FuncHeader {
 
         let repeatable = matches!(
             part,
-            ModulePart::Export | ModulePart::Param | ModulePart::Local
+            ModulePart::Export | ModulePart::Param | ModulePart::Result | ModulePart::Local
         );
         let order_invalid = if repeatable {
             part_pos + 1 < self.next_field
