@@ -453,20 +453,20 @@ impl CodeLine {
         mut string: &str,
     ) -> Result<Position> {
         // Special-case the creation or deletion of the comment separator (";;").
-        if a == b && b == Position::instr(self.instr().len_utf16()) && string == ";" {
+        if a == b && a.in_instr && string == ";" {
             string = ";;"; // type the whole ";;" separator on one ";" keystroke
         } else if a == b
             && b == Position::comment(2)
-            && self.comment().get() == ";;"
+            && self.comment().get().starts_with(";;")
             && string == ";"
         {
             string = ""; // if user types two ";" characters, give them two total (ignore second one)
         } else if a == Position::comment(1)
             && b == Position::comment(2)
             && string.is_empty()
-            && self.comment().get() == ";;"
+            && self.comment().get().starts_with(";;")
         {
-            a = Position::comment(0); // if user deletes from end of ";;" and comment otherwise empty, delete both
+            a = Position::comment(0); // if user deletes from end of ";;", delete both
         }
 
         // Do the replacement in the appropriate components (text or comment).
