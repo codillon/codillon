@@ -633,6 +633,10 @@ impl Editor {
             match run_binary(&binary).await {
                 Ok(_) => {
                     let stop = { editor_handle.0.borrow().program_state.step_number };
+                    {
+                        let mut inner = editor_handle.0.borrow_mut();
+                        inner.program_state = new_program_state();
+                    }
                     editor_handle.build_program_state(0, stop);
                     if let Some(doc) = web_sys::window().and_then(|w| w.document()) &&
                         let Ok(Some(el)) = doc.query_selector(".step-slider") {
