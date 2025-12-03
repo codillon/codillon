@@ -1,7 +1,9 @@
 // The Codillon code editor
 
 use crate::{
-    debug::{WebAssemblyTypes, change_to_js, make_imports, with_changes, last_step, program_state_to_js},
+    debug::{
+        WebAssemblyTypes, change_to_js, last_step, make_imports, program_state_to_js, with_changes,
+    },
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
@@ -62,7 +64,7 @@ pub struct ProgramState {
     pub stack_state: Vec<WebAssemblyTypes>,
     pub locals_state: Vec<WebAssemblyTypes>,
     pub globals_state: Vec<WebAssemblyTypes>,
-    pub memory_state: Vec<WebAssemblyTypes>
+    pub memory_state: Vec<WebAssemblyTypes>,
 }
 
 pub fn new_program_state() -> ProgramState {
@@ -638,8 +640,9 @@ impl Editor {
                         inner.program_state = new_program_state();
                     }
                     editor_handle.build_program_state(0, stop);
-                    if let Some(doc) = web_sys::window().and_then(|w| w.document()) &&
-                        let Ok(Some(el)) = doc.query_selector(".step-slider") {
+                    if let Some(doc) = web_sys::window().and_then(|w| w.document())
+                        && let Ok(Some(el)) = doc.query_selector(".step-slider")
+                    {
                         el.set_attribute("max", &(last_step() + 1).to_string()).ok();
                     }
                     web_sys::console::log_1(&"Ran successfully".into());
@@ -726,7 +729,11 @@ impl Editor {
         with_changes(|changes| {
             for change in changes.skip(start).take(stop - start) {
                 inner.program_state.line_number = change.line_number;
-                let new_length = inner.program_state.stack_state.len().saturating_sub(change.num_pops as usize);
+                let new_length = inner
+                    .program_state
+                    .stack_state
+                    .len()
+                    .saturating_sub(change.num_pops as usize);
                 inner.program_state.stack_state.truncate(new_length);
                 for push in &change.stack_pushes {
                     inner.program_state.stack_state.push(push.clone());

@@ -519,8 +519,7 @@ impl ElementHandle<web_sys::HtmlInputElement> {
         let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::Event)>);
         self.with_element(
             |elem| {
-                let input: &web_sys::HtmlInputElement = elem.as_ref();
-                input.set_oninput(Some(closure.as_ref().unchecked_ref()));
+                elem.set_oninput(Some(closure.as_ref().unchecked_ref()));
             },
             TOKEN,
         );

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use codillon::{dom_struct::DomStruct, editor::Editor, jet::DocumentHandle, jet::ElementHandle};
-use web_sys::HtmlInputElement;
-use wasm_bindgen::JsCast;
 use std::cell::RefCell;
+use wasm_bindgen::JsCast;
+use web_sys::HtmlInputElement;
 
 type Body = DomStruct<(Editor, (ElementHandle<HtmlInputElement>, ())), web_sys::HtmlBodyElement>;
 type Document = DocumentHandle<Body>;
