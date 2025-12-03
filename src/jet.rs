@@ -505,6 +505,27 @@ impl ElementFactory {
     pub fn svg_use(&self) -> ElementHandle<web_sys::SvgUseElement> {
         ElementHandle::new(self.create_svg_element("use"))
     }
+
+    pub fn input(&self) -> ElementHandle<web_sys::HtmlInputElement> {
+        ElementHandle::new(self.create_element("input"))
+    }
+}
+
+impl ElementHandle<web_sys::HtmlInputElement> {
+    pub fn set_oninput<F>(&mut self, handler: F)
+    where
+        F: 'static + FnMut(web_sys::Event),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::Event)>);
+        self.with_element(
+            |elem| {
+                let input: &web_sys::HtmlInputElement = elem.as_ref();
+                input.set_oninput(Some(closure.as_ref().unchecked_ref()));
+            },
+            TOKEN,
+        );
+        closure.forget();
+    }
 }
 
 // Wrapper for a DOM NodeList, allowing audit that each entry matches an expected node.

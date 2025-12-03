@@ -19,6 +19,7 @@ use wast::{
 enum InstrumentationFuncs {
     SetLocalI32(u32),
     SetGlobalI32(u32),
+    SetMemoryI32,
     PushI32,
     PushF32,
     PushI64,
@@ -31,6 +32,7 @@ enum InstrumentImports {
     PopI,
     SetLocalI32,
     SetGlobalI32,
+    SetMemoryI32,
     PushI32,
     PushF32,
     PushI64,
@@ -42,6 +44,7 @@ impl InstrumentImports {
         ("pop_i", 0),
         ("set_local_i32", 5),
         ("set_global_i32", 5),
+        ("set_memory_i32", 6),
         ("push_i32", 1),
         ("push_f32", 2),
         ("push_i64", 3),
@@ -130,13 +133,16 @@ impl<'a> InstructionTable<'a> {
         use wasmparser::Operator::*;
         match operation {
             // Special Functions
-            LocalSet { local_index } | LocalTee { local_index } => match op_type.outputs[0] {
+            LocalSet { local_index } | LocalTee { local_index } => match op_type.inputs[0].instr_type {
                 wasmparser::ValType::I32 => InstrumentationFuncs::SetLocalI32(*local_index),
                 _ => InstrumentationFuncs::Other,
             },
             GlobalSet { global_index } => match op_type.outputs[0] {
                 wasmparser::ValType::I32 => InstrumentationFuncs::SetGlobalI32(*global_index),
                 _ => InstrumentationFuncs::Other,
+            },
+            I32Store { .. } | I32Store8 { .. } | I32Store16 { .. } => {
+                InstrumentationFuncs::SetMemoryI32
             },
             // Match based on outputs
             _ => match op_type.outputs.as_slice() {
@@ -180,6 +186,11 @@ impl<'a> InstructionTable<'a> {
         types.ty().function(
             vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
             vec![],
+        );
+        // 6: (i32, i32) -> (i32, i32)
+        types.ty().function(
+            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
+            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
         );
         types
     }
@@ -241,8 +252,19 @@ impl<'a> InstructionTable<'a> {
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
             let value_type = &types._table[i];
             let operation_type = Self::classify(&codillon_instruction.op, value_type);
+            // Instrumentation that needs to occur before execution
+            match operation_type {
+                InstrumentationFuncs::SetMemoryI32 => {
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetMemoryI32 as u32,
+                    ));
+                    f.instruction(&instruction);
+                }
+                _ => {}
+            }
             pop_debug(&mut f, value_type.inputs.len() as i32);
             f.instruction(&instruction);
+            // Instrumentation that needs to occur after execution
             match operation_type {
                 InstrumentationFuncs::SetLocalI32(local_index) => {
                     f.instruction(&EncoderInstruction::I32Const(local_index as i32));
@@ -270,7 +292,7 @@ impl<'a> InstructionTable<'a> {
                 InstrumentationFuncs::PushF64 => {
                     f.instruction(&EncoderInstruction::Call(InstrumentImports::PushF64 as u32));
                 }
-                InstrumentationFuncs::Other => {}
+                _ => {}
             }
             // Step after each instruction evaluation
             f.instruction(&EncoderInstruction::I32Const(line_idx));

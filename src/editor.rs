@@ -1,6 +1,7 @@
 // The Codillon code editor
 
 use crate::{
+    debug::{WebAssemblyTypes, change_to_js, make_imports, with_changes, last_step, program_state_to_js},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
@@ -55,6 +56,26 @@ struct Edit {
     time_ms: f64,
 }
 
+pub struct ProgramState {
+    pub step_number: usize,
+    pub line_number: i32,
+    pub stack_state: Vec<WebAssemblyTypes>,
+    pub locals_state: Vec<WebAssemblyTypes>,
+    pub globals_state: Vec<WebAssemblyTypes>,
+    pub memory_state: Vec<WebAssemblyTypes>
+}
+
+pub fn new_program_state() -> ProgramState {
+    ProgramState {
+        step_number: 0,
+        line_number: 0,
+        stack_state: Vec::new(),
+        locals_state: Vec::new(),
+        globals_state: Vec::new(),
+        memory_state: Vec::new(),
+    }
+}
+
 struct _Editor {
     component: ComponentType,
     factory: ElementFactory,
@@ -63,9 +84,17 @@ struct _Editor {
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
     last_time_ms: f64,
+
+    program_state: ProgramState,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
+
+impl Clone for Editor {
+    fn clone(&self) -> Self {
+        Editor(Rc::clone(&self.0))
+    }
+}
 
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
@@ -81,6 +110,7 @@ impl Editor {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_time_ms: 0.0,
+            program_state: new_program_state(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -577,7 +607,7 @@ impl Editor {
             use js_sys::{Function, Reflect};
             use wasm_bindgen::JsValue;
             // Build import objects for the instrumented module.
-            let imports = crate::debug::make_imports()?;
+            let imports = make_imports()?;
             let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
             let js_value = wasm_bindgen_futures::JsFuture::from(promise).await?;
             let instance = Reflect::get(&js_value, &JsValue::from_str("instance"))
@@ -602,7 +632,12 @@ impl Editor {
         wasm_bindgen_futures::spawn_local(async move {
             match run_binary(&binary).await {
                 Ok(_) => {
-                    editor_handle.update_debug_panel(None);
+                    let stop = { editor_handle.0.borrow().program_state.step_number };
+                    editor_handle.build_program_state(0, stop);
+                    if let Some(doc) = web_sys::window().and_then(|w| w.document()) &&
+                        let Ok(Some(el)) = doc.query_selector(".step-slider") {
+                        el.set_attribute("max", &(last_step() + 1).to_string()).ok();
+                    }
                     web_sys::console::log_1(&"Ran successfully".into());
                 }
                 Err(e) => {
@@ -620,23 +655,31 @@ impl Editor {
     }
 
     fn update_debug_panel(&self, error: Option<String>) {
-        let mut textentry: RefMut<ReactiveComponent<TextType>> =
-            RefMut::map(self.0.borrow_mut(), |comp| {
-                &mut comp.component.get_mut().1.0
-            });
-        let lines: &mut TextType = textentry.inner_mut();
-        if lines.is_empty() {
+        let num_lines = {
+            let textref = Ref::map(self.0.borrow(), |comp| &comp.component.get().1.0);
+            textref.inner().len()
+        };
+        if num_lines == 0 {
             return;
         }
-        let mut annotations: Vec<Vec<String>> = vec![Vec::new(); lines.len()];
+        let mut annotations: Vec<Vec<String>> = vec![Vec::new(); num_lines];
         // Print error at top
         if let Some(message) = error {
             annotations[0].push(message);
         } else {
-            crate::debug::with_changes(|changes| {
+            let program_json = {
+                let ps = &self.0.borrow().program_state;
+                let program_js = program_state_to_js(ps);
+                js_sys::JSON::stringify(&program_js)
+                    .ok()
+                    .and_then(|s| s.as_string())
+                    .unwrap_or_else(|| "{}".to_string())
+            };
+            annotations[0].push(program_json);
+            with_changes(|changes| {
                 for change in changes {
                     let idx = change.line_number as usize;
-                    let data = js_sys::JSON::stringify(&crate::debug::change_to_js(change))
+                    let data = js_sys::JSON::stringify(&change_to_js(change))
                         .ok()
                         .and_then(|text| text.as_string())
                         .unwrap_or_else(|| "{}".to_string());
@@ -644,6 +687,11 @@ impl Editor {
                 }
             });
         }
+        let mut textentry: RefMut<ReactiveComponent<TextType>> =
+            RefMut::map(self.0.borrow_mut(), |comp| {
+                &mut comp.component.get_mut().1.0
+            });
+        let lines: &mut TextType = textentry.inner_mut();
         for (i, ann) in annotations.into_iter().enumerate() {
             if ann.is_empty() {
                 lines[i].set_debug_annotation(None);
@@ -651,6 +699,63 @@ impl Editor {
                 lines[i].set_debug_annotation(Some(&ann));
             }
         }
+    }
+
+    pub fn slider_change(&self, slider_step: usize) {
+        log_1(&format!("step number: {slider_step}").into());
+        let mut inner = self.0.borrow_mut();
+        if inner.program_state.step_number == slider_step {
+            return;
+        }
+        // For backwards steps, reset program state
+        if slider_step < inner.program_state.step_number {
+            inner.program_state = new_program_state();
+        }
+        let program_step = inner.program_state.step_number;
+        drop(inner);
+        // Reconstruct up to slider_step
+        self.build_program_state(program_step, slider_step);
+    }
+
+    fn build_program_state(&self, start: usize, stop: usize) {
+        let mut inner = self.0.borrow_mut();
+        with_changes(|changes| {
+            for change in changes.skip(start).take(stop - start) {
+                inner.program_state.line_number = change.line_number;
+                let new_length = inner.program_state.stack_state.len().saturating_sub(change.num_pops as usize);
+                inner.program_state.stack_state.truncate(new_length);
+                for push in &change.stack_pushes {
+                    inner.program_state.stack_state.push(push.clone());
+                }
+                if let Some((idx, val)) = &change.locals_change {
+                    let idx_usize = *idx as usize;
+                    let locals = &mut inner.program_state.locals_state;
+                    if locals.len() <= idx_usize {
+                        locals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
+                    }
+                    locals[idx_usize] = val.clone();
+                }
+                if let Some((idx, val)) = &change.globals_change {
+                    let idx_usize = *idx as usize;
+                    let globals = &mut inner.program_state.globals_state;
+                    if globals.len() <= idx_usize {
+                        globals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
+                    }
+                    globals[idx_usize] = val.clone();
+                }
+                if let Some((idx, val)) = &change.memory_change {
+                    let idx_usize = *idx as usize;
+                    let memory = &mut inner.program_state.memory_state;
+                    if memory.len() <= idx_usize {
+                        memory.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
+                    }
+                    memory[idx_usize] = val.clone();
+                }
+            }
+        });
+        inner.program_state.step_number = stop;
+        drop(inner);
+        self.update_debug_panel(None);
     }
 
     fn store_edit(&mut self, edit: Edit, now_ms: f64) {

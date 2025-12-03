@@ -24,10 +24,11 @@ pub enum WebAssemblyTypes {
 
 pub struct Change {
     pub line_number: i32,
-    stack_pushes: Vec<WebAssemblyTypes>,
-    locals_change: Option<(u32, WebAssemblyTypes)>,
-    globals_change: Option<(u32, WebAssemblyTypes)>,
-    num_pops: u32,
+    pub stack_pushes: Vec<WebAssemblyTypes>,
+    pub locals_change: Option<(u32, WebAssemblyTypes)>,
+    pub globals_change: Option<(u32, WebAssemblyTypes)>,
+    pub memory_change: Option<(u32, WebAssemblyTypes)>,
+    pub num_pops: u32,
 }
 
 struct DebugState {
@@ -35,6 +36,7 @@ struct DebugState {
     stack_pushes: Vec<WebAssemblyTypes>,
     locals_change: Option<(u32, WebAssemblyTypes)>,
     globals_change: Option<(u32, WebAssemblyTypes)>,
+    memory_change: Option<(u32, WebAssemblyTypes)>,
     num_pops: u32,
     // Chronological per-step changes
     changes: Vec<Change>,
@@ -46,6 +48,7 @@ impl DebugState {
             stack_pushes: Vec::new(),
             locals_change: None,
             globals_change: None,
+            memory_change: None,
             num_pops: 0,
             changes: Vec::new(),
         }
@@ -72,12 +75,14 @@ pub fn make_imports() -> Result<Object, JsValue> {
                 stack_pushes: state.stack_pushes.clone(),
                 locals_change: state.locals_change.clone(),
                 globals_change: state.globals_change.clone(),
+                memory_change: state.memory_change.clone(),
                 num_pops: state.num_pops,
             };
             state.changes.push(cur_change);
             state.stack_pushes.clear();
             state.locals_change = None;
             state.globals_change = None;
+            state.memory_change = None;
             state.num_pops = 0;
             1
         })
@@ -116,6 +121,25 @@ pub fn make_imports() -> Result<Object, JsValue> {
     )
     .ok();
     set_global_i32.forget();
+
+    let set_memory_i32 = Closure::wrap(Box::new(move |addr: i32, value: i32| {
+        STATE.with(|cur_state| {
+            cur_state.borrow_mut().memory_change =
+                Some((addr as u32, WebAssemblyTypes::I32(value)));
+        });
+        // Return [addr, value]
+        let arr = js_sys::Array::new();
+        arr.push(&JsValue::from_f64(addr as f64));
+        arr.push(&JsValue::from_f64(value as f64));
+        arr
+    }) as Box<dyn Fn(i32, i32) -> js_sys::Array>);
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("set_memory_i32"),
+        set_memory_i32.as_ref().unchecked_ref(),
+    )
+    .ok();
+    set_memory_i32.forget();
 
     // Store i32.const expressions
     let push_i32 = Closure::wrap(Box::new(move |value: i32| {
@@ -239,58 +263,6 @@ fn vec_to_array(cur_vec: &Vec<WebAssemblyTypes>) -> Array {
     output_arr
 }
 
-// Converts snapshot and reconstructs locals and globals from changes
-pub fn get_state_js(step_idx: usize) -> JsValue {
-    if step_idx > MAX_STEP_COUNT || step_idx > last_step() {
-        return JsValue::NULL;
-    }
-    STATE.with(|cur_state| {
-        let state = cur_state.borrow();
-        let output = Object::new();
-        let mut stack = Vec::new();
-        let mut locals = Vec::new();
-        let mut globals = Vec::new();
-        // Changes need to be reconstructed
-        for i in 0..=step_idx {
-            let change = &state.changes[i];
-            if change.num_pops > 0 {
-                stack.truncate(stack.len().saturating_sub(change.num_pops as usize));
-            }
-            stack.append(&mut change.stack_pushes.clone());
-            if change.locals_change.is_some() {
-                let (local_idx, local_value) = change.locals_change.clone().unwrap();
-                locals.resize((local_idx + 1) as usize, WebAssemblyTypes::I32(0));
-                locals[local_idx as usize] = local_value;
-            }
-            if change.globals_change.is_some() {
-                let (global_idx, global_value) = change.globals_change.clone().unwrap();
-                globals.resize((global_idx + 1) as usize, WebAssemblyTypes::I32(0));
-                globals[global_idx as usize] = global_value;
-            }
-        }
-        Reflect::set(
-            &output,
-            &JsValue::from_str("line_number"),
-            &JsValue::from_f64(state.changes[step_idx].line_number as f64),
-        )
-        .ok();
-        Reflect::set(&output, &JsValue::from_str("stack"), &vec_to_array(&stack)).ok();
-        Reflect::set(
-            &output,
-            &JsValue::from_str("locals"),
-            &vec_to_array(&locals),
-        )
-        .ok();
-        Reflect::set(
-            &output,
-            &JsValue::from_str("globals"),
-            &vec_to_array(&globals),
-        )
-        .ok();
-        JsValue::from(output)
-    })
-}
-
 pub fn change_to_js(change: &Change) -> JsValue {
     let output = Object::new();
     Reflect::set(
@@ -347,5 +319,64 @@ pub fn change_to_js(change: &Change) -> JsValue {
     } else {
         Reflect::set(&output, &JsValue::from_str("globals"), &JsValue::NULL).ok();
     }
+    if let Some((idx, val)) = &change.memory_change {
+        let mem_obj = Object::new();
+        Reflect::set(
+            &mem_obj,
+            &JsValue::from_str("idx"),
+            &JsValue::from_f64(*idx as f64),
+        )
+        .ok();
+        Reflect::set(
+            &mem_obj,
+            &JsValue::from_str("value"),
+            &JsValue::from_str(&type_to_string(val)),
+        )
+        .ok();
+        Reflect::set(&output, &JsValue::from_str("mem"), &mem_obj).ok();
+    } else {
+        Reflect::set(&output, &JsValue::from_str("mem"), &JsValue::NULL).ok();
+    }
+    JsValue::from(output)
+}
+
+pub(crate) fn program_state_to_js(ps: &crate::editor::ProgramState) -> JsValue {
+    let output = Object::new();
+    Reflect::set(
+        &output,
+        &JsValue::from_str("step_number"),
+        &JsValue::from_f64(ps.step_number as f64),
+    )
+    .ok();
+    Reflect::set(
+        &output,
+        &JsValue::from_str("line_number"),
+        &JsValue::from_f64(ps.line_number as f64),
+    )
+    .ok();
+    Reflect::set(
+        &output,
+        &JsValue::from_str("stack"),
+        &vec_to_array(&ps.stack_state),
+    )
+    .ok();
+    Reflect::set(
+        &output,
+        &JsValue::from_str("locals"),
+        &vec_to_array(&ps.locals_state),
+    )
+    .ok();
+    Reflect::set(
+        &output,
+        &JsValue::from_str("globals"),
+        &vec_to_array(&ps.globals_state),
+    )
+    .ok();
+Reflect::set(
+        &output,
+        &JsValue::from_str("mem"),
+        &vec_to_array(&ps.memory_state),
+    )
+    .ok();
     JsValue::from(output)
 }

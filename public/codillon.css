@@ -195,3 +195,28 @@ span.comment[data-debug]::after {
     transform-box: fill-box;
     transform: scaleY(0) translateX(0) translateY(0);
 }
+
+.step-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    background: transparent;
+    outline: none;
+    width: 100%;
+}
+
+.step-slider::-webkit-slider-runnable-track {
+    height: 10px;
+    border-radius: 10px;
+    background: #fbf2e2;
+    border: 1px solid #dccdb8;
+}
+.step-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #7a2b2b;
+    border: 2px solid #fff;
+    cursor: pointer;
+    margin-top: -6px;
+}
