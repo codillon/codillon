@@ -126,7 +126,7 @@ impl<'a> InstructionTable<'a> {
                 }
             }
         }
-        Ok(TypesTable { _table: result })
+        Ok(TypesTable { table: result })
     }
 
     fn classify(operation: &wasmparser::Operator, op_type: &CodillonType) -> InstrumentationFuncs {
@@ -242,7 +242,7 @@ impl<'a> InstructionTable<'a> {
         for (i, codillon_instruction) in self.table.iter().enumerate() {
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
-            let value_type = &types._table[i];
+            let value_type = &types.table[i];
             let operation_type = Self::classify(&codillon_instruction.op, value_type);
             pop_debug(&mut f, value_type.inputs.len() as i32);
             f.instruction(&instruction);
@@ -306,7 +306,7 @@ pub struct CodillonType {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypesTable {
-    _table: Vec<CodillonType>,
+    table: Vec<CodillonType>,
 }
 
 pub fn str_to_binary(mut txt: String) -> Result<Vec<u8>> {
@@ -379,7 +379,7 @@ pub(crate) mod tests {
     fn test_types_table() -> Result<()> {
         //block instruction with params and results
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
                     outputs: vec![Some(ValType::I32)],
@@ -468,7 +468,7 @@ pub(crate) mod tests {
 
         //if else with params and results
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
                     outputs: vec![Some(ValType::I32)],
@@ -552,7 +552,7 @@ pub(crate) mod tests {
 
         //loop with param and return
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
                     outputs: vec![Some(ValType::I32)],
@@ -653,7 +653,7 @@ pub(crate) mod tests {
 
         //nested block and if
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
                     outputs: vec![Some(ValType::I32)],
@@ -761,7 +761,7 @@ pub(crate) mod tests {
 
         //empty block
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
                     outputs: vec![],
@@ -816,7 +816,7 @@ pub(crate) mod tests {
                 ],
             };
             let expected_output = TypesTable {
-                _table: vec![
+                table: vec![
                     CodillonType {
                         inputs: vec![],
                         outputs: vec![Some(ValType::I32)],
@@ -862,7 +862,7 @@ pub(crate) mod tests {
                 ],
             };
             let expected_output = TypesTable {
-                _table: vec![
+                table: vec![
                     CodillonType {
                         inputs: vec![],
                         outputs: vec![Some(ValType::I32)],
@@ -895,7 +895,7 @@ pub(crate) mod tests {
                 }],
             };
             let expected_output = TypesTable {
-                _table: vec![CodillonType {
+                table: vec![CodillonType {
                     inputs: vec![],
                     outputs: vec![],
                 }],
@@ -931,7 +931,7 @@ pub(crate) mod tests {
                 ],
             };
             let expected_output = TypesTable {
-                _table: vec![
+                table: vec![
                     CodillonType {
                         inputs: vec![],
                         outputs: vec![Some(ValType::F32)],
@@ -994,7 +994,7 @@ pub(crate) mod tests {
                 ],
             };
             let expected_output = TypesTable {
-                _table: vec![
+                table: vec![
                     CodillonType {
                         inputs: vec![],
                         outputs: vec![Some(ValType::F32)],
