@@ -1,5 +1,7 @@
 // Structures and utilities to support multi-function/multi-module text buffers.
 
+use anyhow::Result;
+use std::ops::Deref;
 use wast::{
     Error,
     core::{InlineImport, Instruction, LocalParser, ValType},
@@ -7,10 +9,6 @@ use wast::{
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
     token::{Id, Index},
 };
-
-use anyhow::Result;
-
-use crate::utils::{FrameInfo, FrameInfosMut, LineInfosMut};
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum InstrKind {
@@ -66,6 +64,33 @@ pub enum LineKind {
     Instr(InstrKind),
     Other(Vec<ModulePart>),
     Malformed(String), // explanation
+}
+
+pub trait LineInfos {
+    fn is_empty(&self) -> bool;
+    fn len(&self) -> usize;
+    fn info(&self, index: usize) -> impl Deref<Target = crate::line::LineInfo>;
+}
+
+pub trait LineInfosMut: LineInfos {
+    fn set_active_status(&mut self, index: usize, new_val: crate::line::Activity);
+    fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm);
+    fn push(&mut self);
+}
+
+#[derive(PartialEq, Clone, Debug)]
+pub struct FrameInfo {
+    pub indent: usize,
+    pub start: usize,
+    pub end: usize,
+    pub unclosed: bool,
+    pub kind: InstrKind,
+}
+
+pub trait FrameInfosMut: LineInfos {
+    fn set_indent(&mut self, index: usize, num: usize);
+    fn set_frame_count(&mut self, count: usize);
+    fn set_frame_info(&mut self, num: usize, frame: FrameInfo);
 }
 
 impl LineKind {
@@ -649,10 +674,7 @@ pub fn parse_line(s: &str) -> LineKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        line::{Activity, LineInfo},
-        utils::{FrameInfosMut, LineInfos},
-    };
+    use crate::line::{Activity, LineInfo};
     use wast::parser::parse;
 
     struct TestLineInfos {

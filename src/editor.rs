@@ -10,11 +10,11 @@ use crate::{
         get_selection, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
-    syntax::{InstrKind, LineKind, SyntheticWasm, find_frames, fix_syntax},
-    utils::{
-        CodillonInstruction, FmtError, FrameInfo, FrameInfosMut, InstructionTable, LineInfos,
-        LineInfosMut, str_to_binary,
+    syntax::{
+        FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
+        find_frames, fix_syntax,
     },
+    utils::{CodillonInstruction, FmtError, InstructionTable, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
