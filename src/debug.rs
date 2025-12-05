@@ -282,26 +282,27 @@ fn vec_to_array(cur_vec: &Vec<WebAssemblyTypes>) -> Array {
     output_arr
 }
 
+fn set_js_num(output: &Object, label: &str, num: f64) {
+    Reflect::set(
+        &output,
+        &JsValue::from_str(label),
+        &JsValue::from_f64(num),
+    ).ok();
+}
+
+fn set_js_vec(output: &Object, label: &str, vector: &Vec<WebAssemblyTypes>) {
+    Reflect::set(
+        &output,
+        &JsValue::from_str(label),
+        &vec_to_array(&vector),
+    ).ok();
+}
+
 pub fn change_to_js(change: &Change) -> JsValue {
     let output = Object::new();
-    Reflect::set(
-        &output,
-        &JsValue::from_str("line#"),
-        &JsValue::from_f64(change.line_number as f64),
-    )
-    .ok();
-    Reflect::set(
-        &output,
-        &JsValue::from_str("pushes"),
-        &vec_to_array(&change.stack_pushes),
-    )
-    .ok();
-    Reflect::set(
-        &output,
-        &JsValue::from_str("pops"),
-        &JsValue::from_f64(change.num_pops as f64),
-    )
-    .ok();
+    set_js_num(&output, "line#", change.line_number as f64);
+    set_js_vec(&output, "stack", &change.stack_pushes);
+    set_js_num(&output, "pops", change.num_pops as f64);
     if let Some((idx, val)) = &change.locals_change {
         let local_obj = Object::new();
         Reflect::set(
@@ -359,43 +360,13 @@ pub fn change_to_js(change: &Change) -> JsValue {
     JsValue::from(output)
 }
 
-pub(crate) fn program_state_to_js(ps: &crate::editor::ProgramState) -> JsValue {
+pub fn program_state_to_js(ps: &crate::editor::ProgramState) -> JsValue {
     let output = Object::new();
-    Reflect::set(
-        &output,
-        &JsValue::from_str("step_number"),
-        &JsValue::from_f64(ps.step_number as f64),
-    )
-    .ok();
-    Reflect::set(
-        &output,
-        &JsValue::from_str("line_number"),
-        &JsValue::from_f64(ps.line_number as f64),
-    )
-    .ok();
-    Reflect::set(
-        &output,
-        &JsValue::from_str("stack"),
-        &vec_to_array(&ps.stack_state),
-    )
-    .ok();
-    Reflect::set(
-        &output,
-        &JsValue::from_str("locals"),
-        &vec_to_array(&ps.locals_state),
-    )
-    .ok();
-    Reflect::set(
-        &output,
-        &JsValue::from_str("globals"),
-        &vec_to_array(&ps.globals_state),
-    )
-    .ok();
-    Reflect::set(
-        &output,
-        &JsValue::from_str("mem"),
-        &vec_to_array(&ps.memory_state),
-    )
-    .ok();
+    set_js_num(&output, "step#", ps.step_number as f64);
+    set_js_num(&output, "line#", ps.line_number as f64);
+    set_js_vec(&output, "stack", &ps.stack_state);
+    set_js_vec(&output, "locals", &ps.locals_state);
+    set_js_vec(&output, "globals", &ps.globals_state);
+    set_js_vec(&output, "mem", &ps.memory_state);
     JsValue::from(output)
 }

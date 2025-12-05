@@ -8,7 +8,7 @@ use crate::{
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
-        AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
+        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle, NodeRef,
         RangeLike, ReactiveComponent, StaticRangeHandle, WithElement, compare_document_position,
         get_selection, set_selection_range,
     },
@@ -24,10 +24,11 @@ use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
     ops::Deref,
-    rc::Rc,
+    rc::{Rc, Weak},
 };
 use wasmparser::{Parser, Payload};
-use web_sys::{HtmlDivElement, console::log_1};
+use wasm_bindgen::{JsCast, JsValue};
+use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), HtmlDivElement>;
@@ -88,6 +89,7 @@ struct _Editor {
     last_time_ms: f64,
 
     program_state: ProgramState,
+    slider: ElementHandle<HtmlInputElement>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -100,6 +102,7 @@ impl Clone for Editor {
 
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
+        let slider = factory.input();
         let inner = _Editor {
             component: DomStruct::new(
                 (
@@ -113,6 +116,7 @@ impl Editor {
             redo_stack: Vec::new(),
             last_time_ms: 0.0,
             program_state: new_program_state(),
+            slider: slider,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -140,7 +144,7 @@ impl Editor {
                     .expect("keydown handler")
             });
         }
-
+        ret.setup_slider(Rc::downgrade(&ret.0), &mut ret.0.borrow_mut().slider);
         ret.image_mut().set_attribute("class", "annotations");
 
         ret.push_line("(func");
@@ -605,9 +609,8 @@ impl Editor {
     }
 
     fn execute(&self, binary: &[u8]) {
-        async fn run_binary(binary: &[u8]) -> Result<String, wasm_bindgen::JsValue> {
+        async fn run_binary(binary: &[u8]) -> Result<String, JsValue> {
             use js_sys::{Function, Reflect};
-            use wasm_bindgen::JsValue;
             // Build import objects for the instrumented module.
             let imports = make_imports()?;
             let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
@@ -618,7 +621,7 @@ impl Editor {
                 .map_err(|_| "failed to get exports")?;
             let main = Reflect::get(&exports, &JsValue::from_str("main"))
                 .map_err(|_| "failed to get main function")?;
-            let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
+            let main = JsCast::dyn_ref::<Function>(&main)
                 .ok_or("main is not an exported function")?;
             let res = main.apply(&JsValue::null(), &js_sys::Array::new())?;
             let string = match js_sys::JSON::stringify(&res) {
@@ -634,23 +637,21 @@ impl Editor {
         wasm_bindgen_futures::spawn_local(async move {
             match run_binary(&binary).await {
                 Ok(_) => {
-                    let stop = { editor_handle.0.borrow().program_state.step_number };
-                    {
+                    // Update slider
+                    let step = {
                         let mut inner = editor_handle.0.borrow_mut();
                         inner.program_state = new_program_state();
-                    }
-                    editor_handle.build_program_state(0, stop);
-                    if let Some(doc) = web_sys::window().and_then(|w| w.document())
-                        && let Ok(Some(el)) = doc.query_selector(".step-slider")
-                    {
-                        el.set_attribute("max", &(last_step() + 1).to_string()).ok();
-                    }
+                        inner.slider.set_attribute("max", &(last_step() + 1).to_string());
+                        inner.program_state.step_number
+                    };
+                    editor_handle.build_program_state(0, step);
+                    editor_handle.update_debug_panel(None);
                     web_sys::console::log_1(&"Ran successfully".into());
                 }
                 Err(e) => {
                     web_sys::console::log_1(&e);
                     use js_sys::Reflect;
-                    let message = Reflect::get(&e, &wasm_bindgen::JsValue::from_str("message"))
+                    let message = Reflect::get(&e, &JsValue::from_str("message"))
                         .ok()
                         .and_then(|m| m.as_string())
                         .or_else(|| e.as_string())
@@ -708,20 +709,41 @@ impl Editor {
         }
     }
 
-    pub fn slider_change(&self, slider_step: usize) {
-        log_1(&format!("step number: {slider_step}").into());
-        let mut inner = self.0.borrow_mut();
-        if inner.program_state.step_number == slider_step {
-            return;
-        }
-        // For backwards steps, reset program state
-        if slider_step < inner.program_state.step_number {
-            inner.program_state = new_program_state();
-        }
-        let program_step = inner.program_state.step_number;
-        drop(inner);
+    fn setup_slider(&self, editor: Weak<RefCell<_Editor>>, slider: &mut ElementHandle<HtmlInputElement>) {
+        slider.set_attribute("type", "range");
+        slider.set_attribute("min", "0");
+        slider.set_attribute("value", "0");
+        slider.set_attribute("class", "step-slider");
+
+        // Slider closure for updating program state.
+        slider.set_oninput(move |event: web_sys::Event| {
+            if let Some(input) = event
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+            {
+                let value = input.value().parse::<usize>().unwrap_or(0);
+                if let Some(rc) = editor.upgrade() {
+                    Editor(rc).slider_change(value);
+                }
+            }
+        });
+    }
+
+    fn slider_change(&self, slider_step: usize) {
+        let program_step = { 
+            let mut inner = self.0.borrow_mut();
+            if inner.program_state.step_number == slider_step {
+                return;
+            }
+            // For backwards steps, reset program state
+            if slider_step < inner.program_state.step_number {
+                inner.program_state = new_program_state();
+            }
+            inner.program_state.step_number
+        };
         // Reconstruct up to slider_step
         self.build_program_state(program_step, slider_step);
+        self.update_debug_panel(None);
     }
 
     fn build_program_state(&self, start: usize, stop: usize) {
@@ -765,8 +787,6 @@ impl Editor {
             }
         });
         inner.program_state.step_number = stop;
-        drop(inner);
-        self.update_debug_panel(None);
     }
 
     fn store_edit(&mut self, edit: Edit, now_ms: f64) {

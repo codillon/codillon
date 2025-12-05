@@ -197,8 +197,6 @@ span.comment[data-debug]::after {
 }
 
 .step-slider {
-    -webkit-appearance: none;
-    appearance: none;
     background: transparent;
     outline: none;
     width: 100%;
