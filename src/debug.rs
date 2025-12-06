@@ -293,7 +293,6 @@ fn set_js_vec(output: &Object, label: &str, vector: &Vec<WebAssemblyTypes>) {
 pub fn program_state_to_js(ps: &crate::editor::ProgramState) -> String {
     let output = Object::new();
     set_js_num(&output, "step#", ps.step_number as f64);
-    set_js_num(&output, "line#", ps.line_number as f64);
     set_js_vec(&output, "stack", &ps.stack_state);
     set_js_vec(&output, "locals", &ps.locals_state);
     set_js_vec(&output, "globals", &ps.globals_state);
