@@ -1,13 +1,14 @@
 // The Codillon code editor
 
 use crate::{
+    debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
-        AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
-        RangeLike, ReactiveComponent, StaticRangeHandle, WithElement, compare_document_position,
-        get_selection, now_ms, set_selection_range,
+        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
+        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, WithElement,
+        compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
@@ -21,13 +22,23 @@ use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
     ops::Deref,
-    rc::Rc,
+    rc::{Rc, Weak},
 };
+use wasm_bindgen::{JsCast, JsValue};
 use wasmparser::{Parser, Payload};
-use web_sys::{HtmlDivElement, console::log_1};
+use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
-type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), HtmlDivElement>;
+type ComponentType = DomStruct<
+    (
+        DomImage,
+        (
+            ReactiveComponent<TextType>,
+            (ElementHandle<HtmlInputElement>, ()),
+        ),
+    ),
+    HtmlDivElement,
+>;
 
 pub const LINE_SPACING: usize = 40;
 // Chrome uses 1 second and VSCode uses 300 - 500 ms, but for comparatively short
@@ -55,6 +66,27 @@ struct Edit {
     time_ms: f64,
 }
 
+#[derive(Clone)]
+pub struct ProgramState {
+    pub step_number: usize,
+    pub line_number: i32,
+    pub stack_state: Vec<WebAssemblyTypes>,
+    pub locals_state: Vec<WebAssemblyTypes>,
+    pub globals_state: Vec<WebAssemblyTypes>,
+    pub memory_state: Vec<WebAssemblyTypes>,
+}
+
+pub fn new_program_state() -> ProgramState {
+    ProgramState {
+        step_number: 0,
+        line_number: 0,
+        stack_state: Vec::new(),
+        locals_state: Vec::new(),
+        globals_state: Vec::new(),
+        memory_state: Vec::new(),
+    }
+}
+
 struct _Editor {
     component: ComponentType,
     factory: ElementFactory,
@@ -63,9 +95,18 @@ struct _Editor {
     undo_stack: Vec<Edit>,
     redo_stack: Vec<Edit>,
     last_time_ms: f64,
+
+    program_state: ProgramState,
+    saved_states: Vec<Option<ProgramState>>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
+
+impl Clone for Editor {
+    fn clone(&self) -> Self {
+        Editor(Rc::clone(&self.0))
+    }
+}
 
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
@@ -73,7 +114,10 @@ impl Editor {
             component: DomStruct::new(
                 (
                     DomImage::new(factory.clone()),
-                    (ReactiveComponent::new(DomVec::new(factory.div())), ()),
+                    (
+                        ReactiveComponent::new(DomVec::new(factory.div())),
+                        ((factory.input()), ()),
+                    ),
                 ),
                 factory.div(),
             ),
@@ -81,6 +125,8 @@ impl Editor {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_time_ms: 0.0,
+            program_state: new_program_state(),
+            saved_states: vec![Some(new_program_state())],
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -108,7 +154,11 @@ impl Editor {
                     .expect("keydown handler")
             });
         }
-
+        {
+            let mut binding = ret.0.borrow_mut();
+            let slider = &mut binding.component.get_mut().1.1.0;
+            ret.setup_slider(Rc::downgrade(&ret.0), slider);
+        }
         ret.image_mut().set_attribute("class", "annotations");
 
         ret.push_line("(func");
@@ -505,7 +555,7 @@ impl Editor {
         let wasm_bin = str_to_binary(text)?;
 
         //create Instruction Table
-        let instruction_table = self.to_instruction_table(&wasm_bin)?;
+        let (instruction_table, locals) = self.to_instruction_table(&wasm_bin)?;
 
         // annotation and instrumentation
         // For now, don't return Err even if `to_types_table` fails.
@@ -516,7 +566,7 @@ impl Editor {
             log_1(&format!("Generating types table failed: {e}").into());
             self.update_debug_panel(Some(e.to_string()));
         } else if let Ok(types) = _types_table {
-            self.execute(&instruction_table.build_executable_binary(&types)?);
+            self.execute(&instruction_table.build_executable_binary(&types, locals)?);
         }
 
         // find frames in the function
@@ -533,12 +583,23 @@ impl Editor {
 
     /// TODO: support multi-function by returning a "Function Table" (a vector of instruction tables)
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_instruction_table<'a>(&self, wasm_bin: &'a [u8]) -> Result<InstructionTable<'a>> {
+    fn to_instruction_table<'a>(
+        &self,
+        wasm_bin: &'a [u8],
+    ) -> Result<(InstructionTable<'a>, Vec<(u32, wasmparser::ValType)>)> {
         let parser = Parser::new(0);
         let mut ops = Vec::new();
+        let mut locals: Vec<(u32, wasmparser::ValType)> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
             if let Payload::CodeSectionEntry(body) = payload? {
+                if locals.is_empty() {
+                    let local_reader = body.get_locals_reader()?;
+                    for local in local_reader {
+                        let entry = local?;
+                        locals.push((entry.0, entry.1));
+                    }
+                }
                 for op in body.get_operators_reader()?.into_iter() {
                     ops.push(op?);
                 }
@@ -563,17 +624,19 @@ impl Editor {
             bail!("not enough instructions");
         }
 
-        Ok(InstructionTable {
-            table: instruction_table,
-        })
+        Ok((
+            InstructionTable {
+                table: instruction_table,
+            },
+            locals,
+        ))
     }
 
     fn execute(&self, binary: &[u8]) {
         async fn run_binary(binary: &[u8]) -> Result<String> {
             use js_sys::{Function, Reflect};
-            use wasm_bindgen::JsValue;
             // Build import objects for the instrumented module.
-            let imports = crate::debug::make_imports().fmt_err()?;
+            let imports = make_imports().fmt_err()?;
             let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
             let js_value = wasm_bindgen_futures::JsFuture::from(promise)
                 .await
@@ -588,10 +651,28 @@ impl Editor {
         }
 
         let binary = binary.to_vec();
-        let mut editor_handle = Editor(Rc::clone(&self.0));
+        let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
             match run_binary(&binary).await {
-                Ok(_) => editor_handle.update_debug_panel(None),
+                Ok(_) => {
+                    // Update slider
+                    let step = {
+                        let mut inner = editor_handle.0.borrow_mut();
+                        inner
+                            .component
+                            .get_mut()
+                            .1
+                            .1
+                            .0
+                            .set_attribute("max", &(last_step() + 1).to_string());
+                        let step = inner.program_state.step_number;
+                        inner.program_state = new_program_state();
+                        inner.saved_states = vec![Some(new_program_state())];
+                        step
+                    };
+                    editor_handle.build_program_state(0, step);
+                    editor_handle.update_debug_panel(None);
+                }
                 Err(e) => {
                     log_1(&format!("Ran with error: {e}").into());
                     editor_handle.update_debug_panel(Some(
@@ -602,34 +683,121 @@ impl Editor {
         });
     }
 
-    fn update_debug_panel(&mut self, error: Option<String>) {
-        let mut lines = self.text_mut();
-        if lines.is_empty() {
+    fn update_debug_panel(&self, error: Option<String>) {
+        let inner = self.0.borrow_mut();
+        let step = inner.program_state.step_number;
+        let line_num = inner.program_state.line_number as usize;
+        let saved_states = inner.saved_states.clone();
+        let mut textentry: RefMut<ReactiveComponent<TextType>> =
+            RefMut::map(inner, |comp| &mut comp.component.get_mut().1.0);
+        let lines: &mut TextType = textentry.inner_mut();
+        if let Some(message) = error {
+            lines[0].set_debug_annotation(Some(&message));
+            for i in 1..lines.len() {
+                lines[i].set_debug_annotation(None);
+                lines[i].set_highlight(false);
+            }
             return;
         }
-        let mut annotations: Vec<Vec<String>> = vec![Vec::new(); lines.len()];
-        // Print error at top
-        if let Some(message) = error {
-            annotations[0].push(message);
-        } else {
-            crate::debug::with_changes(|changes| {
-                for change in changes {
-                    let idx = change.line_number as usize;
-                    let data = js_sys::JSON::stringify(&crate::debug::change_to_js(change))
-                        .ok()
-                        .and_then(|text| text.as_string())
-                        .unwrap_or_else(|| "{}".to_string());
-                    annotations[idx].push(data);
-                }
-            });
-        }
-        for (i, ann) in annotations.into_iter().enumerate() {
-            if ann.is_empty() {
-                lines[i].set_debug_annotation(None);
+        for i in 0..lines.len() {
+            lines[i].set_highlight(false);
+            if let Some(program_state) = &saved_states[i]
+                && program_state.step_number <= step
+            {
+                lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
             } else {
-                lines[i].set_debug_annotation(Some(&ann));
+                lines[i].set_debug_annotation(None);
             }
         }
+        lines[line_num].set_highlight(true);
+    }
+
+    fn setup_slider(
+        &self,
+        editor: Weak<RefCell<_Editor>>,
+        slider: &mut ElementHandle<HtmlInputElement>,
+    ) {
+        slider.set_attribute("type", "range");
+        slider.set_attribute("min", "0");
+        slider.set_attribute("value", "0");
+        slider.set_attribute("class", "step-slider");
+
+        // Slider closure for updating program state.
+        slider.set_oninput(move |event: web_sys::Event| {
+            if let Some(input) = event
+                .target()
+                .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
+            {
+                let value = input.value().parse::<usize>().unwrap_or(0);
+                if let Some(rc) = editor.upgrade() {
+                    Editor(rc).slider_change(value);
+                }
+            }
+        });
+    }
+
+    fn slider_change(&self, slider_step: usize) {
+        let program_step = {
+            let mut inner = self.0.borrow_mut();
+            if inner.program_state.step_number == slider_step {
+                return;
+            }
+            // For backwards steps, reset program state
+            if slider_step < inner.program_state.step_number {
+                inner.program_state = new_program_state();
+            }
+            inner.program_state.step_number
+        };
+        // Reconstruct up to slider_step
+        self.build_program_state(program_step, slider_step);
+        self.update_debug_panel(None);
+    }
+
+    fn build_program_state(&self, start: usize, stop: usize) {
+        let mut inner = self.0.borrow_mut();
+        let line_count = inner.component.get().1.0.inner().len();
+        inner.saved_states.resize_with(line_count, || None);
+        with_changes(|changes| {
+            for (i, change) in changes.enumerate().skip(start).take(stop - start) {
+                inner.program_state.step_number = i + 1;
+                inner.program_state.line_number = change.line_number;
+                let new_length = inner
+                    .program_state
+                    .stack_state
+                    .len()
+                    .saturating_sub(change.num_pops as usize);
+                inner.program_state.stack_state.truncate(new_length);
+                for push in &change.stack_pushes {
+                    inner.program_state.stack_state.push(push.clone());
+                }
+                if let Some((idx, val)) = &change.locals_change {
+                    let idx_usize = *idx as usize;
+                    let locals = &mut inner.program_state.locals_state;
+                    if locals.len() <= idx_usize {
+                        locals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
+                    }
+                    locals[idx_usize] = val.clone();
+                }
+                // Resizing won't be necessary when number of globals are known
+                if let Some((idx, val)) = &change.globals_change {
+                    let idx_usize = *idx as usize;
+                    let globals = &mut inner.program_state.globals_state;
+                    if globals.len() <= idx_usize {
+                        globals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
+                    }
+                    globals[idx_usize] = val.clone();
+                }
+                if let Some((idx, val)) = &change.memory_change {
+                    let idx_usize = *idx as usize;
+                    let memory = &mut inner.program_state.memory_state;
+                    if memory.len() <= idx_usize {
+                        memory.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
+                    }
+                    memory[idx_usize] = val.clone();
+                }
+                inner.saved_states[change.line_number as usize] = Some(inner.program_state.clone());
+            }
+        });
     }
 
     fn store_edit(&mut self, edit: Edit, now_ms: f64) {
