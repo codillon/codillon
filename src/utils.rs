@@ -59,6 +59,10 @@ pub struct InstructionTable<'a> {
     pub table: Vec<CodillonInstruction<'a>>,
 }
 
+pub struct LocalsTable {
+    pub locals: Vec<(u32, ValType)>,
+}
+
 impl<'a> InstructionTable<'a> {
     /// Returns input and output types for each instruction in a binary Wasm module
     ///
@@ -81,6 +85,10 @@ impl<'a> InstructionTable<'a> {
                     func.into_validator(wasmparser::FuncValidatorAllocations::default());
                 let mut idx_stack: Vec<(usize, usize)> = Vec::new(); // simulated operand stack to track where each operand is pushed
                 let mut reader = body.get_operators_reader()?;
+                idx_stack.resize(
+                    func_validator.operand_stack_height() as usize,
+                    (0usize, 0usize),
+                );
                 for instr in &self.table {
                     let op = &instr.op;
                     debug_assert_eq!(op, &reader.read()?); // ensure wasm_bin matches the instruction table
@@ -97,7 +105,10 @@ impl<'a> InstructionTable<'a> {
                                         .get_operand_type(idx)
                                         .flatten()
                                         .expect("operand"),
-                                    origin: idx_stack[(prev_height + i - pop_count) as usize],
+                                    origin: idx_stack
+                                        .get((prev_height + i - pop_count) as usize)
+                                        .copied()
+                                        .unwrap_or((0usize, 0usize)),
                                 })
                             } else {
                                 None
@@ -139,12 +150,18 @@ impl<'a> InstructionTable<'a> {
         use wasmparser::Operator::*;
         match operation {
             // Special Functions
-            LocalSet { local_index } | LocalTee { local_index } => match op_type.outputs[0] {
-                Some(wasmparser::ValType::I32) => InstrumentationFuncs::SetLocalI32(*local_index),
+            LocalSet { local_index } | LocalTee { local_index } => match op_type.inputs.first() {
+                Some(Some(InputType {
+                    instr_type: ValType::I32,
+                    ..
+                })) => InstrumentationFuncs::SetLocalI32(*local_index),
                 _ => InstrumentationFuncs::Other,
             },
-            GlobalSet { global_index } => match op_type.outputs[0] {
-                Some(wasmparser::ValType::I32) => InstrumentationFuncs::SetGlobalI32(*global_index),
+            GlobalSet { global_index } => match op_type.inputs.first() {
+                Some(Some(InputType {
+                    instr_type: ValType::I32,
+                    ..
+                })) => InstrumentationFuncs::SetGlobalI32(*global_index),
                 _ => InstrumentationFuncs::Other,
             },
             I32Store { .. } | I32Store8 { .. } | I32Store16 { .. } => {
@@ -220,7 +237,22 @@ impl<'a> InstructionTable<'a> {
         imports
     }
 
-    pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
+    fn parser_to_encoder(value: &wasmparser::ValType) -> wasm_encoder::ValType {
+        match value {
+            ValType::I32 => wasm_encoder::ValType::I32,
+            ValType::I64 => wasm_encoder::ValType::I64,
+            ValType::F32 => wasm_encoder::ValType::F32,
+            ValType::F64 => wasm_encoder::ValType::F64,
+            ValType::V128 => wasm_encoder::ValType::V128,
+            _ => panic!("unsupported valtype"),
+        }
+    }
+
+    pub fn build_executable_binary(
+        &self,
+        types: &TypesTable,
+        locals: Vec<(u32, ValType)>,
+    ) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
         module.section(&self.instr_func_types());
         module.section(&self.instr_imports());
@@ -253,8 +285,12 @@ impl<'a> InstructionTable<'a> {
 
         // Encode the code section.
         let mut codes = CodeSection::new();
-        let locals = vec![];
-        let mut f = wasm_encoder::Function::new(locals);
+        let mut f = wasm_encoder::Function::new(
+            locals
+                .iter()
+                .map(|(count, value)| (*count, Self::parser_to_encoder(value)))
+                .collect::<Vec<(u32, wasm_encoder::ValType)>>(),
+        );
         let pop_debug = |func: &mut wasm_encoder::Function, num_pop: i32| {
             func.instruction(&EncoderInstruction::I32Const(num_pop));
             func.instruction(&EncoderInstruction::Call(InstrumentImports::PopI as u32));

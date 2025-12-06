@@ -555,7 +555,7 @@ impl Editor {
         let wasm_bin = str_to_binary(text)?;
 
         //create Instruction Table
-        let instruction_table = self.to_instruction_table(&wasm_bin)?;
+        let (instruction_table, locals) = self.to_instruction_table(&wasm_bin)?;
 
         // annotation and instrumentation
         // For now, don't return Err even if `to_types_table` fails.
@@ -566,7 +566,7 @@ impl Editor {
             log_1(&format!("Generating types table failed: {e}").into());
             self.update_debug_panel(Some(e.to_string()));
         } else if let Ok(types) = _types_table {
-            self.execute(&instruction_table.build_executable_binary(&types)?);
+            self.execute(&instruction_table.build_executable_binary(&types, locals)?);
         }
 
         // find frames in the function
@@ -583,12 +583,23 @@ impl Editor {
 
     /// TODO: support multi-function by returning a "Function Table" (a vector of instruction tables)
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_instruction_table<'a>(&self, wasm_bin: &'a [u8]) -> Result<InstructionTable<'a>> {
+    fn to_instruction_table<'a>(
+        &self,
+        wasm_bin: &'a [u8],
+    ) -> Result<(InstructionTable<'a>, Vec<(u32, wasmparser::ValType)>)> {
         let parser = Parser::new(0);
         let mut ops = Vec::new();
+        let mut locals: Vec<(u32, wasmparser::ValType)> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
             if let Payload::CodeSectionEntry(body) = payload? {
+                if locals.is_empty() {
+                    let local_reader = body.get_locals_reader()?;
+                    for local in local_reader {
+                        let entry = local?;
+                        locals.push((entry.0, entry.1));
+                    }
+                }
                 for op in body.get_operators_reader()?.into_iter() {
                     ops.push(op?);
                 }
@@ -613,9 +624,12 @@ impl Editor {
             bail!("not enough instructions");
         }
 
-        Ok(InstructionTable {
-            table: instruction_table,
-        })
+        Ok((
+            InstructionTable {
+                table: instruction_table,
+            },
+            locals,
+        ))
     }
 
     fn execute(&self, binary: &[u8]) {
@@ -680,18 +694,23 @@ impl Editor {
             lines[0].set_debug_annotation(Some(&message));
             for i in 1..lines.len() {
                 lines[i].set_debug_annotation(None);
+                lines[i].set_highlight(false);
             }
             return;
         }
+        let mut last = 0;
         for i in 0..lines.len() {
+            lines[i].set_highlight(false);
             if let Some(program_state) = &saved_states[i]
                 && program_state.step_number <= step
             {
                 lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
+                last = i;
             } else {
                 lines[i].set_debug_annotation(None);
             }
         }
+        lines[last].set_highlight(true);
     }
 
     fn setup_slider(
@@ -760,6 +779,7 @@ impl Editor {
                     }
                     locals[idx_usize] = val.clone();
                 }
+                // Resizing won't be necessary when number of globals are known
                 if let Some((idx, val)) = &change.globals_change {
                     let idx_usize = *idx as usize;
                     let globals = &mut inner.program_state.globals_state;
@@ -776,6 +796,7 @@ impl Editor {
                     }
                     memory[idx_usize] = val.clone();
                 }
+                // Only save program states that might appear in DOM
                 if (stop - i) < line_count {
                     inner.saved_states[change.line_number as usize] =
                         Some(inner.program_state.clone());

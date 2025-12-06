@@ -543,4 +543,12 @@ impl CodeLine {
             self.contents.get_mut().1.0.remove_attribute("data-debug");
         }
     }
+
+    pub fn set_highlight(&mut self, add_highlight: bool) {
+        if add_highlight {
+            self.contents.get_mut().0.set_attribute("highlight", "");
+        } else {
+            self.contents.get_mut().0.remove_attribute("highlight");
+        }
+    }
 }

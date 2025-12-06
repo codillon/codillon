@@ -238,3 +238,7 @@ span.comment[data-debug]::after {
     background: linen;
     border: 1px solid burlywood;
 }
+
+[highlight] {
+    text-decoration: underline;
+}
