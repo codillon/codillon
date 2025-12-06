@@ -686,6 +686,7 @@ impl Editor {
     fn update_debug_panel(&self, error: Option<String>) {
         let inner = self.0.borrow_mut();
         let step = inner.program_state.step_number;
+        let line_num = inner.program_state.line_number as usize;
         let saved_states = inner.saved_states.clone();
         let mut textentry: RefMut<ReactiveComponent<TextType>> =
             RefMut::map(inner, |comp| &mut comp.component.get_mut().1.0);
@@ -698,19 +699,17 @@ impl Editor {
             }
             return;
         }
-        let mut last = 0;
         for i in 0..lines.len() {
             lines[i].set_highlight(false);
             if let Some(program_state) = &saved_states[i]
                 && program_state.step_number <= step
             {
                 lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
-                last = i;
             } else {
                 lines[i].set_debug_annotation(None);
             }
         }
-        lines[last].set_highlight(true);
+        lines[line_num].set_highlight(true);
     }
 
     fn setup_slider(
@@ -796,11 +795,7 @@ impl Editor {
                     }
                     memory[idx_usize] = val.clone();
                 }
-                // Only save program states that might appear in DOM
-                if (stop - i) < line_count {
-                    inner.saved_states[change.line_number as usize] =
-                        Some(inner.program_state.clone());
-                }
+                inner.saved_states[change.line_number as usize] = Some(inner.program_state.clone());
             }
         });
     }
