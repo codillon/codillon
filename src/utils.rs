@@ -137,8 +137,6 @@ impl<'a> InstructionTable<'a> {
         match operation {
             // Special Functions
             LocalSet { local_index } | LocalTee { local_index } => {
-                let input_length = op_type.inputs.len();
-                 web_sys::console::log_1(&format!("{input_length}").into());
                 match op_type.inputs[0].instr_type {
                     wasmparser::ValType::I32 => InstrumentationFuncs::SetLocalI32(*local_index),
                     _ => InstrumentationFuncs::Other,

@@ -1,16 +1,14 @@
 // The Codillon code editor
 
 use crate::{
-    debug::{
-        WebAssemblyTypes, change_to_js, last_step, make_imports, program_state_to_js, with_changes,
-    },
+    debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
-        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle, NodeRef,
-        RangeLike, ReactiveComponent, StaticRangeHandle, WithElement, compare_document_position,
-        get_selection, set_selection_range,
+        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
+        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, WithElement,
+        compare_document_position, get_selection, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{InstrKind, LineKind, SyntheticWasm, find_frames, fix_syntax},
@@ -26,12 +24,21 @@ use std::{
     ops::Deref,
     rc::{Rc, Weak},
 };
-use wasmparser::{Parser, Payload};
 use wasm_bindgen::{JsCast, JsValue};
+use wasmparser::{Parser, Payload};
 use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
-type ComponentType = DomStruct<(DomImage, (ReactiveComponent<TextType>, ())), HtmlDivElement>;
+type ComponentType = DomStruct<
+    (
+        DomImage,
+        (
+            ReactiveComponent<TextType>,
+            (ElementHandle<HtmlInputElement>, ()),
+        ),
+    ),
+    HtmlDivElement,
+>;
 
 pub const LINE_SPACING: usize = 40;
 // Chrome uses 1 second and VSCode uses 300 - 500 ms, but for comparatively short
@@ -59,6 +66,7 @@ struct Edit {
     time_ms: f64,
 }
 
+#[derive(Clone)]
 pub struct ProgramState {
     pub step_number: usize,
     pub line_number: i32,
@@ -89,7 +97,7 @@ struct _Editor {
     last_time_ms: f64,
 
     program_state: ProgramState,
-    slider: ElementHandle<HtmlInputElement>,
+    saved_states: Vec<Option<ProgramState>>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -102,12 +110,14 @@ impl Clone for Editor {
 
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
-        let slider = factory.input();
         let inner = _Editor {
             component: DomStruct::new(
                 (
                     DomImage::new(factory.clone()),
-                    (ReactiveComponent::new(DomVec::new(factory.div())), ()),
+                    (
+                        ReactiveComponent::new(DomVec::new(factory.div())),
+                        ((factory.input()), ()),
+                    ),
                 ),
                 factory.div(),
             ),
@@ -116,7 +126,7 @@ impl Editor {
             redo_stack: Vec::new(),
             last_time_ms: 0.0,
             program_state: new_program_state(),
-            slider: slider,
+            saved_states: vec![Some(new_program_state())],
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -144,7 +154,11 @@ impl Editor {
                     .expect("keydown handler")
             });
         }
-        ret.setup_slider(Rc::downgrade(&ret.0), &mut ret.0.borrow_mut().slider);
+        {
+            let mut binding = ret.0.borrow_mut();
+            let slider = &mut binding.component.get_mut().1.1.0;
+            ret.setup_slider(Rc::downgrade(&ret.0), slider);
+        }
         ret.image_mut().set_attribute("class", "annotations");
 
         ret.push_line("(func");
@@ -621,8 +635,8 @@ impl Editor {
                 .map_err(|_| "failed to get exports")?;
             let main = Reflect::get(&exports, &JsValue::from_str("main"))
                 .map_err(|_| "failed to get main function")?;
-            let main = JsCast::dyn_ref::<Function>(&main)
-                .ok_or("main is not an exported function")?;
+            let main =
+                JsCast::dyn_ref::<Function>(&main).ok_or("main is not an exported function")?;
             let res = main.apply(&JsValue::null(), &js_sys::Array::new())?;
             let string = match js_sys::JSON::stringify(&res) {
                 Ok(jsstr) => jsstr.as_string().unwrap_or_else(|| format!("{:?}", res)),
@@ -640,9 +654,17 @@ impl Editor {
                     // Update slider
                     let step = {
                         let mut inner = editor_handle.0.borrow_mut();
+                        inner
+                            .component
+                            .get_mut()
+                            .1
+                            .1
+                            .0
+                            .set_attribute("max", &(last_step() + 1).to_string());
+                        let step = inner.program_state.step_number;
                         inner.program_state = new_program_state();
-                        inner.slider.set_attribute("max", &(last_step() + 1).to_string());
-                        inner.program_state.step_number
+                        inner.saved_states = vec![Some(new_program_state())];
+                        step
                     };
                     editor_handle.build_program_state(0, step);
                     editor_handle.update_debug_panel(None);
@@ -663,53 +685,35 @@ impl Editor {
     }
 
     fn update_debug_panel(&self, error: Option<String>) {
-        let num_lines = {
-            let textref = Ref::map(self.0.borrow(), |comp| &comp.component.get().1.0);
-            textref.inner().len()
-        };
-        if num_lines == 0 {
+        let inner = self.0.borrow_mut();
+        let step = inner.program_state.step_number;
+        let saved_states = inner.saved_states.clone();
+        let mut textentry: RefMut<ReactiveComponent<TextType>> =
+            RefMut::map(inner, |comp| &mut comp.component.get_mut().1.0);
+        let lines: &mut TextType = textentry.inner_mut();
+        if let Some(message) = error {
+            lines[0].set_debug_annotation(&message);
+            for i in 1..lines.len() {
+                lines[i].set_debug_annotation("");
+            }
             return;
         }
-        let mut annotations: Vec<Vec<String>> = vec![Vec::new(); num_lines];
-        // Print error at top
-        if let Some(message) = error {
-            annotations[0].push(message);
-        } else {
-            let program_json = {
-                let ps = &self.0.borrow().program_state;
-                let program_js = program_state_to_js(ps);
-                js_sys::JSON::stringify(&program_js)
-                    .ok()
-                    .and_then(|s| s.as_string())
-                    .unwrap_or_else(|| "{}".to_string())
-            };
-            annotations[0].push(program_json);
-            with_changes(|changes| {
-                for change in changes {
-                    let idx = change.line_number as usize;
-                    let data = js_sys::JSON::stringify(&change_to_js(change))
-                        .ok()
-                        .and_then(|text| text.as_string())
-                        .unwrap_or_else(|| "{}".to_string());
-                    annotations[idx].push(data);
-                }
-            });
-        }
-        let mut textentry: RefMut<ReactiveComponent<TextType>> =
-            RefMut::map(self.0.borrow_mut(), |comp| {
-                &mut comp.component.get_mut().1.0
-            });
-        let lines: &mut TextType = textentry.inner_mut();
-        for (i, ann) in annotations.into_iter().enumerate() {
-            if ann.is_empty() {
-                lines[i].set_debug_annotation(None);
+        for i in 0..lines.len() {
+            if let Some(program_state) = &saved_states[i]
+                && program_state.step_number <= step
+            {
+                lines[i].set_debug_annotation(&program_state_to_js(program_state));
             } else {
-                lines[i].set_debug_annotation(Some(&ann));
+                lines[i].set_debug_annotation("");
             }
         }
     }
 
-    fn setup_slider(&self, editor: Weak<RefCell<_Editor>>, slider: &mut ElementHandle<HtmlInputElement>) {
+    fn setup_slider(
+        &self,
+        editor: Weak<RefCell<_Editor>>,
+        slider: &mut ElementHandle<HtmlInputElement>,
+    ) {
         slider.set_attribute("type", "range");
         slider.set_attribute("min", "0");
         slider.set_attribute("value", "0");
@@ -730,7 +734,7 @@ impl Editor {
     }
 
     fn slider_change(&self, slider_step: usize) {
-        let program_step = { 
+        let program_step = {
             let mut inner = self.0.borrow_mut();
             if inner.program_state.step_number == slider_step {
                 return;
@@ -748,8 +752,11 @@ impl Editor {
 
     fn build_program_state(&self, start: usize, stop: usize) {
         let mut inner = self.0.borrow_mut();
+        let line_count = inner.component.get().1.0.inner().len();
+        inner.saved_states.resize_with(line_count, || None);
         with_changes(|changes| {
-            for change in changes.skip(start).take(stop - start) {
+            for (i, change) in changes.enumerate().skip(start).take(stop - start) {
+                inner.program_state.step_number = i + 1;
                 inner.program_state.line_number = change.line_number;
                 let new_length = inner
                     .program_state
@@ -784,9 +791,12 @@ impl Editor {
                     }
                     memory[idx_usize] = val.clone();
                 }
+                if (stop - i) < line_count {
+                    inner.saved_states[change.line_number as usize] =
+                        Some(inner.program_state.clone());
+                }
             }
         });
-        inner.program_state.step_number = stop;
     }
 
     fn store_edit(&mut self, edit: Edit, now_ms: f64) {

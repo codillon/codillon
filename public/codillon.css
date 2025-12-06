@@ -197,6 +197,7 @@ span.comment[data-debug]::after {
 }
 
 .step-slider {
+    appearance: none;
     background: transparent;
     outline: none;
     width: 100%;
@@ -205,16 +206,35 @@ span.comment[data-debug]::after {
 .step-slider::-webkit-slider-runnable-track {
     height: 10px;
     border-radius: 10px;
-    background: #fbf2e2;
-    border: 1px solid #dccdb8;
+    background: linen;
+    border: 1px solid burlywood;
 }
+
 .step-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     width: 20px;
     height: 20px;
     border-radius: 50%;
-    background: #7a2b2b;
-    border: 2px solid #fff;
+    background: darkred;
+    border: 2px solid white;
     cursor: pointer;
     margin-top: -6px;
+}
+
+.step-slider::-moz-slider-thumb {
+    -moz-appearance: none;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: darkred;
+    border: 2px solid white;
+    cursor: pointer;
+    margin-top: -6px;
+}
+
+.step-slider::-moz-slider-runnable-track {
+    height: 10px;
+    border-radius: 10px;
+    background: linen;
+    border: 1px solid burlywood;
 }
