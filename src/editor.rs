@@ -692,9 +692,9 @@ impl Editor {
             RefMut::map(inner, |comp| &mut comp.component.get_mut().1.0);
         let lines: &mut TextType = textentry.inner_mut();
         if let Some(message) = error {
-            lines[0].set_debug_annotation(&message);
+            lines[0].set_debug_annotation(Some(&message));
             for i in 1..lines.len() {
-                lines[i].set_debug_annotation("");
+                lines[i].set_debug_annotation(None);
             }
             return;
         }
@@ -702,9 +702,9 @@ impl Editor {
             if let Some(program_state) = &saved_states[i]
                 && program_state.step_number <= step
             {
-                lines[i].set_debug_annotation(&program_state_to_js(program_state));
+                lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
             } else {
-                lines[i].set_debug_annotation("");
+                lines[i].set_debug_annotation(None);
             }
         }
     }
