@@ -8,7 +8,7 @@ use crate::{
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
         NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, WithElement,
-        compare_document_position, get_selection, set_selection_range,
+        compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
@@ -622,7 +622,7 @@ impl Editor {
         async fn run_binary(binary: &[u8]) -> Result<String> {
             use js_sys::{Function, Reflect};
             // Build import objects for the instrumented module.
-            let imports = crate::debug::make_imports().fmt_err()?;
+            let imports = make_imports().fmt_err()?;
             let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
             let js_value = wasm_bindgen_futures::JsFuture::from(promise)
                 .await
@@ -637,7 +637,7 @@ impl Editor {
         }
 
         let binary = binary.to_vec();
-        let mut editor_handle = Editor(Rc::clone(&self.0));
+        let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
             match run_binary(&binary).await {
                 Ok(_) => {
@@ -660,14 +660,10 @@ impl Editor {
                     editor_handle.update_debug_panel(None);
                 }
                 Err(e) => {
-                    web_sys::console::log_1(&e);
-                    use js_sys::Reflect;
-                    let message = Reflect::get(&e, &JsValue::from_str("message"))
-                        .ok()
-                        .and_then(|m| m.as_string())
-                        .or_else(|| e.as_string())
-                        .unwrap_or_else(|| format!("{:?}", e));
-                    editor_handle.update_debug_panel(Some(message));
+                    log_1(&format!("Ran with error: {e}").into());
+                    editor_handle.update_debug_panel(Some(
+                        "validation or execution error (see console)".to_string(),
+                    ));
                 }
             }
         });
