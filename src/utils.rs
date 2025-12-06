@@ -1,9 +1,4 @@
-use crate::{
-    line::{Activity, LineInfo},
-    syntax::{InstrKind, SyntheticWasm},
-};
-use anyhow::{Result, anyhow};
-use std::ops::{Deref, RangeInclusive};
+use anyhow::Result;
 use wasm_encoder::{
     CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
     TypeSection,
@@ -81,69 +76,75 @@ impl<'a> InstructionTable<'a> {
         let mut result = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
-            if let ValidPayload::Func(func, _) = validator.payload(&payload?)? {
+            if let ValidPayload::Func(func, body) = validator.payload(&payload?)? {
                 let mut func_validator: wasmparser::FuncValidator<wasmparser::ValidatorResources> =
                     func.into_validator(wasmparser::FuncValidatorAllocations::default());
-                let mut idx_stack: Vec<usize> = Vec::new(); // simulated operand stack to track idx where each operand is pushed
+                let mut idx_stack: Vec<(usize, usize)> = Vec::new(); // simulated operand stack to track where each operand is pushed
+                let mut reader = body.get_operators_reader()?;
                 for instr in &self.table {
                     let op = &instr.op;
+                    debug_assert_eq!(op, &reader.read()?); // ensure wasm_bin matches the instruction table
                     let (pop_count, push_count) = op
                         .operator_arity(&func_validator.visitor(dummy_offset))
-                        .ok_or(anyhow!("could not determine operator arity"))?;
+                        .unwrap_or((0, 0));
                     let prev_height = func_validator.operand_stack_height();
-                    if pop_count > prev_height {
-                        return Err(anyhow!("expected to pop operand, but empty stack"));
-                    }
-                    let mut inputs = (prev_height - pop_count..prev_height)
-                        .filter_map(|i| {
-                            let valtype = func_validator.get_operand_type(i as usize).flatten();
-                            let idx = idx_stack.pop();
-                            match (valtype, idx) {
-                                (Some(val), Some(idx)) => Some(InputType {
-                                    instr_type: val,
-                                    origin_idx: idx,
-                                }),
-                                _ => None,
+                    let inputs = (0..pop_count)
+                        .map(|i| {
+                            if pop_count < prev_height + i + 1 {
+                                let idx = (pop_count - i - 1) as usize;
+                                Some(InputType {
+                                    instr_type: func_validator
+                                        .get_operand_type(idx)
+                                        .flatten()
+                                        .expect("operand"),
+                                    origin: idx_stack[(prev_height + i - pop_count) as usize],
+                                })
+                            } else {
+                                None
                             }
                         })
                         .collect::<Vec<_>>();
 
-                    //reverse inputs so that operands pushed more recently are towards the left (for UI)
-                    inputs.reverse();
+                    for _ in 0..pop_count {
+                        idx_stack.pop();
+                    }
 
-                    func_validator.op(dummy_offset, op)?;
+                    let _ = func_validator.op(dummy_offset, op);
 
                     let new_height = func_validator.operand_stack_height();
-                    if push_count > new_height {
-                        return Err(anyhow!(
-                            "expected operator to push operand that is not on the stack"
-                        ));
-                    }
-                    let outputs = (new_height - push_count..new_height)
-                        .filter_map(|i| func_validator.get_operand_type(i as usize).flatten())
+                    let outputs = (0..push_count)
+                        .map(|i| {
+                            idx_stack.push((instr.line_idx, i as usize));
+                            if push_count < new_height + i + 1 {
+                                Some(
+                                    func_validator
+                                        .get_operand_type((push_count - i - 1) as usize)
+                                        .flatten()
+                                        .expect("result operand"),
+                                )
+                            } else {
+                                None
+                            }
+                        })
                         .collect::<Vec<_>>();
-                    for _ in &outputs {
-                        idx_stack.push(instr.line_idx);
-                    }
+
                     result.push(CodillonType { inputs, outputs });
                 }
             }
         }
-        Ok(TypesTable { _table: result })
+        Ok(TypesTable { table: result })
     }
 
     fn classify(operation: &wasmparser::Operator, op_type: &CodillonType) -> InstrumentationFuncs {
         use wasmparser::Operator::*;
         match operation {
             // Special Functions
-            LocalSet { local_index } | LocalTee { local_index } => {
-                match op_type.inputs[0].instr_type {
-                    wasmparser::ValType::I32 => InstrumentationFuncs::SetLocalI32(*local_index),
-                    _ => InstrumentationFuncs::Other,
-                }
-            }
+            LocalSet { local_index } | LocalTee { local_index } => match op_type.outputs[0] {
+                Some(wasmparser::ValType::I32) => InstrumentationFuncs::SetLocalI32(*local_index),
+                _ => InstrumentationFuncs::Other,
+            },
             GlobalSet { global_index } => match op_type.outputs[0] {
-                wasmparser::ValType::I32 => InstrumentationFuncs::SetGlobalI32(*global_index),
+                Some(wasmparser::ValType::I32) => InstrumentationFuncs::SetGlobalI32(*global_index),
                 _ => InstrumentationFuncs::Other,
             },
             I32Store { .. } | I32Store8 { .. } | I32Store16 { .. } => {
@@ -152,10 +153,10 @@ impl<'a> InstructionTable<'a> {
             F32Store { .. } => InstrumentationFuncs::SetMemoryF32,
             // Match based on outputs
             _ => match op_type.outputs.as_slice() {
-                [wasmparser::ValType::I32] => InstrumentationFuncs::PushI32,
-                [wasmparser::ValType::I64] => InstrumentationFuncs::PushI64,
-                [wasmparser::ValType::F32] => InstrumentationFuncs::PushF32,
-                [wasmparser::ValType::F64] => InstrumentationFuncs::PushF64,
+                [Some(wasmparser::ValType::I32)] => InstrumentationFuncs::PushI32,
+                [Some(wasmparser::ValType::I64)] => InstrumentationFuncs::PushI64,
+                [Some(wasmparser::ValType::F32)] => InstrumentationFuncs::PushF32,
+                [Some(wasmparser::ValType::F64)] => InstrumentationFuncs::PushF64,
                 _ => InstrumentationFuncs::Other,
             },
         }
@@ -261,7 +262,7 @@ impl<'a> InstructionTable<'a> {
         for (i, codillon_instruction) in self.table.iter().enumerate() {
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.clone())?;
-            let value_type = &types._table[i];
+            let value_type = &types.table[i];
             let operation_type = Self::classify(&codillon_instruction.op, value_type);
             // Instrumentation that needs to occur before execution
             match operation_type {
@@ -329,26 +330,26 @@ impl<'a> InstructionTable<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct InputType {
     pub instr_type: ValType,
-    pub origin_idx: usize,
+    pub origin: (usize, usize), // line index + push# within the line
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct CodillonType {
-    inputs: Vec<InputType>,
-    outputs: Vec<ValType>,
+    inputs: Vec<Option<InputType>>,
+    outputs: Vec<Option<ValType>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypesTable {
-    _table: Vec<CodillonType>,
+    table: Vec<CodillonType>,
 }
 
-pub fn str_to_binary(s: String) -> Result<Vec<u8>> {
-    let txt = format!("module {s}");
-    let binding = ParseBuffer::new(&txt)?;
-    let mut module = parser::parse::<Module>(&binding)?;
+pub fn str_to_binary(mut txt: String) -> Result<Vec<u8>> {
+    txt.insert_str(0, "module ");
+    let wasm_bin = parser::parse::<Module>(&ParseBuffer::new(&txt)?)?.encode()?;
+    parse_binary_wasm(wasmparser::Parser::new(0), &wasm_bin)?; // make sure binary is well-formed
 
-    Ok(module.encode()?)
+    Ok(wasm_bin)
 }
 
 // Find the line comment separator in these string slices.
@@ -360,131 +361,6 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     } else {
         s2.find(";;").map(|idx| s1.len() + idx)
     }
-}
-
-/// Decides if a given string is a well-formed text-format Wasm function
-///
-/// Uses wast ParseBuffer to convert string into buffer and wast parser to parse buffer as Module
-/// Encodes Module to binary Wasm and wasmparser parses binary Wasm
-///
-/// # Parameters
-/// lines: A string slice representing a Wasm function
-///
-/// # Returns
-/// true: if the function is syntactically well-formed; false otherwise
-///
-/// # Assumptions
-/// Each instruction is plain
-pub fn is_well_formed_func(lines: &str) -> bool {
-    let parse_text = || {
-        let text = format!("module (func {lines})");
-        let binary = parser::parse::<Module>(&ParseBuffer::new(&text)?)?.encode()?;
-        parse_binary_wasm(wasmparser::Parser::new(0), &binary)
-    };
-    parse_text().is_ok()
-}
-
-/// Return value of collect_operands - represents params and results of each instruction
-pub type InstrOps = Vec<(Vec<(ValType, usize)>, Vec<ValType>)>;
-
-/// Returns input and output types for each instruction in a binary Wasm module
-///
-/// # Parameters
-/// wasm_bin: a binary Wasm module
-/// ops: a vector of Operators and their idx in the editor
-///
-/// # Returns
-/// Err if function is not valid, else:
-/// A vector of tuples where:
-/// the first element is a (ValType, usize) tuple representing an operand this instruction pops and the idx in the editor where this operand was pushed
-/// the second element is a ValType representing an operand this instruction pushes
-// TODO: use Operators in OkModule instead of re-parsing the binary, and annotate each Operator in OkModule with its type instead of returning a vector
-pub fn collect_operands<'a>(wasm_bin: &[u8], ops: &Vec<(Operator<'a>, usize)>) -> Result<InstrOps> {
-    let mut validator = Validator::new();
-    let parser = wasmparser::Parser::new(0);
-    let mut result = Vec::new();
-    let dummy_offset = 1; // no need to track offsets, but validator has safety checks against 0
-
-    for payload in parser.parse_all(wasm_bin) {
-        if let ValidPayload::Func(func, _) = validator.payload(&payload?)? {
-            let mut func_validator: wasmparser::FuncValidator<wasmparser::ValidatorResources> =
-                func.into_validator(wasmparser::FuncValidatorAllocations::default());
-            let mut idx_stack: Vec<usize> = Vec::new(); // simulated operand stack to track idx where each operand is pushed
-            for (op, idx) in ops {
-                let (pop_count, push_count) = op
-                    .operator_arity(&func_validator.visitor(dummy_offset))
-                    .ok_or(anyhow!("could not determine operator arity"))?;
-                let prev_height = func_validator.operand_stack_height();
-                if pop_count > prev_height {
-                    return Err(anyhow!("expected to pop operand, but empty stack"));
-                }
-                let mut inputs = (prev_height - pop_count..prev_height)
-                    .filter_map(|i| {
-                        let valtype = func_validator.get_operand_type(i as usize).flatten();
-                        let idx = idx_stack.pop();
-                        match (valtype, idx) {
-                            (Some(val), Some(idx)) => Some((val, idx)),
-                            _ => None,
-                        }
-                    })
-                    .collect::<Vec<_>>();
-
-                //reverse inputs so that operands pushed more recently are towards the left (for UI)
-                inputs.reverse();
-
-                func_validator.op(dummy_offset, op)?;
-
-                let new_height = func_validator.operand_stack_height();
-                if push_count > new_height {
-                    return Err(anyhow!(
-                        "expected operator to push operand that is not on the stack"
-                    ));
-                }
-                let outputs = (new_height - push_count..new_height)
-                    .filter_map(|i| func_validator.get_operand_type(i as usize).flatten())
-                    .collect::<Vec<_>>();
-                for _ in &outputs {
-                    idx_stack.push(*idx);
-                }
-
-                result.push((inputs, outputs));
-            }
-        }
-    }
-
-    Ok(result)
-}
-
-/// Represents a frame entry (like "block end" pair, etc.), with range recorded.
-/// The range is inclusive, containing both start instr number and end instr number.
-/// The start number begins at 0.
-pub type Frame = RangeInclusive<usize>;
-
-pub trait LineInfos {
-    fn is_empty(&self) -> bool;
-    fn len(&self) -> usize;
-    fn info(&self, index: usize) -> impl Deref<Target = LineInfo>;
-}
-
-pub trait LineInfosMut: LineInfos {
-    fn set_active_status(&mut self, index: usize, new_val: Activity);
-    fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm);
-    fn push(&mut self);
-}
-
-#[derive(PartialEq, Clone, Debug)]
-pub struct FrameInfo {
-    pub indent: usize,
-    pub start: usize,
-    pub end: usize,
-    pub unclosed: bool,
-    pub kind: InstrKind,
-}
-
-pub trait FrameInfosMut: LineInfos {
-    fn set_indent(&mut self, index: usize, num: usize);
-    fn set_frame_count(&mut self, count: usize);
-    fn set_frame_info(&mut self, num: usize, frame: FrameInfo);
 }
 
 pub trait FmtError {
@@ -504,7 +380,11 @@ pub(crate) mod tests {
     use wasmparser::BlockType;
 
     #[test]
-    fn test_is_well_formed_func() {
+    fn test_str_to_binary_for_one_function() {
+        fn is_well_formed_func(s: &str) -> bool {
+            str_to_binary(format!("(func {s})")).is_ok()
+        }
+
         //well-formed function
         assert!(is_well_formed_func("block\nend\n"));
         assert!(is_well_formed_func("i32.const 1\ni32.const 2\ni32.add"));
@@ -531,56 +411,56 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn test_collect_operands() -> Result<()> {
+    fn test_types_table() -> Result<()> {
         //block instruction with params and results
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
                     inputs: vec![
-                        InputType {
+                        Some(InputType {
                             instr_type: ValType::I32,
-                            origin_idx: 0,
-                        },
-                        InputType {
+                            origin: (0, 0),
+                        }),
+                        Some(InputType {
                             instr_type: ValType::I32,
-                            origin_idx: 1,
-                        },
+                            origin: (1, 0),
+                        }),
                     ],
-                    outputs: vec![ValType::I32, ValType::I32],
+                    outputs: vec![Some(ValType::I32), Some(ValType::I32)],
                 },
                 CodillonType {
                     inputs: vec![
-                        InputType {
+                        Some(InputType {
                             instr_type: ValType::I32,
-                            origin_idx: 2,
-                        },
-                        InputType {
+                            origin: (2, 0),
+                        }),
+                        Some(InputType {
                             instr_type: ValType::I32,
-                            origin_idx: 2,
-                        },
+                            origin: (2, 1),
+                        }),
                     ],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 3,
-                    }],
-                    outputs: vec![ValType::I32],
+                        origin: (3, 0),
+                    })],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 4,
-                    }],
+                        origin: (4, 0),
+                    })],
                     outputs: vec![],
                 },
             ],
@@ -623,45 +503,45 @@ pub(crate) mod tests {
 
         //if else with params and results
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 0,
-                    }],
+                        origin: (0, 0),
+                    })],
                     outputs: vec![],
                 },
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 2,
-                    }],
+                        origin: (2, 0),
+                    })],
                     outputs: vec![],
                 },
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 4,
-                    }],
-                    outputs: vec![ValType::I32],
+                        origin: (4, 0),
+                    })],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 5,
-                    }],
+                        origin: (5, 0),
+                    })],
                     outputs: vec![],
                 },
             ],
@@ -707,58 +587,58 @@ pub(crate) mod tests {
 
         //loop with param and return
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 0,
-                    }],
-                    outputs: vec![ValType::I32],
+                        origin: (0, 0),
+                    })],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
                     inputs: vec![
-                        InputType {
+                        Some(InputType {
                             instr_type: ValType::I32,
-                            origin_idx: 1,
-                        },
-                        InputType {
+                            origin: (1, 0),
+                        }),
+                        Some(InputType {
                             instr_type: ValType::I32,
-                            origin_idx: 2,
-                        },
+                            origin: (2, 0),
+                        }),
                     ],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 3,
-                    }],
+                        origin: (3, 0),
+                    })],
                     outputs: vec![],
                 },
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 5,
-                    }],
-                    outputs: vec![ValType::I32],
+                        origin: (5, 0),
+                    })],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 6,
-                    }],
+                        origin: (6, 0),
+                    })],
                     outputs: vec![],
                 },
             ],
@@ -808,59 +688,59 @@ pub(crate) mod tests {
 
         //nested block and if
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 0,
-                    }],
-                    outputs: vec![ValType::I32],
+                        origin: (0, 0),
+                    })],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 1,
-                    }],
+                        origin: (1, 0),
+                    })],
                     outputs: vec![],
                 },
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 3,
-                    }],
+                        origin: (3, 0),
+                    })],
                     outputs: vec![],
                 },
                 CodillonType {
                     inputs: vec![],
-                    outputs: vec![ValType::I32],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 5,
-                    }],
-                    outputs: vec![ValType::I32],
+                        origin: (5, 0),
+                    })],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 6,
-                    }],
-                    outputs: vec![ValType::I32],
+                        origin: (6, 0),
+                    })],
+                    outputs: vec![Some(ValType::I32)],
                 },
                 CodillonType {
-                    inputs: vec![InputType {
+                    inputs: vec![Some(InputType {
                         instr_type: ValType::I32,
-                        origin_idx: 7,
-                    }],
+                        origin: (7, 0),
+                    })],
                     outputs: vec![],
                 },
             ],
@@ -916,7 +796,7 @@ pub(crate) mod tests {
 
         //empty block
         let output = TypesTable {
-            _table: vec![
+            table: vec![
                 CodillonType {
                     inputs: vec![],
                     outputs: vec![],
@@ -945,6 +825,247 @@ pub(crate) mod tests {
             ],
         };
         assert_eq!(instruction_table.to_types_table(&wasm_bin)?, output);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_types_table_invalid_input() -> Result<()> {
+        // valid example first
+        {
+            let wasm_bin = str_to_binary("(func i32.const 4 i32.const 5 i32.add)".to_string())?;
+            let instruction_table = InstructionTable {
+                table: vec![
+                    CodillonInstruction {
+                        op: Operator::I32Const { value: 4 },
+                        line_idx: 1,
+                    },
+                    CodillonInstruction {
+                        op: Operator::I32Const { value: 5 },
+                        line_idx: 2,
+                    },
+                    CodillonInstruction {
+                        op: Operator::I32Add,
+                        line_idx: 3,
+                    },
+                ],
+            };
+            let expected_output = TypesTable {
+                table: vec![
+                    CodillonType {
+                        inputs: vec![],
+                        outputs: vec![Some(ValType::I32)],
+                    },
+                    CodillonType {
+                        inputs: vec![],
+                        outputs: vec![Some(ValType::I32)],
+                    },
+                    CodillonType {
+                        inputs: vec![
+                            Some(InputType {
+                                instr_type: ValType::I32,
+                                origin: (1, 0),
+                            }),
+                            Some(InputType {
+                                instr_type: ValType::I32,
+                                origin: (2, 0),
+                            }),
+                        ],
+                        outputs: vec![Some(ValType::I32)],
+                    },
+                ],
+            };
+            assert_eq!(
+                instruction_table.to_types_table(&wasm_bin)?,
+                expected_output
+            );
+        }
+
+        // missing one param
+        {
+            let wasm_bin = str_to_binary("(func i32.const 4 i32.add)".to_string())?;
+            let instruction_table = InstructionTable {
+                table: vec![
+                    CodillonInstruction {
+                        op: Operator::I32Const { value: 4 },
+                        line_idx: 1,
+                    },
+                    CodillonInstruction {
+                        op: Operator::I32Add,
+                        line_idx: 3,
+                    },
+                ],
+            };
+            let expected_output = TypesTable {
+                table: vec![
+                    CodillonType {
+                        inputs: vec![],
+                        outputs: vec![Some(ValType::I32)],
+                    },
+                    CodillonType {
+                        inputs: vec![
+                            None,
+                            Some(InputType {
+                                instr_type: ValType::I32,
+                                origin: (1, 0),
+                            }),
+                        ],
+                        outputs: vec![None],
+                    },
+                ],
+            };
+            assert_eq!(
+                instruction_table.to_types_table(&wasm_bin)?,
+                expected_output
+            );
+        }
+
+        // unknown arity
+        {
+            let wasm_bin = str_to_binary("(func call 1)".to_string())?;
+            let instruction_table = InstructionTable {
+                table: vec![CodillonInstruction {
+                    op: Operator::Call { function_index: 1 },
+                    line_idx: 1,
+                }],
+            };
+            let expected_output = TypesTable {
+                table: vec![CodillonType {
+                    inputs: vec![],
+                    outputs: vec![],
+                }],
+            };
+            assert_eq!(
+                instruction_table.to_types_table(&wasm_bin)?,
+                expected_output
+            );
+        }
+
+        // heterogeneous params (valid)
+        {
+            let wasm_bin =
+                str_to_binary("(func f32.const 6 f32.const 2 i32.const 1 select)".to_string())?;
+            let instruction_table = InstructionTable {
+                table: vec![
+                    CodillonInstruction {
+                        op: Operator::F32Const { value: 6.0.into() },
+                        line_idx: 1,
+                    },
+                    CodillonInstruction {
+                        op: Operator::F32Const { value: 2.0.into() },
+                        line_idx: 2,
+                    },
+                    CodillonInstruction {
+                        op: Operator::I32Const { value: 1 },
+                        line_idx: 3,
+                    },
+                    CodillonInstruction {
+                        op: Operator::Select,
+                        line_idx: 4,
+                    },
+                ],
+            };
+            let expected_output = TypesTable {
+                table: vec![
+                    CodillonType {
+                        inputs: vec![],
+                        outputs: vec![Some(ValType::F32)],
+                    },
+                    CodillonType {
+                        inputs: vec![],
+                        outputs: vec![Some(ValType::F32)],
+                    },
+                    CodillonType {
+                        inputs: vec![],
+                        outputs: vec![Some(ValType::I32)],
+                    },
+                    CodillonType {
+                        inputs: vec![
+                            Some(InputType {
+                                instr_type: ValType::F32,
+                                origin: (1, 0),
+                            }),
+                            Some(InputType {
+                                instr_type: ValType::F32,
+                                origin: (2, 0),
+                            }),
+                            Some(InputType {
+                                instr_type: ValType::I32,
+                                origin: (3, 0),
+                            }),
+                        ],
+                        outputs: vec![Some(ValType::F32)],
+                    },
+                ],
+            };
+            assert_eq!(
+                instruction_table.to_types_table(&wasm_bin)?,
+                expected_output
+            );
+        }
+
+        // heterogeneous params (invalid)
+        {
+            let wasm_bin =
+                str_to_binary("(func f32.const 6 i32.const 2 i32.const 1 select)".to_string())?;
+            let instruction_table = InstructionTable {
+                table: vec![
+                    CodillonInstruction {
+                        op: Operator::F32Const { value: 6.0.into() },
+                        line_idx: 1,
+                    },
+                    CodillonInstruction {
+                        op: Operator::I32Const { value: 2 },
+                        line_idx: 2,
+                    },
+                    CodillonInstruction {
+                        op: Operator::I32Const { value: 1 },
+                        line_idx: 3,
+                    },
+                    CodillonInstruction {
+                        op: Operator::Select,
+                        line_idx: 4,
+                    },
+                ],
+            };
+            let expected_output = TypesTable {
+                table: vec![
+                    CodillonType {
+                        inputs: vec![],
+                        outputs: vec![Some(ValType::F32)],
+                    },
+                    CodillonType {
+                        inputs: vec![],
+                        outputs: vec![Some(ValType::I32)],
+                    },
+                    CodillonType {
+                        inputs: vec![],
+                        outputs: vec![Some(ValType::I32)],
+                    },
+                    CodillonType {
+                        inputs: vec![
+                            Some(InputType {
+                                instr_type: ValType::F32,
+                                origin: (1, 0),
+                            }),
+                            Some(InputType {
+                                instr_type: ValType::I32,
+                                origin: (2, 0),
+                            }),
+                            Some(InputType {
+                                instr_type: ValType::I32,
+                                origin: (3, 0),
+                            }),
+                        ],
+                        outputs: vec![None],
+                    },
+                ],
+            };
+            assert_eq!(
+                instruction_table.to_types_table(&wasm_bin)?,
+                expected_output
+            );
+        }
 
         Ok(())
     }

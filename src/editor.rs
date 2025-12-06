@@ -11,11 +11,11 @@ use crate::{
         compare_document_position, get_selection, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
-    syntax::{InstrKind, LineKind, SyntheticWasm, find_frames, fix_syntax},
-    utils::{
-        CodillonInstruction, FmtError, FrameInfo, FrameInfosMut, InstructionTable, LineInfos,
-        LineInfosMut, str_to_binary,
+    syntax::{
+        FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
+        find_frames, fix_syntax,
     },
+    utils::{CodillonInstruction, FmtError, InstructionTable, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -323,11 +323,7 @@ impl Editor {
                     new_lines.push(self.line(i).suffix(Position::begin())?);
                 }
                 // Store new edit
-                let now_ms = web_sys::window()
-                    .expect("Window doesn't")
-                    .performance()
-                    .expect("Performance not available")
-                    .now();
+                let time_ms = now_ms();
                 self.store_edit(
                     Edit {
                         start_line,
@@ -345,9 +341,9 @@ impl Editor {
                             end_line: fixup_line,
                             end_pos: new_cursor_pos,
                         },
-                        time_ms: now_ms,
+                        time_ms,
                     },
-                    now_ms,
+                    time_ms,
                 );
             }
             Err(_) => {
@@ -623,31 +619,25 @@ impl Editor {
     }
 
     fn execute(&self, binary: &[u8]) {
-        async fn run_binary(binary: &[u8]) -> Result<String, JsValue> {
+        async fn run_binary(binary: &[u8]) -> Result<String> {
             use js_sys::{Function, Reflect};
             // Build import objects for the instrumented module.
-            let imports = make_imports()?;
+            let imports = crate::debug::make_imports().fmt_err()?;
             let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
-            let js_value = wasm_bindgen_futures::JsFuture::from(promise).await?;
-            let instance = Reflect::get(&js_value, &JsValue::from_str("instance"))
-                .map_err(|_| "failed to get instance")?;
-            let exports = Reflect::get(&instance, &JsValue::from_str("exports"))
-                .map_err(|_| "failed to get exports")?;
-            let main = Reflect::get(&exports, &JsValue::from_str("main"))
-                .map_err(|_| "failed to get main function")?;
-            let main =
-                JsCast::dyn_ref::<Function>(&main).ok_or("main is not an exported function")?;
-            let res = main.apply(&JsValue::null(), &js_sys::Array::new())?;
-            let string = match js_sys::JSON::stringify(&res) {
-                Ok(jsstr) => jsstr.as_string().unwrap_or_else(|| format!("{:?}", res)),
-                Err(_) => res.as_string().unwrap_or_else(|| format!("{:?}", res)),
-            };
-
-            Ok(string)
+            let js_value = wasm_bindgen_futures::JsFuture::from(promise)
+                .await
+                .fmt_err()?;
+            let instance = Reflect::get(&js_value, &JsValue::from_str("instance")).fmt_err()?;
+            let exports = Reflect::get(&instance, &JsValue::from_str("exports")).fmt_err()?;
+            let main = Reflect::get(&exports, &JsValue::from_str("main")).fmt_err()?;
+            let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
+                .context("main is not an exported function")?;
+            let res = main.apply(&JsValue::null(), &js_sys::Array::new());
+            res.map(|x| format!("{:?}", x)).fmt_err()
         }
 
         let binary = binary.to_vec();
-        let editor_handle = Editor(Rc::clone(&self.0));
+        let mut editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
             match run_binary(&binary).await {
                 Ok(_) => {
@@ -668,7 +658,6 @@ impl Editor {
                     };
                     editor_handle.build_program_state(0, step);
                     editor_handle.update_debug_panel(None);
-                    web_sys::console::log_1(&"Ran successfully".into());
                 }
                 Err(e) => {
                     web_sys::console::log_1(&e);
