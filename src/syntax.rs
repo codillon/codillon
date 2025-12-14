@@ -273,10 +273,10 @@ impl SyntheticWasm {
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum SyntaxState {
     Initial,
-    AfterModuleFieldLParen,
+    AfterFuncLParen,
     AfterFuncHeader,
     AfterInstruction,
-    AfterModuleFieldRParen,
+    AfterFuncRParen,
 }
 
 #[derive(Default, Copy, Clone, PartialEq, Debug)]
@@ -372,11 +372,14 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 let original_state = state;
                 for part in parts {
                     match (state, part) {
-                        (SyntaxState::Initial, ModulePart::LParen) => {
-                            state = SyntaxState::AfterModuleFieldLParen;
+                        (
+                            SyntaxState::Initial | SyntaxState::AfterFuncRParen,
+                            ModulePart::LParen,
+                        ) => {
+                            state = SyntaxState::AfterFuncLParen;
                         }
                         (
-                            SyntaxState::AfterModuleFieldLParen | SyntaxState::AfterFuncHeader,
+                            SyntaxState::AfterFuncLParen | SyntaxState::AfterFuncHeader,
                             ModulePart::FuncKeyword
                             | ModulePart::Id
                             | ModulePart::Export
@@ -396,7 +399,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             SyntaxState::AfterFuncHeader | SyntaxState::AfterInstruction,
                             ModulePart::RParen,
                         ) => {
-                            state = SyntaxState::AfterModuleFieldRParen;
+                            state = SyntaxState::AfterFuncRParen;
                             func_field_states.reset();
                             close_outstanding_frames = !frame_stack.is_empty();
                         }
@@ -468,14 +471,16 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 if lines.info(line_no).is_active()
                     && matches!(
                         state,
-                        SyntaxState::Initial | SyntaxState::AfterModuleFieldLParen
+                        SyntaxState::Initial
+                            | SyntaxState::AfterFuncRParen
+                            | SyntaxState::AfterFuncLParen
                     )
                 {
                     let extra = SyntheticWasm {
                         module_field_syntax: Some(
                             match state {
-                                SyntaxState::Initial => "(func",
-                                SyntaxState::AfterModuleFieldLParen => "func",
+                                SyntaxState::Initial | SyntaxState::AfterFuncRParen => "(func",
+                                SyntaxState::AfterFuncLParen => "func",
                                 _ => unreachable!(),
                             }
                             .to_string(),
@@ -498,23 +503,27 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         return;
     }
 
-    // if only line is a "(", inactivate everything
-    if state == SyntaxState::AfterModuleFieldLParen {
+    // If lines end with a "(", inactivate the last "("
+    if state == SyntaxState::AfterFuncLParen {
         assert!(frame_stack.is_empty());
 
-        for line_no in 0..lines.len() {
+        for line_no in (0..lines.len()).rev() {
             let line_kind = lines.info(line_no).kind.stripped_clone();
             match line_kind {
-                LineKind::Instr(_) | LineKind::Other(_) => {
-                    lines.set_active_status(line_no, Inactive(""))
+                LineKind::Other(parts) => {
+                    if parts.len() == 1 && parts[0] == ModulePart::LParen {
+                        lines.set_active_status(line_no, Inactive(""));
+                        break;
+                    }
                 }
-                LineKind::Empty | LineKind::Malformed(_) => {}
+                _ => {}
             }
         }
 
         return;
     }
 
+    // Function synthetic end
     if !frame_stack.is_empty()
         || matches!(
             state,
