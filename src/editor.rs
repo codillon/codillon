@@ -14,7 +14,7 @@ use crate::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         find_frames, fix_syntax,
     },
-    utils::{CodillonInstruction, FmtError, InstructionTable, str_to_binary},
+    utils::{CodillonInstruction, FmtError, FunctionTable, InstructionTable, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -504,19 +504,21 @@ impl Editor {
             .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
         let wasm_bin = str_to_binary(text)?;
 
-        //create Instruction Table
-        let instruction_table = self.to_instruction_table(&wasm_bin)?;
+        //create Function Table
+        let function_table = self.to_function_table(&wasm_bin)?;
 
         // annotation and instrumentation
         // For now, don't return Err even if `to_types_table` fails.
         // Otherwise, keystrokes that create well-formed-but-invalid
         // modules will be rejected and cause the "shake" animation.
-        let _types_table = instruction_table.to_types_table(&wasm_bin);
-        if let Err(e) = _types_table {
-            log_1(&format!("Generating types table failed: {e}").into());
-            self.update_debug_panel(Some(e.to_string()));
-        } else if let Ok(types) = _types_table {
-            self.execute(&instruction_table.build_executable_binary(&types)?);
+        if let Some(instruction_table) = function_table.table.get(0) {
+            let _types_table = instruction_table.to_types_table(&wasm_bin);
+            if let Err(e) = _types_table {
+                log_1(&format!("Generating types table failed: {e}").into());
+                self.update_debug_panel(Some(e.to_string()));
+            } else if let Ok(types) = _types_table {
+                self.execute(&instruction_table.build_executable_binary(&types)?);
+            }
         }
 
         // find frames in the function
@@ -531,40 +533,55 @@ impl Editor {
         Ok(())
     }
 
-    /// TODO: support multi-function by returning a "Function Table" (a vector of instruction tables)
-    /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_instruction_table<'a>(&self, wasm_bin: &'a [u8]) -> Result<InstructionTable<'a>> {
+    fn to_function_table<'a>(&self, wasm_bin: &'a [u8]) -> Result<FunctionTable<'a>> {
         let parser = Parser::new(0);
-        let mut ops = Vec::new();
+        let mut func_ops = Vec::new();
 
+        // group operators by function
         for payload in parser.parse_all(wasm_bin) {
             if let Payload::CodeSectionEntry(body) = payload? {
+                let mut ops = Vec::new();
                 for op in body.get_operators_reader()?.into_iter() {
                     ops.push(op?);
                 }
+                // pop the function's end operator off the Vec<Operators>
+                ops.pop();
+
+                func_ops.push(ops);
             }
         }
 
-        //pop the function's end operator off the Vec<Operators>
-        ops.pop();
+        // build instruction table for each function and match each operator with its idx in the editor
+        let mut function_table = Vec::new();
+        let mut ops_iter = func_ops.clone().into_iter().flatten();
+        let mut line_idx = 0;
 
-        //match each operator with its idx in the editor
-        let mut instruction_table = Vec::new();
-        let mut ops_iter = ops.into_iter();
+        for ops in func_ops {
+            let mut instruction_table = Vec::new();
+            let mut remain_op_num = ops.len();
 
-        for line_idx in 0..self.len() {
-            for _ in 0..self.line(line_idx).num_ops() {
-                let op = ops_iter.next().context("not enough operators")?;
-                instruction_table.push(CodillonInstruction { op, line_idx });
+            // collect all ops in current function
+            while remain_op_num > 0 {
+                let line_op_num = self.line(line_idx).num_ops();
+                for _ in 0..line_op_num {
+                    let op = ops_iter.next().context("not enough operators")?;
+                    instruction_table.push(CodillonInstruction { op, line_idx });
+                }
+                line_idx += 1;
+                remain_op_num -= line_op_num;
             }
+
+            function_table.push(InstructionTable {
+                table: instruction_table,
+            });
         }
 
         if ops_iter.next().is_some() {
             bail!("not enough instructions");
         }
 
-        Ok(InstructionTable {
-            table: instruction_table,
+        Ok(FunctionTable {
+            table: function_table,
         })
     }
 
