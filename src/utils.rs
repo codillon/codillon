@@ -65,8 +65,8 @@ pub struct InstructionTable<'a> {
     pub table: Vec<CodillonInstruction<'a>>,
 }
 
-pub struct LocalsTable {
-    pub locals: Vec<(u32, ValType)>,
+pub struct FunctionTable<'a> {
+    pub table: Vec<InstructionTable<'a>>,
 }
 
 impl<'a> InstructionTable<'a> {
@@ -90,14 +90,16 @@ impl<'a> InstructionTable<'a> {
                 let mut func_validator: wasmparser::FuncValidator<wasmparser::ValidatorResources> =
                     func.into_validator(wasmparser::FuncValidatorAllocations::default());
                 let mut idx_stack: Vec<(usize, usize)> = Vec::new(); // simulated operand stack to track where each operand is pushed
-                let mut reader = body.get_operators_reader()?;
+                let mut _reader = body.get_operators_reader()?; // TODO: remove "_" when adding assertion back
                 idx_stack.resize(
                     func_validator.operand_stack_height() as usize,
                     (0usize, 0usize),
                 );
                 for instr in &self.table {
                     let op = &instr.op;
-                    debug_assert_eq!(op, &reader.read()?); // ensure wasm_bin matches the instruction table
+                    // TODO: support multi-function and add assertion back. Either fix to_types_table to run on FunctionTable
+                    // or assert on the section of only one function (not the whole reader.read())
+                    //debug_assert_eq!(op, &reader.read()?); // ensure wasm_bin matches the instruction table
                     let (pop_count, push_count) = op
                         .operator_arity(&func_validator.visitor(dummy_offset))
                         .unwrap_or((0, 0));
