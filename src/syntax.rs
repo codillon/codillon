@@ -509,14 +509,12 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         for line_no in (0..lines.len()).rev() {
             let line_kind = lines.info(line_no).kind.stripped_clone();
-            match line_kind {
-                LineKind::Other(parts) => {
-                    if parts.len() == 1 && parts[0] == ModulePart::LParen {
-                        lines.set_active_status(line_no, Inactive(""));
-                        break;
-                    }
-                }
-                _ => {}
+            if let LineKind::Other(parts) = line_kind
+                && parts.len() == 1
+                && parts[0] == ModulePart::LParen
+            {
+                lines.set_active_status(line_no, Inactive(""));
+                break;
             }
         }
 
