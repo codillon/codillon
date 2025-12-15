@@ -511,7 +511,7 @@ impl Editor {
         // For now, don't return Err even if `to_types_table` fails.
         // Otherwise, keystrokes that create well-formed-but-invalid
         // modules will be rejected and cause the "shake" animation.
-        if let Some(instruction_table) = function_table.table.get(0) {
+        if let Some(instruction_table) = function_table.table.first() {
             let _types_table = instruction_table.to_types_table(&wasm_bin);
             if let Err(e) = _types_table {
                 log_1(&format!("Generating types table failed: {e}").into());
