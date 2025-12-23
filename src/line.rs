@@ -15,7 +15,8 @@ use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
 
 type DomBr = DomStruct<(), HtmlBrElement>;
 type TextSpan = DomStruct<(DomText, ()), HtmlSpanElement>;
-type LinePara = DomStruct<(TextSpan, (TextSpan, (DomBr, ()))), HtmlDivElement>;
+type EmptySpan = DomStruct<(), HtmlSpanElement>;
+type LinePara = DomStruct<(TextSpan, (TextSpan, (EmptySpan, (DomBr, ())))), HtmlDivElement>;
 
 #[derive(Default, Copy, Clone, PartialEq, Debug)]
 pub enum Activity {
@@ -36,6 +37,7 @@ pub struct LineInfo {
     pub active: Activity,
     pub indent: Option<u16>,
     pub synthetic_before: SyntheticWasm,
+    pub invalid: Option<String>,
 }
 
 impl LineInfo {
@@ -69,13 +71,11 @@ impl LineInfo {
     pub fn paren_depths(&self) -> (i32, i32) {
         // indent change before first displayed char, other indent changes
         let mut initial = 0;
-        if let Some(s) = &self.synthetic_before.module_field_syntax {
-            for ch in s.chars() {
-                match ch {
-                    '(' => initial += 1,
-                    ')' => initial -= 1,
-                    _ => {}
-                }
+        for part in &self.synthetic_before.module_field_syntax {
+            match part {
+                ModulePart::LParen => initial += 1,
+                ModulePart::RParen => initial -= 1,
+                _ => {}
             }
         }
 
@@ -156,6 +156,8 @@ impl Component for CodeLine {
         } else if let Activity::Inactive(reason) = &self.info.active
             && !reason.is_empty()
         {
+            assert_eq!(comment, Some(reason.to_string()).as_ref());
+        } else if let Some(reason) = &self.info.invalid {
             assert_eq!(comment, Some(reason.to_string()).as_ref());
         } else {
             assert_eq!(comment, None);
@@ -257,6 +259,11 @@ impl CodeLine {
                 1 => self.end_position(),
                 _ => bail!("unexpected comment span position {offset}"),
             });
+        } else if node.is_same_node(&self.contents.get().1.1.0) {
+            return Ok(match offset {
+                0 => self.end_position(),
+                _ => bail!("unexpected debug span position {offset}"),
+            });
         }
 
         bail!("position in unknown node");
@@ -265,6 +272,8 @@ impl CodeLine {
     fn class(&self) -> String {
         let prefix = if !self.info.is_active() {
             "line malformed-line"
+        } else if self.info.invalid.is_some() {
+            "line instr-line invalid-line"
         } else {
             match self.info.kind {
                 LineKind::Malformed(_) => "line malformed-line",
@@ -323,7 +332,10 @@ impl CodeLine {
                     TextSpan::new((DomText::new(contents), ()), factory.span()),
                     (
                         TextSpan::new((DomText::default(), ()), factory.span()),
-                        (DomBr::new((), factory.br()), ()),
+                        (
+                            DomStruct::new((), factory.span()),
+                            (DomBr::new((), factory.br()), ()),
+                        ),
                     ),
                 ),
                 factory.div(),
@@ -334,6 +346,7 @@ impl CodeLine {
 
         ret.contents.get_mut().0.set_attribute("class", "instr");
         ret.contents.get_mut().1.0.set_attribute("class", "comment");
+        ret.contents.get_mut().1.1.0.set_attribute("class", "debug");
         ret.conform_to_text().unwrap();
 
         ret
@@ -351,6 +364,12 @@ impl CodeLine {
         } else if let Activity::Inactive(reason) = &self.info.active
             && !reason.is_empty()
         {
+            self.contents
+                .get_mut()
+                .1
+                .0
+                .set_attribute("data-commentary", reason);
+        } else if let Some(reason) = &self.info.invalid {
             self.contents
                 .get_mut()
                 .1
@@ -409,11 +428,11 @@ impl CodeLine {
     }
 
     pub fn set_synthetic_before(&mut self, synth: SyntheticWasm) {
-        if let Some(extra) = &synth.module_field_syntax {
+        if !synth.module_field_syntax.is_empty() {
             self.contents
                 .get_mut()
                 .0
-                .set_attribute("data-synthetic-before", extra);
+                .set_attribute("data-synthetic-before", &synth.render_module_field_syntax());
         } else {
             self.contents
                 .get_mut()
@@ -532,15 +551,29 @@ impl CodeLine {
         self.info.indent = None;
     }
 
-    pub fn set_debug_annotation(&mut self, value: Option<&str>) {
+    pub fn set_invalid(&mut self, reason: Option<String>) {
+        self.info.invalid = reason;
+        self.conform();
+    }
+
+    pub fn set_type_annotation(&mut self, value: Option<&String>) {
+        if let Some(text) = value {
+            self.contents.get_mut().0.set_attribute("data-debug", text);
+        } else {
+            self.contents.get_mut().0.remove_attribute("data-debug");
+        }
+    }
+
+    pub fn set_debug_annotation(&mut self, value: Option<&String>) {
         if let Some(text) = value {
             self.contents
                 .get_mut()
                 .1
+                .1
                 .0
                 .set_attribute("data-debug", text);
         } else {
-            self.contents.get_mut().1.0.remove_attribute("data-debug");
+            self.contents.get_mut().1.1.0.remove_attribute("data-debug");
         }
     }
 
