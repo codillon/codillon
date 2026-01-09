@@ -199,46 +199,47 @@ span.comment[data-debug]::after {
 .step-slider {
     appearance: none;
     background: transparent;
-    outline: none;
     width: 100%;
+    --slider-thumb-size: 20px;
+    --slider-track-height: 10px;
+    --slider-track-bg: linen;
+    --slider-track-border: 1px solid burlywood;
+    --slider-thumb-bg: darkred;
+    --slider-thumb-border: 2px solid white;
 }
 
 .step-slider::-webkit-slider-runnable-track {
-    height: 10px;
+    height: var(--slider-track-height);
     border-radius: 10px;
-    background: linen;
-    border: 1px solid burlywood;
+    background: var(--slider-track-bg);
+    border: var(--slider-track-border);
+}
+
+.step-slider::-moz-range-track {
+    height: var(--slider-track-height);
+    border-radius: 10px;
+    background: var(--slider-track-bg);
+    border: var(--slider-track-border);
 }
 
 .step-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
-    width: 20px;
-    height: 20px;
+    width: var(--slider-thumb-size);
+    height: var(--slider-thumb-size);
     border-radius: 50%;
-    background: darkred;
-    border: 2px solid white;
+    background: var(--slider-thumb-bg);
+    border: var(--slider-thumb-border);
     cursor: pointer;
-    margin-top: -6px;
+    margin-top: calc((var(--slider-track-height) - var(--slider-thumb-size)) / 2);
+    box-shadow: none;
 }
 
-.step-slider::-moz-slider-thumb {
-    -moz-appearance: none;
-    width: 20px;
-    height: 20px;
+.step-slider::-moz-range-thumb {
+    width: var(--slider-thumb-size);
+    height: var(--slider-thumb-size);
     border-radius: 50%;
-    background: darkred;
-    border: 2px solid white;
+    background: var(--slider-thumb-bg);
+    border: var(--slider-thumb-border);
     cursor: pointer;
-    margin-top: -6px;
-}
-
-.step-slider::-moz-slider-runnable-track {
-    height: 10px;
-    border-radius: 10px;
-    background: linen;
-    border: 1px solid burlywood;
-}
-
-[highlight] {
-    text-decoration: underline;
+    box-shadow: none;
 }
