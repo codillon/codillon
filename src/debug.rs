@@ -146,7 +146,6 @@ pub fn make_imports() -> Result<Object, JsValue> {
             cur_state.borrow_mut().memory_change =
                 Some((addr as u32, WebAssemblyTypes::F32(value)));
         });
-        // Return [addr, value]
         let arr = js_sys::Array::new();
         arr.push(&JsValue::from_f64(addr as f64));
         arr.push(&JsValue::from_f64(value as f64));
@@ -159,6 +158,42 @@ pub fn make_imports() -> Result<Object, JsValue> {
     )
     .ok();
     set_memory_f32.forget();
+
+    let set_memory_i64 = Closure::wrap(Box::new(move |addr: i32, value: i64| {
+        STATE.with(|cur_state| {
+            cur_state.borrow_mut().memory_change =
+                Some((addr as u32, WebAssemblyTypes::I64(value)));
+        });
+        let arr = js_sys::Array::new();
+        arr.push(&JsValue::from_f64(addr as f64));
+        arr.push(&JsValue::from_f64(value as f64));
+        arr
+    }) as Box<dyn Fn(i32, i64) -> js_sys::Array>);
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("set_memory_i64"),
+        set_memory_i64.as_ref().unchecked_ref(),
+    )
+    .ok();
+    set_memory_i64.forget();
+
+    let set_memory_f64 = Closure::wrap(Box::new(move |addr: i32, value: f64| {
+        STATE.with(|cur_state| {
+            cur_state.borrow_mut().memory_change =
+                Some((addr as u32, WebAssemblyTypes::F64(value)));
+        });
+        let arr = js_sys::Array::new();
+        arr.push(&JsValue::from_f64(addr as f64));
+        arr.push(&JsValue::from_f64(value));
+        arr
+    }) as Box<dyn Fn(i32, f64) -> js_sys::Array>);
+    Reflect::set(
+        &debug_numbers,
+        &JsValue::from_str("set_memory_f64"),
+        set_memory_f64.as_ref().unchecked_ref(),
+    )
+    .ok();
+    set_memory_f64.forget();
 
     // Store i32.const expressions
     let push_i32 = Closure::wrap(Box::new(move |value: i32| {

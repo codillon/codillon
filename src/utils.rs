@@ -16,6 +16,8 @@ enum InstrumentationFuncs {
     SetGlobalI32(u32),
     SetMemoryI32,
     SetMemoryF32,
+    SetMemoryI64,
+    SetMemoryF64,
     PushI32,
     PushF32,
     PushI64,
@@ -30,6 +32,8 @@ enum InstrumentImports {
     SetGlobalI32,
     SetMemoryI32,
     SetMemoryF32,
+    SetMemoryI64,
+    SetMemoryF64,
     PushI32,
     PushF32,
     PushI64,
@@ -43,6 +47,8 @@ impl InstrumentImports {
         ("set_global_i32", 5),
         ("set_memory_i32", 6),
         ("set_memory_f32", 7),
+        ("set_memory_i64", 8),
+        ("set_memory_f64", 9),
         ("push_i32", 1),
         ("push_f32", 2),
         ("push_i64", 3),
@@ -168,6 +174,10 @@ impl<'a> InstructionTable<'a> {
                 InstrumentationFuncs::SetMemoryI32
             }
             F32Store { .. } => InstrumentationFuncs::SetMemoryF32,
+            I64Store { .. } | I64Store8 { .. } | I64Store16 { .. } => {
+                InstrumentationFuncs::SetMemoryI64
+            }
+            F64Store { .. } => InstrumentationFuncs::SetMemoryF64,
             // Match based on outputs
             _ => match op_type.outputs.as_slice() {
                 [Some(wasmparser::ValType::I32)] => InstrumentationFuncs::PushI32,
@@ -221,6 +231,16 @@ impl<'a> InstructionTable<'a> {
             vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::F32],
             vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::F32],
         );
+        // 8: (i32, i64) -> (i32, i64)
+        types.ty().function(
+            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I64],
+            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I64],
+        );
+        // 9: (i32, f64) -> (i32, f64)
+        types.ty().function(
+            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::F64],
+            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::F64],
+        );
         types
     }
 
@@ -244,6 +264,7 @@ impl<'a> InstructionTable<'a> {
             ValType::F32 => wasm_encoder::ValType::F32,
             ValType::F64 => wasm_encoder::ValType::F64,
             ValType::V128 => wasm_encoder::ValType::V128,
+            // Reference types not yet supported
             _ => panic!("unsupported valtype"),
         }
     }
@@ -310,6 +331,16 @@ impl<'a> InstructionTable<'a> {
                 InstrumentationFuncs::SetMemoryF32 => {
                     f.instruction(&EncoderInstruction::Call(
                         InstrumentImports::SetMemoryF32 as u32,
+                    ));
+                }
+                InstrumentationFuncs::SetMemoryI64 => {
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetMemoryI64 as u32,
+                    ));
+                }
+                InstrumentationFuncs::SetMemoryF64 => {
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetMemoryF64 as u32,
                     ));
                 }
                 _ => {}
