@@ -1,4 +1,13 @@
 // Debug manager for time-travel instrumentation
+// Currently support:
+// - all normal scalar value ops: i32, i64, f32, f64 (pushes from instructions are recorded)
+// - memory store ops: i32, i64, f32, f64 (stores record addr + value)
+// - local/global set ops for i32 (local/global i64, f32, f64 to be added)
+// Currently do not support:
+// - other memory operations
+// - all SIMD/vector operations
+// - all reference types operations
+// - call tracking (dynamic function types)
 
 use js_sys::{Array, Object, Reflect};
 use std::cell::RefCell;
@@ -6,7 +15,7 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 use web_sys::console::log_1;
 
-const MAX_STEP_COUNT: usize = 1000;
+const MAX_STEP_COUNT: usize = 10_000;
 
 // Debug state stored in Wasm memory
 thread_local! {
