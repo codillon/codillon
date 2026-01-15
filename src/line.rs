@@ -532,15 +532,23 @@ impl CodeLine {
         self.info.indent = None;
     }
 
-    pub fn set_debug_annotation(&mut self, value: Option<&[String]>) {
+    pub fn set_debug_annotation(&mut self, value: Option<&str>) {
         if let Some(text) = value {
             self.contents
                 .get_mut()
                 .1
                 .0
-                .set_attribute("data-debug", &text.join(" "));
+                .set_attribute("data-debug", text);
         } else {
             self.contents.get_mut().1.0.remove_attribute("data-debug");
+        }
+    }
+
+    pub fn set_highlight(&mut self, add_highlight: bool) {
+        if add_highlight {
+            self.contents.get_mut().0.set_attribute("highlight", "");
+        } else {
+            self.contents.get_mut().0.remove_attribute("highlight");
         }
     }
 }
