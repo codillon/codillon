@@ -603,15 +603,8 @@ impl Editor {
         for payload in parser.parse_all(wasm_bin) {
             match payload? {
                 Payload::TypeSection(reader) => {
-                    for type_val in reader.into_iter_err_on_gc_types() {
-                        match type_val {
-                            Ok(ft) => {
-                                func_types.push((ft.params().to_vec(), ft.results().to_vec()));
-                            }
-                            Err(_) => {
-                                log_1(&format!("error here").into());
-                            }
-                        }
+                    for ft in reader.into_iter_err_on_gc_types().flatten() {
+                        func_types.push((ft.params().to_vec(), ft.results().to_vec()));
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
@@ -628,7 +621,6 @@ impl Editor {
                     }
                     // pop the function's end operator off the Vec<Operators>
                     ops.pop();
-
                     func_ops.push(ops);
                 }
                 _ => {}

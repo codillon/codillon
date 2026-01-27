@@ -370,7 +370,7 @@ impl<'a> InstructionTable<'a> {
         let first_func = function_table
             .table
             .first()
-            .expect(&"first function doesn't exist");
+            .expect("first function doesn't exist");
         // Encode the code section.
         let mut codes = CodeSection::new();
         let mut f = wasm_encoder::Function::new(

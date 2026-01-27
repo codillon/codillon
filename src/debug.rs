@@ -280,7 +280,7 @@ fn create_closure_global_operations(debug_numbers: &Object) {
         });
     }) as Box<dyn Fn(i32, i32)>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_global_i32"),
         set_global_i32.as_ref().unchecked_ref(),
     )
@@ -294,7 +294,7 @@ fn create_closure_global_operations(debug_numbers: &Object) {
         });
     }) as Box<dyn Fn(i32, f32)>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_global_f32"),
         set_global_f32.as_ref().unchecked_ref(),
     )
@@ -308,7 +308,7 @@ fn create_closure_global_operations(debug_numbers: &Object) {
         });
     }) as Box<dyn Fn(i32, i64)>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_global_i64"),
         set_global_i64.as_ref().unchecked_ref(),
     )
@@ -322,7 +322,7 @@ fn create_closure_global_operations(debug_numbers: &Object) {
         });
     }) as Box<dyn Fn(i32, f64)>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_global_f64"),
         set_global_f64.as_ref().unchecked_ref(),
     )
@@ -337,7 +337,7 @@ fn create_closure_local_operations(debug_numbers: &Object) {
         });
     }) as Box<dyn Fn(i32, i32)>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_local_i32"),
         set_local_i32.as_ref().unchecked_ref(),
     )
@@ -350,7 +350,7 @@ fn create_closure_local_operations(debug_numbers: &Object) {
         });
     }) as Box<dyn Fn(i32, f32)>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_local_f32"),
         set_local_f32.as_ref().unchecked_ref(),
     )
@@ -363,7 +363,7 @@ fn create_closure_local_operations(debug_numbers: &Object) {
         });
     }) as Box<dyn Fn(i32, i64)>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_local_i64"),
         set_local_i64.as_ref().unchecked_ref(),
     )
@@ -376,7 +376,7 @@ fn create_closure_local_operations(debug_numbers: &Object) {
         });
     }) as Box<dyn Fn(i32, f64)>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_local_f64"),
         set_local_f64.as_ref().unchecked_ref(),
     )
