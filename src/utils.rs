@@ -1,7 +1,7 @@
 use anyhow::Result;
 use wasm_encoder::{
     CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
-    TypeSection,
+    TypeSection, ValType as EncoderValType,
     reencode::{Reencode, RoundtripReencoder},
 };
 use wasm_tools::parse_binary_wasm;
@@ -13,7 +13,13 @@ use wast::{
 
 enum InstrumentationFuncs {
     SetLocalI32(u32),
+    SetLocalF32(u32),
+    SetLocalI64(u32),
+    SetLocalF64(u32),
     SetGlobalI32(u32),
+    SetGlobalF32(u32),
+    SetGlobalI64(u32),
+    SetGlobalF64(u32),
     SetMemoryI32,
     SetMemoryF32,
     SetMemoryI64,
@@ -29,7 +35,13 @@ enum InstrumentImports {
     Step,
     PopI,
     SetLocalI32,
+    SetLocalF32,
+    SetLocalI64,
+    SetLocalF64,
     SetGlobalI32,
+    SetGlobalF32,
+    SetGlobalI64,
+    SetGlobalF64,
     SetMemoryI32,
     SetMemoryF32,
     SetMemoryI64,
@@ -44,7 +56,13 @@ impl InstrumentImports {
         ("step", 1),
         ("pop_i", 0),
         ("set_local_i32", 5),
+        ("set_local_f32", 10),
+        ("set_local_i64", 11),
+        ("set_local_f64", 12),
         ("set_global_i32", 5),
+        ("set_global_f32", 10),
+        ("set_global_i64", 11),
+        ("set_global_f64", 12),
         ("set_memory_i32", 6),
         ("set_memory_f32", 7),
         ("set_memory_i64", 8),
@@ -53,6 +71,46 @@ impl InstrumentImports {
         ("push_f32", 2),
         ("push_i64", 3),
         ("push_f64", 4),
+    ];
+    pub const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
+        // 0: (i32) -> ()
+        (&[EncoderValType::I32], &[]),
+        // 1: (i32) -> (i32)
+        (&[EncoderValType::I32], &[EncoderValType::I32]),
+        // 2: (f32) -> (f32)
+        (&[EncoderValType::F32], &[EncoderValType::F32]),
+        // 3: (i64) -> (i64)
+        (&[EncoderValType::I64], &[EncoderValType::I64]),
+        // 4: (f64) -> (f64)
+        (&[EncoderValType::F64], &[EncoderValType::F64]),
+        // 5: (i32, i32) -> ()
+        (&[EncoderValType::I32, EncoderValType::I32], &[]),
+        // 6: (i32, i32) -> (i32, i32)
+        (
+            &[EncoderValType::I32, EncoderValType::I32],
+            &[EncoderValType::I32, EncoderValType::I32],
+        ),
+        // 7: (i32, f32) -> (i32, f32)
+        (
+            &[EncoderValType::I32, EncoderValType::F32],
+            &[EncoderValType::I32, EncoderValType::F32],
+        ),
+        // 8: (i32, i64) -> (i32, i64)
+        (
+            &[EncoderValType::I32, EncoderValType::I64],
+            &[EncoderValType::I32, EncoderValType::I64],
+        ),
+        // 9: (i32, f64) -> (i32, f64)
+        (
+            &[EncoderValType::I32, EncoderValType::F64],
+            &[EncoderValType::I32, EncoderValType::F64],
+        ),
+        // 10: (i32, f32) -> () -- for set_local_f32 / set_global_f32
+        (&[EncoderValType::I32, EncoderValType::F32], &[]),
+        // 11: (i32, i64) -> () -- for set_local_i64 / set_global_i64
+        (&[EncoderValType::I32, EncoderValType::I64], &[]),
+        // 12: (i32, f64) -> () -- for set_local_f64 / set_global_f64
+        (&[EncoderValType::I32, EncoderValType::F64], &[]),
     ];
 }
 
@@ -65,8 +123,15 @@ pub struct InstructionTable<'a> {
     pub table: Vec<CodillonInstruction<'a>>,
 }
 
+pub struct FunctionInfo<'a> {
+    pub params: Vec<ValType>,
+    pub results: Vec<ValType>,
+    pub local: Vec<(u32, ValType)>,
+    pub body: InstructionTable<'a>,
+}
+
 pub struct FunctionTable<'a> {
-    pub table: Vec<InstructionTable<'a>>,
+    pub table: Vec<FunctionInfo<'a>>,
 }
 
 impl<'a> InstructionTable<'a> {
@@ -158,11 +223,27 @@ impl<'a> InstructionTable<'a> {
         use wasmparser::Operator::*;
         match operation {
             // Special Functions
+            Call { function_index } => {
+                web_sys::console::log_1(&format!("{function_index}").into());
+                InstrumentationFuncs::SetMemoryI32
+            }
             LocalSet { local_index } | LocalTee { local_index } => match op_type.inputs.first() {
                 Some(Some(InputType {
                     instr_type: ValType::I32,
                     ..
                 })) => InstrumentationFuncs::SetLocalI32(*local_index),
+                Some(Some(InputType {
+                    instr_type: ValType::F32,
+                    ..
+                })) => InstrumentationFuncs::SetLocalF32(*local_index),
+                Some(Some(InputType {
+                    instr_type: ValType::I64,
+                    ..
+                })) => InstrumentationFuncs::SetLocalI64(*local_index),
+                Some(Some(InputType {
+                    instr_type: ValType::F64,
+                    ..
+                })) => InstrumentationFuncs::SetLocalF64(*local_index),
                 _ => InstrumentationFuncs::Other,
             },
             GlobalSet { global_index } => match op_type.inputs.first() {
@@ -170,6 +251,18 @@ impl<'a> InstructionTable<'a> {
                     instr_type: ValType::I32,
                     ..
                 })) => InstrumentationFuncs::SetGlobalI32(*global_index),
+                Some(Some(InputType {
+                    instr_type: ValType::F32,
+                    ..
+                })) => InstrumentationFuncs::SetGlobalF32(*global_index),
+                Some(Some(InputType {
+                    instr_type: ValType::I64,
+                    ..
+                })) => InstrumentationFuncs::SetGlobalI64(*global_index),
+                Some(Some(InputType {
+                    instr_type: ValType::F64,
+                    ..
+                })) => InstrumentationFuncs::SetGlobalF64(*global_index),
                 _ => InstrumentationFuncs::Other,
             },
             I32Store { .. } | I32Store8 { .. } | I32Store16 { .. } => {
@@ -182,67 +275,36 @@ impl<'a> InstructionTable<'a> {
             F64Store { .. } => InstrumentationFuncs::SetMemoryF64,
             // Match based on outputs
             _ => match op_type.outputs.as_slice() {
-                [Some(wasmparser::ValType::I32)] => InstrumentationFuncs::PushI32,
-                [Some(wasmparser::ValType::I64)] => InstrumentationFuncs::PushI64,
-                [Some(wasmparser::ValType::F32)] => InstrumentationFuncs::PushF32,
-                [Some(wasmparser::ValType::F64)] => InstrumentationFuncs::PushF64,
+                [Some(ValType::I32)] => InstrumentationFuncs::PushI32,
+                [Some(ValType::I64)] => InstrumentationFuncs::PushI64,
+                [Some(ValType::F32)] => InstrumentationFuncs::PushF32,
+                [Some(ValType::F64)] => InstrumentationFuncs::PushF64,
                 _ => InstrumentationFuncs::Other,
             },
         }
     }
 
-    fn instr_func_types(&self) -> TypeSection {
+    fn instr_func_types(&self, function_table: &FunctionTable) -> TypeSection {
         // Encode the type section.
         let mut types = TypeSection::new();
-        // 0: (i32) -> ()
-        types
-            .ty()
-            .function(vec![wasm_encoder::ValType::I32], vec![]);
-        // 1: (i32) -> (i32)
-        types.ty().function(
-            vec![wasm_encoder::ValType::I32],
-            vec![wasm_encoder::ValType::I32],
-        );
-        // 2: (f32) -> (f32)
-        types.ty().function(
-            vec![wasm_encoder::ValType::F32],
-            vec![wasm_encoder::ValType::F32],
-        );
-        // 3: (i64) -> (i64)
-        types.ty().function(
-            vec![wasm_encoder::ValType::I64],
-            vec![wasm_encoder::ValType::I64],
-        );
-        // 4: (f64) -> (f64)
-        types.ty().function(
-            vec![wasm_encoder::ValType::F64],
-            vec![wasm_encoder::ValType::F64],
-        );
-        // 5: (i32, i32) -> ()
-        types.ty().function(
-            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
-            vec![],
-        );
-        // 6: (i32, i32) -> (i32, i32)
-        types.ty().function(
-            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
-            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I32],
-        );
-        // 7: (i32, f32) -> (i32, f32)
-        types.ty().function(
-            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::F32],
-            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::F32],
-        );
-        // 8: (i32, i64) -> (i32, i64)
-        types.ty().function(
-            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I64],
-            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::I64],
-        );
-        // 9: (i32, f64) -> (i32, f64)
-        types.ty().function(
-            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::F64],
-            vec![wasm_encoder::ValType::I32, wasm_encoder::ValType::F64],
-        );
+        for (params_slice, results_slice) in InstrumentImports::FUNC_SIGS.iter() {
+            types
+                .ty()
+                .function(params_slice.to_vec(), results_slice.to_vec());
+        }
+        for func in &function_table.table {
+            let params = func
+                .params
+                .iter()
+                .map(Self::parser_to_encoder)
+                .collect::<Vec<_>>();
+            let results = func
+                .results
+                .iter()
+                .map(Self::parser_to_encoder)
+                .collect::<Vec<_>>();
+            types.ty().function(params, results);
+        }
         types
     }
 
@@ -259,13 +321,13 @@ impl<'a> InstructionTable<'a> {
         imports
     }
 
-    fn parser_to_encoder(value: &wasmparser::ValType) -> wasm_encoder::ValType {
+    fn parser_to_encoder(value: &ValType) -> EncoderValType {
         match value {
-            ValType::I32 => wasm_encoder::ValType::I32,
-            ValType::I64 => wasm_encoder::ValType::I64,
-            ValType::F32 => wasm_encoder::ValType::F32,
-            ValType::F64 => wasm_encoder::ValType::F64,
-            ValType::V128 => wasm_encoder::ValType::V128,
+            ValType::I32 => EncoderValType::I32,
+            ValType::I64 => EncoderValType::I64,
+            ValType::F32 => EncoderValType::F32,
+            ValType::F64 => EncoderValType::F64,
+            ValType::V128 => EncoderValType::V128,
             // Reference types not yet supported
             _ => panic!("unsupported valtype"),
         }
@@ -274,22 +336,22 @@ impl<'a> InstructionTable<'a> {
     pub fn build_executable_binary(
         &self,
         types: &TypesTable,
-        locals: Vec<(u32, ValType)>,
+        function_table: &FunctionTable,
     ) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
-        module.section(&self.instr_func_types());
+        module.section(&self.instr_func_types(function_table));
         module.section(&self.instr_imports());
 
         // Encode the main function section.
         let mut functions = FunctionSection::new();
-        functions.function(0);
+        functions.function(InstrumentImports::FUNC_SIGS.len() as u32);
         module.section(&functions);
 
         // Encode the global section.
         let mut global = GlobalSection::new();
         global.global(
             wasm_encoder::GlobalType {
-                val_type: wasm_encoder::ValType::I32,
+                val_type: EncoderValType::I32,
                 mutable: true,
                 shared: false,
             },
@@ -305,14 +367,18 @@ impl<'a> InstructionTable<'a> {
             InstrumentImports::TYPE_INDICES.len() as u32,
         );
         module.section(&exports);
-
+        let first_func = function_table
+            .table
+            .first()
+            .expect(&"first function doesn't exist");
         // Encode the code section.
         let mut codes = CodeSection::new();
         let mut f = wasm_encoder::Function::new(
-            locals
+            first_func
+                .local
                 .iter()
                 .map(|(count, value)| (*count, Self::parser_to_encoder(value)))
-                .collect::<Vec<(u32, wasm_encoder::ValType)>>(),
+                .collect::<Vec<(u32, EncoderValType)>>(),
         );
         let pop_debug = |func: &mut wasm_encoder::Function, num_pop: i32| {
             func.instruction(&EncoderInstruction::I32Const(num_pop));
@@ -358,11 +424,53 @@ impl<'a> InstructionTable<'a> {
                         InstrumentImports::SetLocalI32 as u32,
                     ));
                 }
+                InstrumentationFuncs::SetLocalF32(local_index) => {
+                    f.instruction(&EncoderInstruction::I32Const(local_index as i32));
+                    f.instruction(&EncoderInstruction::LocalGet(local_index));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetLocalF32 as u32,
+                    ));
+                }
+                InstrumentationFuncs::SetLocalI64(local_index) => {
+                    f.instruction(&EncoderInstruction::I32Const(local_index as i32));
+                    f.instruction(&EncoderInstruction::LocalGet(local_index));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetLocalI64 as u32,
+                    ));
+                }
+                InstrumentationFuncs::SetLocalF64(local_index) => {
+                    f.instruction(&EncoderInstruction::I32Const(local_index as i32));
+                    f.instruction(&EncoderInstruction::LocalGet(local_index));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetLocalF64 as u32,
+                    ));
+                }
                 InstrumentationFuncs::SetGlobalI32(global_index) => {
                     f.instruction(&EncoderInstruction::I32Const(global_index as i32));
                     f.instruction(&EncoderInstruction::GlobalGet(global_index));
                     f.instruction(&EncoderInstruction::Call(
                         InstrumentImports::SetGlobalI32 as u32,
+                    ));
+                }
+                InstrumentationFuncs::SetGlobalF32(global_index) => {
+                    f.instruction(&EncoderInstruction::I32Const(global_index as i32));
+                    f.instruction(&EncoderInstruction::GlobalGet(global_index));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetGlobalF32 as u32,
+                    ));
+                }
+                InstrumentationFuncs::SetGlobalI64(global_index) => {
+                    f.instruction(&EncoderInstruction::I32Const(global_index as i32));
+                    f.instruction(&EncoderInstruction::GlobalGet(global_index));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetGlobalI64 as u32,
+                    ));
+                }
+                InstrumentationFuncs::SetGlobalF64(global_index) => {
+                    f.instruction(&EncoderInstruction::I32Const(global_index as i32));
+                    f.instruction(&EncoderInstruction::GlobalGet(global_index));
+                    f.instruction(&EncoderInstruction::Call(
+                        InstrumentImports::SetGlobalF64 as u32,
                     ));
                 }
                 InstrumentationFuncs::PushI32 => {
