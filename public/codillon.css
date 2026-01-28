@@ -63,6 +63,10 @@ div.textentry:focus {
     content: "\1d11e        ";
 }
 
+.invalid-line::before {
+    content: "\1d13f        ";
+}
+
 .numbered-line::before {
     color: gray;
     content: counter(codelines) "        ";
@@ -96,6 +100,18 @@ span.instr[data-synthetic-before]::before {
     content: attr(data-synthetic-before);
 }
 
+span.instr[data-debug]::before {
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 10pt;
+    content: attr(data-debug);
+    color: white;
+    background-color: darkred;
+
+    border-radius: 10px;
+    padding: 4px;
+    margin-right: 10px;
+}
+
 span.comment[data-commentary]::after {
     font-family: 'MLMRoman10-Regular';
     font-size: 12pt;
@@ -108,10 +124,16 @@ span.comment[data-commentary]::after {
     content: attr(data-commentary);
 }
 
-span.comment[data-debug]::after {
+span.debug[data-debug]::after {
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 10pt;
+    margin-left: 10px;
     content: attr(data-debug);
-    margin-left: 10pt;
-    font-size: 15pt;
+    color: white;
+    background-color: darkblue;
+
+    border-radius: 10px;
+    padding: 4px;
 }
 
 .shake-a {

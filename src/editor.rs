@@ -13,9 +13,9 @@ use crate::{
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
-        find_frames, fix_syntax,
+        find_frames, find_function_end, fix_syntax,
     },
-    utils::{CodillonInstruction, FmtError, InstructionTable, str_to_binary},
+    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -346,7 +346,9 @@ impl Editor {
                     time_ms,
                 );
             }
-            Err(_) => {
+            Err(e) => {
+                log_1(&format!("reverting after {e}").into());
+
                 // restore backup
                 self.text_mut().remove_range(start_line, fixup_line + 1);
                 for (i, contents) in backup.iter().enumerate() {
@@ -548,75 +550,127 @@ impl Editor {
         // repair syntax
         fix_syntax(self);
 
-        // create binary
-        let text = self
-            .buffer_as_text()
-            .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref());
-        let wasm_bin = str_to_binary(text)?;
-
-        //create Instruction Table
-        let (instruction_table, locals) = self.to_instruction_table(&wasm_bin)?;
-
-        // annotation and instrumentation
-        // For now, don't return Err even if `to_types_table` fails.
-        // Otherwise, keystrokes that create well-formed-but-invalid
-        // modules will be rejected and cause the "shake" animation.
-        let _types_table = instruction_table.to_types_table(&wasm_bin);
-        if let Err(e) = _types_table {
-            log_1(&format!("Generating types table failed: {e}").into());
-            self.update_debug_panel(Some(e.to_string()));
-        } else if let Ok(types) = _types_table {
-            self.execute(&instruction_table.build_executable_binary(&types, locals)?);
-        }
-
         // find frames in the function
         find_frames(self);
 
-        #[cfg(debug_assertions)]
-        {
-            self.audit();
-            log_1(&"successful audit".into());
+        // find the end of the function, if there is one
+        if let Some(function_end) = find_function_end(self) {
+            let wasm_bin = str_to_binary(
+                self.buffer_as_text()
+                    .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
+            )?;
+
+            let raw_module = self.to_raw_module(&wasm_bin, function_end)?;
+            let validized = raw_module.fix_validity(&wasm_bin, self)?;
+            let types = validized.to_types_table(&wasm_bin)?;
+
+            let mut last_line_no = 0;
+
+            for (
+                op,
+                CodillonType {
+                    inputs,
+                    outputs,
+                    input_arity,
+                },
+            ) in std::iter::zip(&validized.functions[0].operators, &types.functions[0].types)
+            {
+                let mut type_str = String::new();
+
+                if let Some(params) = input_arity {
+                    type_str.push_str(&"? ".repeat(*params as usize));
+                    if *params == 0u8 {
+                        type_str.push_str("𝜖 ");
+                    }
+                } else {
+                    for t in inputs {
+                        type_str.push_str(&t.instr_type.to_string());
+                        type_str.push(' ');
+                    }
+                    if inputs.is_empty() {
+                        type_str.push_str("𝜖 ");
+                    }
+                }
+
+                type_str.push('→');
+                for t in outputs {
+                    type_str.push(' ');
+                    type_str.push_str(&t.to_string());
+                }
+                if outputs.is_empty() {
+                    type_str.push_str(" 𝜖");
+                }
+
+                while last_line_no < op.line_idx {
+                    self.line_mut(last_line_no).set_type_annotation(None);
+                    last_line_no += 1;
+                }
+                last_line_no += 1;
+
+                self.line_mut(op.line_idx)
+                    .set_type_annotation(Some(&type_str));
+            }
+
+            for i in last_line_no..self.len() {
+                self.line_mut(i).set_type_annotation(None);
+            }
+
+            // instrumentation
+            self.execute(&validized.build_executable_binary(&types)?);
         }
+
+        #[cfg(debug_assertions)]
+        self.audit();
 
         Ok(())
     }
 
-    /// TODO: support multi-function by returning a "Function Table" (a vector of instruction tables)
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_instruction_table<'a>(
-        &self,
-        wasm_bin: &'a [u8],
-    ) -> Result<(InstructionTable<'a>, Vec<(u32, wasmparser::ValType)>)> {
+    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8], function_end: usize) -> Result<RawModule<'a>> {
         let parser = Parser::new(0);
+        let mut locals = Vec::new();
         let mut ops = Vec::new();
-        let mut locals: Vec<(u32, wasmparser::ValType)> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
             if let Payload::CodeSectionEntry(body) = payload? {
-                if locals.is_empty() {
-                    let local_reader = body.get_locals_reader()?;
-                    for local in local_reader {
-                        let entry = local?;
-                        locals.push((entry.0, entry.1));
-                    }
+                let mut local_reader = body.get_locals_reader()?.into_iter();
+                for local in local_reader.by_ref() {
+                    let entry = local?;
+                    locals.push((entry.0, entry.1));
                 }
-                for op in body.get_operators_reader()?.into_iter() {
-                    ops.push(op?);
+                let mut op_reader = local_reader.into_operators_reader();
+                while !op_reader.eof() {
+                    ops.push(op_reader.read()?);
                 }
+                op_reader.finish()?;
             }
         }
 
-        //pop the function's end operator off the Vec<Operators>
-        ops.pop();
+        //include the function's end opcode
 
         //match each operator with its idx in the editor
-        let mut instruction_table = Vec::new();
+        let mut aligned_ops = Vec::new();
         let mut ops_iter = ops.into_iter();
 
         for line_idx in 0..self.len() {
             for _ in 0..self.line(line_idx).num_ops() {
                 let op = ops_iter.next().context("not enough operators")?;
-                instruction_table.push(CodillonInstruction { op, line_idx });
+                aligned_ops.push(Aligned { op, line_idx });
+            }
+        }
+
+        match ops_iter.next() {
+            Some(end @ wasmparser::Operator::End) => {
+                aligned_ops.push(Aligned {
+                    op: end,
+                    line_idx: function_end,
+                });
+            }
+            Some(_) => {
+                bail!("not enough instructions");
+            }
+            None => {
+                bail!("not enough operators");
             }
         }
 
@@ -624,12 +678,12 @@ impl Editor {
             bail!("not enough instructions");
         }
 
-        Ok((
-            InstructionTable {
-                table: instruction_table,
-            },
-            locals,
-        ))
+        Ok(RawModule {
+            functions: vec![RawFunction {
+                locals,
+                operators: aligned_ops,
+            }],
+        })
     }
 
     fn execute(&self, binary: &[u8]) {
@@ -653,33 +707,24 @@ impl Editor {
         let binary = binary.to_vec();
         let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
-            match run_binary(&binary).await {
-                Ok(_) => {
-                    // Update slider
-                    let step = {
-                        let mut inner = editor_handle.0.borrow_mut();
-                        inner
-                            .component
-                            .get_mut()
-                            .1
-                            .1
-                            .0
-                            .set_attribute("max", &(last_step() + 1).to_string());
-                        let step = inner.program_state.step_number;
-                        inner.program_state = new_program_state();
-                        inner.saved_states = vec![Some(new_program_state())];
-                        step
-                    };
-                    editor_handle.build_program_state(0, step);
-                    editor_handle.update_debug_panel(None);
-                }
-                Err(e) => {
-                    log_1(&format!("Ran with error: {e}").into());
-                    editor_handle.update_debug_panel(Some(
-                        "validation or execution error (see console)".to_string(),
-                    ));
-                }
-            }
+            let _ = run_binary(&binary).await;
+            // Update slider
+            let step = {
+                let mut inner = editor_handle.0.borrow_mut();
+                inner
+                    .component
+                    .get_mut()
+                    .1
+                    .1
+                    .0
+                    .set_attribute("max", &(last_step() + 1).to_string());
+                let step = inner.program_state.step_number;
+                inner.program_state = new_program_state();
+                inner.saved_states = vec![Some(new_program_state())];
+                step
+            };
+            editor_handle.build_program_state(0, step);
+            editor_handle.update_debug_panel(None);
         });
     }
 
@@ -709,6 +754,7 @@ impl Editor {
                 lines[i].set_debug_annotation(None);
             }
         }
+
         lines[line_num].set_highlight(true);
     }
 
@@ -972,6 +1018,10 @@ impl LineInfosMut for Editor {
 
     fn push(&mut self) {
         self.push_line("");
+    }
+
+    fn set_invalid(&mut self, index: usize, reason: Option<String>) {
+        self.line_mut(index).set_invalid(reason)
     }
 }
 

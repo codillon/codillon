@@ -10,6 +10,8 @@ use wast::{
     token::Id,
 };
 
+use crate::line::{Activity, LineInfo};
+
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum InstrKind {
     If,
@@ -30,6 +32,18 @@ pub enum ModulePart {
     Param,
     Result,
     Local,
+}
+
+impl From<ModulePart> for &'static str {
+    fn from(val: ModulePart) -> &'static str {
+        use ModulePart::*;
+        match val {
+            LParen => "(",
+            RParen => ")",
+            FuncKeyword => "func",
+            _ => panic!("ModulePart cannot be rendered in text"),
+        }
+    }
 }
 
 impl From<kw::func> for ModulePart {
@@ -74,6 +88,7 @@ pub trait LineInfos {
 pub trait LineInfosMut: LineInfos {
     fn set_active_status(&mut self, index: usize, new_val: crate::line::Activity);
     fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm);
+    fn set_invalid(&mut self, index: usize, reason: Option<String>);
     fn push(&mut self);
 }
 
@@ -227,13 +242,13 @@ impl<'a> Parse<'a> for LineKind {
 #[derive(Default, Clone)]
 pub struct SyntheticWasm {
     pub end_opcodes: usize,
-    pub module_field_syntax: Option<String>,
+    pub module_field_syntax: Vec<ModulePart>,
     pub module_syntax_first: bool,
 }
 
 impl SyntheticWasm {
     pub fn num_strs(&self) -> usize {
-        self.module_field_syntax.is_some() as usize + self.end_opcodes
+        self.module_field_syntax.len() + self.end_opcodes
     }
 
     pub fn str(&self, idx: usize) -> &str {
@@ -241,20 +256,23 @@ impl SyntheticWasm {
             panic!("index out of range");
         }
         if self.module_syntax_first {
-            if idx == 0
-                && let Some(s) = &self.module_field_syntax
-            {
-                s
+            if idx < self.module_field_syntax.len() {
+                self.module_field_syntax[idx].into()
             } else {
                 "end"
             }
-        } else if idx + 1 == self.num_strs()
-            && let Some(s) = &self.module_field_syntax
-        {
-            s
-        } else {
+        } else if idx < self.end_opcodes {
             "end"
+        } else {
+            self.module_field_syntax[idx - self.end_opcodes].into()
         }
+    }
+
+    pub fn render_module_field_syntax(&self) -> String {
+        self.module_field_syntax
+            .iter()
+            .map(|&x| -> &str { x.into() })
+            .collect()
     }
 
     pub fn num_ops(&self) -> usize {
@@ -274,7 +292,7 @@ impl SyntheticWasm {
 enum SyntaxState {
     Initial,
     AfterModuleFieldLParen,
-    AfterFuncHeader,
+    AfterFuncHeader(FuncHeader),
     AfterInstruction,
     AfterModuleFieldRParen,
 }
@@ -329,21 +347,94 @@ impl FuncHeader {
 
         // Check for function with (import ...)
         // function import can't have locals & instructions
-        if matches!(part, ModulePart::Import) {
-            self.is_import = true;
-        }
         if self.is_import && matches!(part, ModulePart::Local) {
-            return Err("func import cannot have locals");
+            return Err("imported function cannot have locals");
         }
 
-        // Transit state
+        // Transition state
+        self.is_import |= matches!(part, ModulePart::Import);
         self.next_field = part_pos + 1;
+
+        Ok(())
+    }
+}
+
+impl SyntaxState {
+    fn transit_state(&mut self, info: &LineInfo) -> Result<(), &'static str> {
+        if matches!(info.active, Activity::Inactive(_)) {
+            return Ok(());
+        }
+
+        if info.synthetic_before.module_syntax_first {
+            for part in &info.synthetic_before.module_field_syntax {
+                self.transit_state_from_module_part(*part)?;
+            }
+            if info.synthetic_before.end_opcodes > 0 {
+                self.transit_state_from_instruction()?;
+            }
+        } else {
+            if info.synthetic_before.end_opcodes > 0 {
+                self.transit_state_from_instruction()?;
+            }
+            for part in &info.synthetic_before.module_field_syntax {
+                self.transit_state_from_module_part(*part)?;
+            }
+        }
+
+        match &info.kind {
+            LineKind::Empty | LineKind::Malformed(_) => {}
+            LineKind::Instr(_) => self.transit_state_from_instruction()?,
+            LineKind::Other(parts) => {
+                for part in parts {
+                    self.transit_state_from_module_part(*part)?;
+                }
+            }
+        }
+
         Ok(())
     }
 
-    fn reset(&mut self) {
-        self.is_import = false;
-        self.next_field = 0;
+    fn transit_state_from_instruction(&mut self) -> Result<(), &'static str> {
+        *self = match self {
+            SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction => {
+                SyntaxState::AfterInstruction
+            }
+            _ => return Err("instruction outside function body"),
+        };
+        Ok(())
+    }
+
+    fn transit_state_from_module_part(&mut self, part: ModulePart) -> Result<(), &'static str> {
+        *self = match (&self, part) {
+            (SyntaxState::Initial, ModulePart::LParen) => SyntaxState::AfterModuleFieldLParen,
+            (SyntaxState::AfterModuleFieldLParen, ModulePart::FuncKeyword) => {
+                SyntaxState::AfterFuncHeader(FuncHeader {
+                    is_import: false,
+                    next_field: 1,
+                })
+            }
+            (
+                &&mut SyntaxState::AfterFuncHeader(mut fh),
+                ModulePart::Id
+                | ModulePart::Export
+                | ModulePart::Import
+                | ModulePart::Param
+                | ModulePart::Result
+                | ModulePart::Local,
+            ) => {
+                fh.transit_state(part)?;
+                SyntaxState::AfterFuncHeader(fh)
+            }
+            (
+                SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction,
+                ModulePart::RParen,
+            ) => SyntaxState::AfterModuleFieldRParen,
+            (SyntaxState::AfterModuleFieldRParen, _) => {
+                return Err("todo: text after end of module field");
+            }
+            _ => return Err("invalid field order"),
+        };
+        Ok(())
     }
 }
 
@@ -351,65 +442,59 @@ impl FuncHeader {
 /// unmatched ends, appending ends as necessary to close open
 /// frames, prepending "(" and "func" and appending ")" as necessary, etc.
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
-    let mut state = SyntaxState::Initial;
-    let mut frame_stack: Vec<InstrKind> = Vec::new();
-    let mut func_field_states = FuncHeader::default();
     use crate::line::Activity::*;
+    use SyntaxState::*;
+    let mut state = Initial;
+    let mut frame_stack: Vec<InstrKind> = Vec::new();
 
     assert!(lines.len() > 0);
 
     for line_no in 0..lines.len() {
-        let line_kind = lines.info(line_no).kind.clone();
         lines.set_synthetic_before(line_no, SyntheticWasm::default());
-        match line_kind {
-            LineKind::Empty | LineKind::Malformed(_) => {
-                lines.set_active_status(line_no, Active);
-            }
-            // Fix the module-field syntax, by enforcing parseability or disabling the line.
-            LineKind::Other(parts) => {
-                let mut active = Active;
-                let mut close_outstanding_frames = false;
-                let original_state = state;
-                for part in parts {
-                    match (state, part) {
-                        (SyntaxState::Initial, ModulePart::LParen) => {
-                            state = SyntaxState::AfterModuleFieldLParen;
-                        }
-                        (
-                            SyntaxState::AfterModuleFieldLParen | SyntaxState::AfterFuncHeader,
-                            ModulePart::FuncKeyword
-                            | ModulePart::Id
-                            | ModulePart::Export
-                            | ModulePart::Import
-                            | ModulePart::Param
-                            | ModulePart::Result
-                            | ModulePart::Local,
-                        ) => match func_field_states.transit_state(part) {
-                            Ok(()) => {
-                                state = SyntaxState::AfterFuncHeader;
-                            }
-                            Err(e) => {
-                                active = Inactive(e);
-                            }
-                        },
-                        (
-                            SyntaxState::AfterFuncHeader | SyntaxState::AfterInstruction,
-                            ModulePart::RParen,
-                        ) => {
-                            state = SyntaxState::AfterModuleFieldRParen;
-                            func_field_states.reset();
-                            close_outstanding_frames = !frame_stack.is_empty();
-                        }
-                        _ => {
-                            active = Inactive("invalid field order");
-                            break;
-                        }
-                    }
+        lines.set_active_status(line_no, Active);
+        lines.set_invalid(line_no, None);
+
+        // Fixup instructions that appear where they don't belong
+        if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
+            match state {
+                // Fix #1: Disable an instruction that appears in an imported function, skipping to next line
+                AfterFuncHeader(FuncHeader {
+                    is_import: true, ..
+                }) => {
+                    lines.set_active_status(
+                        line_no,
+                        Inactive("imported functions cannot have instructions"),
+                    );
+                    continue;
                 }
-                lines.set_active_status(line_no, active);
-                if lines.info(line_no).is_active() {
-                    if close_outstanding_frames {
-                        // Add enough `end` opcodes to close all open frames.
+                // Fix #2: prepend "(func" if an instruction appears at module scope
+                Initial => lines.set_synthetic_before(
+                    line_no,
+                    SyntheticWasm {
+                        module_field_syntax: vec![ModulePart::LParen, ModulePart::FuncKeyword],
+                        ..Default::default()
+                    },
+                ),
+                // Fix #3: prepend "func" if an instruction appears after just "("
+                AfterModuleFieldLParen => lines.set_synthetic_before(
+                    line_no,
+                    SyntheticWasm {
+                        module_field_syntax: vec![ModulePart::FuncKeyword],
+                        ..Default::default()
+                    },
+                ),
+                _ => {}
+            }
+        }
+
+        // Process the line and transition the syntax state
+        {
+            let orig_state = state;
+            let res = state.transit_state(&lines.info(line_no));
+            match res {
+                Ok(()) => {
+                    if state == AfterModuleFieldRParen {
+                        // Fix #4: at end of function body, synthetically close all open frames
                         lines.set_synthetic_before(
                             line_no,
                             SyntheticWasm {
@@ -419,122 +504,97 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         );
                         frame_stack.clear();
                     }
-                } else {
-                    state = original_state;
                 }
-            }
-            // Enforce requirements that else must close an `if` block,
-            // `end` must close some existing block, or else disable the line.
-            // Also prepend "(" or "(func" as necessary before the first instruction,
-            // and append ")" as necessary after the last one.
-            LineKind::Instr(kind) => {
-                if func_field_states.is_import {
-                    lines.set_active_status(
-                        line_no,
-                        Inactive("func import cannot have instructions"),
-                    );
+                Err(e) => {
+                    // If state transition is unacceptable here, disable line, revert state, and skip to next line
+                    lines.set_active_status(line_no, Inactive(e));
+                    state = orig_state;
                     continue;
                 }
+            }
+        }
 
-                match kind {
-                    InstrKind::If | InstrKind::OtherStructured => {
-                        lines.set_active_status(line_no, Active);
-                        frame_stack.push(kind);
-                    }
-                    InstrKind::Else => {
-                        if let Some(InstrKind::If) = frame_stack.last() {
-                            frame_stack.pop();
-                            lines.set_active_status(line_no, Active);
-                            frame_stack.push(InstrKind::Else);
-                        } else {
-                            lines.set_active_status(line_no, Inactive("‘else’ outside ‘if’"));
-                        }
-                    }
-                    InstrKind::End => {
-                        lines.set_active_status(
-                            line_no,
-                            if frame_stack.pop().is_some() {
-                                Active
-                            } else {
-                                Inactive("nothing to end")
-                            },
-                        );
-                    }
-                    InstrKind::Other => {
-                        lines.set_active_status(line_no, Active);
-                    }
-                };
-
-                if lines.info(line_no).is_active()
-                    && matches!(
-                        state,
-                        SyntaxState::Initial | SyntaxState::AfterModuleFieldLParen
-                    )
-                {
-                    let extra = SyntheticWasm {
-                        module_field_syntax: Some(
-                            match state {
-                                SyntaxState::Initial => "(func",
-                                SyntaxState::AfterModuleFieldLParen => "func",
-                                _ => unreachable!(),
-                            }
-                            .to_string(),
-                        ),
-                        ..Default::default()
-                    };
-                    lines.set_synthetic_before(line_no, extra);
-                    let _ = func_field_states.transit_state(ModulePart::FuncKeyword);
-                    state = SyntaxState::AfterFuncHeader;
+        // Enforce syntax requirements of structured instructions
+        let instr_kind = lines.info(line_no).kind.stripped_clone();
+        if let LineKind::Instr(kind) = instr_kind {
+            match kind {
+                // For a structured instruction that opens a frame, log this.
+                InstrKind::If | InstrKind::OtherStructured => {
+                    lines.set_active_status(line_no, Active);
+                    frame_stack.push(kind);
                 }
 
-                if lines.info(line_no).is_active() {
-                    state = SyntaxState::AfterInstruction;
+                // Fix #5: if an `else` appears outside an `if` frame, disable it
+                InstrKind::Else => {
+                    if let Some(InstrKind::If) = frame_stack.last() {
+                        frame_stack.pop();
+                        lines.set_active_status(line_no, Active);
+                        frame_stack.push(InstrKind::Else);
+                    } else {
+                        lines.set_active_status(line_no, Inactive("‘else’ outside ‘if’"));
+                    }
                 }
+
+                // Fix #6: if an `end` appears outside a frame, disable it
+                InstrKind::End => lines.set_active_status(
+                    line_no,
+                    if frame_stack.pop().is_some() {
+                        Active
+                    } else {
+                        Inactive("nothing to end")
+                    },
+                ),
+                _ => (),
             }
         }
     }
 
-    if frame_stack.is_empty() && state == SyntaxState::Initial {
-        return;
-    }
+    match state {
+        // Fix #7: if only contents are a "(", deactivate everything
+        AfterModuleFieldLParen => {
+            assert!(frame_stack.is_empty());
 
-    // if only line is a "(", inactivate everything
-    if state == SyntaxState::AfterModuleFieldLParen {
-        assert!(frame_stack.is_empty());
-
-        for line_no in 0..lines.len() {
-            let line_kind = lines.info(line_no).kind.stripped_clone();
-            match line_kind {
-                LineKind::Instr(_) | LineKind::Other(_) => {
-                    lines.set_active_status(line_no, Inactive(""))
+            for line_no in 0..lines.len() {
+                let line_kind = lines.info(line_no).kind.stripped_clone();
+                match line_kind {
+                    LineKind::Instr(_) | LineKind::Other(_) => {
+                        lines.set_active_status(line_no, Inactive(""))
+                    }
+                    LineKind::Empty | LineKind::Malformed(_) => {}
                 }
-                LineKind::Empty | LineKind::Malformed(_) => {}
             }
         }
-
-        return;
-    }
-
-    if !frame_stack.is_empty()
-        || matches!(
-            state,
-            SyntaxState::AfterFuncHeader | SyntaxState::AfterInstruction
-        )
-    {
-        // Function wasn't ended above. Close outstanding frames, then close the function.
-        if !matches!(lines.info(lines.len() - 1).kind, LineKind::Empty) {
-            lines.push();
+        // Fix #8: if function wasn't ended, close outstanding frames, then close the function
+        AfterFuncHeader(_) | AfterInstruction => {
+            // Make sure there is an empty line that can become a synthetic ")"
+            if !matches!(lines.info(lines.len() - 1).kind, LineKind::Empty) {
+                lines.push();
+            }
+            lines.set_active_status(lines.len() - 1, Active);
+            lines.set_synthetic_before(
+                lines.len() - 1,
+                SyntheticWasm {
+                    module_syntax_first: false,
+                    end_opcodes: frame_stack.len(),
+                    module_field_syntax: vec![ModulePart::RParen],
+                },
+            );
         }
-        lines.set_active_status(lines.len() - 1, Active);
-        lines.set_synthetic_before(
-            lines.len() - 1,
-            SyntheticWasm {
-                module_syntax_first: false,
-                end_opcodes: frame_stack.len(),
-                module_field_syntax: Some(")".to_string()),
-            },
-        );
+        _ => {}
     }
+}
+
+pub fn find_function_end(code: &impl LineInfos) -> Option<usize> {
+    let mut state = SyntaxState::Initial;
+    for line_no in 0..code.len() {
+        state
+            .transit_state(&code.info(line_no))
+            .expect("well-formed");
+        if state == SyntaxState::AfterModuleFieldRParen {
+            return Some(line_no);
+        }
+    }
+    None
 }
 
 pub fn find_frames(code: &mut impl FrameInfosMut) {
@@ -708,6 +768,10 @@ mod tests {
 
         fn push(&mut self) {
             self.lines.push(LineInfo::default());
+        }
+
+        fn set_invalid(&mut self, index: usize, reason: Option<String>) {
+            self.lines[index].invalid = reason;
         }
     }
 
