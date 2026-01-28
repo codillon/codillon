@@ -123,17 +123,23 @@ impl<'a> RawModule<'a> {
         let mut raw_functions = self.functions.into_iter();
 
         for payload in parser.parse_all(wasm_bin) {
-            if let ValidPayload::Func(func, _body) = validator.payload(&payload?)? {
+            if let ValidPayload::Func(func, body) = validator.payload(&payload?)? {
                 let RawFunction { locals, operators } = raw_functions.next().expect("one function");
+
+                #[cfg(debug_assertions)]
+                Self::assert_bodies_match(&locals, &operators, &body)?;
+
+                let mut func_validator = func.into_validator(allocs);
+
+                for (count, ty) in &locals {
+                    func_validator.define_locals(DUMMY_OFFSET, *count, *ty)?;
+                }
+
                 let mut valid_function = ValidFunction {
                     locals,
                     operators: Vec::with_capacity(operators.len()),
                 };
 
-                #[cfg(debug_assertions)]
-                Self::assert_operators_match(&operators, &_body)?;
-
-                let mut func_validator = func.into_validator(allocs);
                 for op in operators {
                     match func_validator.atomic_op(DUMMY_OFFSET, &op.op) {
                         Ok(()) => valid_function.operators.push(op.into()),
@@ -287,15 +293,25 @@ impl<'a> RawModule<'a> {
         }
     }
 
-    fn assert_operators_match(
-        ops: &Vec<Aligned<Operator<'a>>>,
+    fn assert_bodies_match(
+        locals: &[(u32, ValType)],
+        ops: &[Aligned<Operator<'a>>],
         body: &wasmparser::FunctionBody<'a>,
     ) -> Result<()> {
-        let mut reader = body.get_operators_reader()?;
-        for op in ops {
-            assert_eq!(&op.op, &reader.read()?);
+        let mut locals_reader = body.get_locals_reader()?;
+
+        for (count, ty) in locals {
+            let (body_count, body_ty) = locals_reader.read()?;
+            assert_eq!(*count, body_count);
+            assert_eq!(*ty, body_ty);
         }
-        assert!(&reader.eof());
+
+        let mut ops_reader = body.get_operators_reader()?;
+        for op in ops {
+            assert_eq!(&op.op, &ops_reader.read()?);
+        }
+        ops_reader.finish()?;
+        assert!(&ops_reader.eof());
         Ok(())
     }
 }
@@ -410,6 +426,10 @@ impl<'a> ValidModule<'a> {
         let mut stack = SimulatedStack::default();
 
         let mut types = Vec::with_capacity(valid_func.operators.len());
+
+        for (count, ty) in &valid_func.locals {
+            func_validator.define_locals(DUMMY_OFFSET, *count, *ty)?;
+        }
 
         for op in &valid_func.operators {
             for pre in &op.op.prepended {
