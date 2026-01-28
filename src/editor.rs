@@ -707,33 +707,24 @@ impl Editor {
         let binary = binary.to_vec();
         let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
-            match run_binary(&binary).await {
-                Ok(_) => {
-                    // Update slider
-                    let step = {
-                        let mut inner = editor_handle.0.borrow_mut();
-                        inner
-                            .component
-                            .get_mut()
-                            .1
-                            .1
-                            .0
-                            .set_attribute("max", &(last_step() + 1).to_string());
-                        let step = inner.program_state.step_number;
-                        inner.program_state = new_program_state();
-                        inner.saved_states = vec![Some(new_program_state())];
-                        step
-                    };
-                    editor_handle.build_program_state(0, step);
-                    editor_handle.update_debug_panel(None);
-                }
-                Err(e) => {
-                    log_1(&format!("Ran with error: {e}").into());
-                    editor_handle.update_debug_panel(Some(
-                        "validation or execution error (see console)".to_string(),
-                    ));
-                }
-            }
+            let _ = run_binary(&binary).await;
+            // Update slider
+            let step = {
+                let mut inner = editor_handle.0.borrow_mut();
+                inner
+                    .component
+                    .get_mut()
+                    .1
+                    .1
+                    .0
+                    .set_attribute("max", &(last_step() + 1).to_string());
+                let step = inner.program_state.step_number;
+                inner.program_state = new_program_state();
+                inner.saved_states = vec![Some(new_program_state())];
+                step
+            };
+            editor_handle.build_program_state(0, step);
+            editor_handle.update_debug_panel(None);
         });
     }
 

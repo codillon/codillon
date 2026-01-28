@@ -338,10 +338,11 @@ impl SimulatedStack {
         assert!(pre_instr_height >= frame_base_height);
         let accessible_operands = pre_instr_height - frame_base_height;
 
+        let untyped = untyped || pop_count > accessible_operands; // can happen after unreachable
+
         let inputs = if untyped {
             vec![]
         } else {
-            assert!(pop_count <= accessible_operands);
             (0..pop_count)
                 .map(|i| InputType {
                     instr_type: validator
