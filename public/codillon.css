@@ -1,15 +1,15 @@
 @font-face {
-   font-family: 'MLMRoman12-Regular';
-   src: url('/fonts/mlmr12.woff2') format('woff2');
-   font-weight: normal;
-   font-style: normal;
+    font-family: 'MLMRoman12-Regular';
+    src: url('/fonts/mlmr12.woff2') format('woff2');
+    font-weight: normal;
+    font-style: normal;
 }
 
 @font-face {
-   font-family: 'MLMSansDemiCond10-Regular';
-   src: url('/fonts/mlmssdc10.woff2') format('woff2');
-   font-weight: normal;
-   font-style: normal;
+    font-family: 'MLMSansDemiCond10-Regular';
+    src: url('/fonts/mlmssdc10.woff2') format('woff2');
+    font-weight: normal;
+    font-style: normal;
 }
 
 body {
@@ -21,7 +21,7 @@ body {
 div.textentry {
     position: relative;
     top: 0;
-    right: 0; 
+    right: 0;
     bottom: 0;
     left: 0;
     user-select: none;
@@ -145,19 +145,47 @@ span.debug[data-debug]::after {
 }
 
 @keyframes shake-a {
- 0% { transform: translateX(0) }
- 25% { transform: translateX(5px) }
- 50% { transform: translateX(-5px) }
- 75% { transform: translateX(5px) }
- 100% { transform: translateX(0) }
+    0% {
+        transform: translateX(0)
+    }
+
+    25% {
+        transform: translateX(5px)
+    }
+
+    50% {
+        transform: translateX(-5px)
+    }
+
+    75% {
+        transform: translateX(5px)
+    }
+
+    100% {
+        transform: translateX(0)
+    }
 }
 
 @keyframes shake-b {
- 0% { transform: translateX(0) }
- 25% { transform: translateX(5px) }
- 50% { transform: translateX(-5px) }
- 75% { transform: translateX(5px) }
- 100% { transform: translateX(0) }
+    0% {
+        transform: translateX(0)
+    }
+
+    25% {
+        transform: translateX(5px)
+    }
+
+    50% {
+        transform: translateX(-5px)
+    }
+
+    75% {
+        transform: translateX(5px)
+    }
+
+    100% {
+        transform: translateX(0)
+    }
 }
 
 .reveal-a {
@@ -169,13 +197,23 @@ span.debug[data-debug]::after {
 }
 
 @keyframes reveal-a {
-    0% { transform: scaleY(0%) }
-    100% { transform: scaleY(100%) }
+    0% {
+        transform: scaleY(0%)
+    }
+
+    100% {
+        transform: scaleY(100%)
+    }
 }
 
 @keyframes reveal-b {
-    0% { transform: scaleY(0%) }
-    100% { transform: scaleY(100%) }
+    0% {
+        transform: scaleY(0%)
+    }
+
+    100% {
+        transform: scaleY(100%)
+    }
 }
 
 .flyend-a .instr::before {
@@ -195,13 +233,23 @@ span.debug[data-debug]::after {
 }
 
 @keyframes flyend-a {
-    0% { transform: translateY(var(--codillon-line-spacing)) scaleY(100%) }
-    100% { transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%) }
+    0% {
+        transform: translateY(var(--codillon-line-spacing)) scaleY(100%)
+    }
+
+    100% {
+        transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%)
+    }
 }
 
 @keyframes flyend-b {
-    0% { transform: translateY(var(--codillon-line-spacing)) scaleY(100%) }
-    100% { transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%) }
+    0% {
+        transform: translateY(var(--codillon-line-spacing)) scaleY(100%)
+    }
+
+    100% {
+        transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%)
+    }
 }
 
 .annotations {
@@ -264,4 +312,52 @@ span.debug[data-debug]::after {
     border: var(--slider-thumb-border);
     cursor: pointer;
     box-shadow: none;
+}
+
+/* Autocomplete dropdown styles */
+.autocomplete-dropdown {
+    position: fixed;
+    z-index: 1000;
+    background: #fffff0;
+    border: 1px solid burlywood;
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    max-height: 200px;
+    overflow-y: auto;
+    min-width: 200px;
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 14pt;
+    left: 60px;
+    bottom: 20px;
+}
+
+.autocomplete-dropdown.hidden {
+    display: none;
+}
+
+.autocomplete-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.autocomplete-item:hover {
+    background: linen;
+}
+
+.autocomplete-item.selected {
+    background: darkred;
+    color: white;
+}
+
+.autocomplete-item .category {
+    font-size: 10pt;
+    color: gray;
+    margin-left: 12px;
+}
+
+.autocomplete-item.selected .category {
+    color: rgba(255, 255, 255, 0.8);
 }
