@@ -429,8 +429,11 @@ impl SyntaxState {
                 SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction,
                 ModulePart::RParen,
             ) => SyntaxState::AfterModuleFieldRParen,
+            (SyntaxState::AfterModuleFieldRParen, ModulePart::LParen) => {
+                SyntaxState::AfterModuleFieldLParen
+            }
             (SyntaxState::AfterModuleFieldRParen, _) => {
-                return Err("todo: text after end of module field");
+                return Err("text outside functions");
             }
             _ => return Err("invalid field order"),
         };
@@ -503,6 +506,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.clear();
+                        state = Initial;
                     }
                 }
                 Err(e) => {
@@ -584,17 +588,34 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     }
 }
 
-pub fn find_function_end(code: &impl LineInfos) -> Option<usize> {
+pub fn find_function_ranges(code: &impl LineInfos) -> Option<Vec<(usize, usize)>>{
+    if code.len() == 0 {
+        return None;
+    }
+    let mut ranges = Vec::new();
     let mut state = SyntaxState::Initial;
+    let mut current_start: Option<usize> = None;
+
     for line_no in 0..code.len() {
-        state
-            .transit_state(&code.info(line_no))
-            .expect("well-formed");
-        if state == SyntaxState::AfterModuleFieldRParen {
-            return Some(line_no);
+        let orig_state = state;
+        match state.transit_state(&code.info(line_no)) {
+            Ok(()) => {
+                if orig_state == SyntaxState::Initial && state != SyntaxState::Initial {
+                    current_start = Some(line_no);
+                }
+
+                if state == SyntaxState::AfterModuleFieldRParen {
+                    let start = current_start.take().unwrap_or(line_no);
+                    ranges.push((start, line_no));
+                    state = SyntaxState::Initial;
+                }
+            }
+            Err(_) => {
+                state = orig_state;
+            }
         }
     }
-    None
+    Some(ranges)
 }
 
 pub fn find_frames(code: &mut impl FrameInfosMut) {
@@ -1222,5 +1243,31 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn test_multiple_functions_in_buffer() {
+        let mut infos = TestLineInfos::new([
+            "(func",
+            "i32.const 1",
+            ")",
+            "",
+            "(func",
+            "i32.const 2",
+            ")",
+        ]);
+        fix_syntax(&mut infos);
+        find_frames(&mut infos);
+
+        // all non-empty lines should be active
+        assert!(infos.lines[0].is_active());
+        assert!(infos.lines[1].is_active());
+        assert!(infos.lines[2].is_active());
+        assert!(infos.lines[4].is_active());
+        assert!(infos.lines[5].is_active());
+        assert!(infos.lines[6].is_active());
+
+        // there should be two ranges
+        assert!(infos.frames.len() == 2);
     }
 }
