@@ -13,7 +13,7 @@ use crate::{
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
-        find_frames, find_function_end, fix_syntax,
+        find_frames, find_function_ranges, fix_syntax,
     },
     utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, str_to_binary},
 };
@@ -553,19 +553,24 @@ impl Editor {
         // find frames in the function
         find_frames(self);
 
+        let func_ranges = match find_function_ranges(self) {
+            None => return Ok(()),
+            Some(range) if range.is_empty() => return Ok(()),
+            Some(ranges) => ranges,
+        };
+
         // find the end of the function, if there is one
-        if let Some(function_end) = find_function_end(self) {
-            let wasm_bin = str_to_binary(
-                self.buffer_as_text()
-                    .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
-            )?;
+        let wasm_bin = str_to_binary(
+            self.buffer_as_text()
+                .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
+        )?;
 
-            let raw_module = self.to_raw_module(&wasm_bin, function_end)?;
-            let validized = raw_module.fix_validity(&wasm_bin, self)?;
-            let types = validized.to_types_table(&wasm_bin)?;
+        let raw_module = self.to_raw_module(&wasm_bin, func_ranges)?;
+        let validized = raw_module.fix_validity(&wasm_bin, self)?;
+        let types = validized.to_types_table(&wasm_bin)?;
 
-            let mut last_line_no = 0;
-
+        let mut last_line_no = 0;
+        for i in 0..validized.functions.len() {
             for (
                 op,
                 CodillonType {
@@ -573,7 +578,7 @@ impl Editor {
                     outputs,
                     input_arity,
                 },
-            ) in std::iter::zip(&validized.functions[0].operators, &types.functions[0].types)
+            ) in std::iter::zip(&validized.functions[i].operators, &types.functions[i].types)
             {
                 let mut type_str = String::new();
 
@@ -610,14 +615,14 @@ impl Editor {
                 self.line_mut(op.line_idx)
                     .set_type_annotation(Some(&type_str));
             }
-
-            for i in last_line_no..self.len() {
-                self.line_mut(i).set_type_annotation(None);
-            }
-
-            // instrumentation
-            self.execute(&validized.build_executable_binary(&types)?);
         }
+
+        for i in last_line_no..self.len() {
+            self.line_mut(i).set_type_annotation(None);
+        }
+
+        // instrumentation
+        self.execute(&validized.build_executable_binary(&types)?);
 
         #[cfg(debug_assertions)]
         self.audit();
@@ -626,64 +631,77 @@ impl Editor {
     }
 
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8], function_end: usize) -> Result<RawModule<'a>> {
+    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8], func_ranges: Vec<(usize, usize)>) -> Result<RawModule<'a>> {
         let parser = Parser::new(0);
-        let mut locals = Vec::new();
-        let mut ops = Vec::new();
+        let mut functions: Vec<RawFunction> = Vec::new();
+        let mut func_params: Vec<Vec<wasmparser::ValType>> = Vec::new();
+        let mut func_results: Vec<Vec<wasmparser::ValType>> = Vec::new();
+        let mut func_locals: Vec<Vec<(u32, wasmparser::ValType)>> = Vec::new();
+        let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
-            if let Payload::CodeSectionEntry(body) = payload? {
-                let mut local_reader = body.get_locals_reader()?.into_iter();
-                for local in local_reader.by_ref() {
-                    let entry = local?;
-                    locals.push((entry.0, entry.1));
-                }
-                let mut op_reader = local_reader.into_operators_reader();
-                while !op_reader.eof() {
-                    ops.push(op_reader.read()?);
-                }
-                op_reader.finish()?;
+            match payload? {
+                Payload::TypeSection(reader) => {
+                    for ft in reader.into_iter_err_on_gc_types().flatten() {
+                        func_params.push(ft.params().to_vec());
+                        func_results.push(ft.results().to_vec());
+                    }
+                },
+                Payload::CodeSectionEntry(body) => {
+                    let mut locals: Vec<(u32, wasmparser::ValType)> = Vec::new();
+                    let local_reader = body.get_locals_reader()?;
+                    for local in local_reader {
+                        let entry = local?;
+                        locals.push((entry.0, entry.1));
+                    }
+                    func_locals.push(locals);
+                    let mut ops = Vec::new();
+                    for op in body.get_operators_reader()?.into_iter() {
+                        ops.push(op?);
+                    }
+                    //include the function's end opcode
+                    func_ops.push(ops);
+                },
+                _ => {}
             }
         }
-
-        //include the function's end opcode
-
-        //match each operator with its idx in the editor
-        let mut aligned_ops = Vec::new();
-        let mut ops_iter = ops.into_iter();
-
-        for line_idx in 0..self.len() {
-            for _ in 0..self.line(line_idx).num_ops() {
-                let op = ops_iter.next().context("not enough operators")?;
-                aligned_ops.push(Aligned { op, line_idx });
+        for (func_idx, (func_start, func_end)) in func_ranges.iter().enumerate() {
+            //match each operator with its idx in the editor
+            let mut aligned_ops = Vec::new();
+            let mut ops_iter = func_ops[func_idx].clone().into_iter();
+            for line_idx in *func_start..=*func_end {
+                for _ in 0..self.line(line_idx).num_ops() {
+                    let op = ops_iter.next().context("not enough operators")?;
+                    aligned_ops.push(Aligned { op, line_idx });
+                }
             }
-        }
-
-        match ops_iter.next() {
-            Some(end @ wasmparser::Operator::End) => {
-                aligned_ops.push(Aligned {
-                    op: end,
-                    line_idx: function_end,
-                });
+            match ops_iter.next() {
+                Some(end @ wasmparser::Operator::End) => {
+                    aligned_ops.push(Aligned {
+                        op: end,
+                        line_idx: *func_end,
+                    });
+                }
+                Some(_) => {
+                    bail!("not enough instructions");
+                }
+                None => {
+                    bail!("not enough operators");
+                }
             }
-            Some(_) => {
+            if ops_iter.next().is_some() {
                 bail!("not enough instructions");
             }
-            None => {
-                bail!("not enough operators");
-            }
-        }
-
-        if ops_iter.next().is_some() {
-            bail!("not enough instructions");
-        }
-
-        Ok(RawModule {
-            functions: vec![RawFunction {
+            let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
+            functions.push(RawFunction {
                 locals,
+                params: func_params.get(func_idx).unwrap_or(&Vec::new()).clone(),
+                results: func_results.get(func_idx).unwrap_or(&Vec::new()).clone(),
                 operators: aligned_ops,
-            }],
-        })
+            });
+        }
+
+        Ok(RawModule { functions })
     }
 
     fn execute(&self, binary: &[u8]) {
