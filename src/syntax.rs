@@ -627,7 +627,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     }
 }
 
-pub fn find_function_ranges(code: &impl LineInfos) -> Option<Vec<(usize, usize)>>{
+pub fn find_function_ranges(code: &impl LineInfos) -> Option<Vec<(usize, usize)>> {
     if code.len() == 0 {
         return None;
     }
@@ -1286,15 +1286,8 @@ mod tests {
 
     #[test]
     fn test_multiple_functions_in_buffer() {
-        let mut infos = TestLineInfos::new([
-            "(func",
-            "i32.const 1",
-            ")",
-            "",
-            "(func",
-            "i32.const 2",
-            ")",
-        ]);
+        let mut infos =
+            TestLineInfos::new(["(func", "i32.const 1", ")", "", "(func", "i32.const 2", ")"]);
         fix_syntax(&mut infos);
         find_frames(&mut infos);
 

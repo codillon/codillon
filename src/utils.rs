@@ -14,6 +14,8 @@ use wast::{
 };
 
 use crate::syntax::LineInfosMut;
+use EncoderInstruction::*;
+use InstrumentationFuncs::*;
 
 enum InstrumentationFuncs {
     SetLocalI32(u32),
@@ -32,6 +34,7 @@ enum InstrumentationFuncs {
     PushF32,
     PushI64,
     PushF64,
+    CallFunc(u32),
     Other,
 }
 #[repr(u32)]
@@ -56,7 +59,7 @@ enum InstrumentImports {
     PushF64,
 }
 impl InstrumentImports {
-    pub const TYPE_INDICES: &'static [(&'static str, u32)] = &[
+    const TYPE_INDICES: &'static [(&'static str, u32)] = &[
         ("step", 1),
         ("pop_i", 0),
         ("set_local_i32", 5),
@@ -76,7 +79,7 @@ impl InstrumentImports {
         ("push_i64", 3),
         ("push_f64", 4),
     ];
-    pub const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
+    const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: (i32) -> ()
         (&[EncoderValType::I32], &[]),
         // 1: (i32) -> (i32)
@@ -137,8 +140,8 @@ pub struct RawFunction<'a> {
 }
 
 pub struct ValidFunction<'a> {
-    pub params: Vec<ValType>,
-    pub results: Vec<ValType>,
+    pub params: Vec<EncoderValType>,
+    pub results: Vec<EncoderValType>,
     pub locals: Vec<(u32, ValType)>,
     pub operators: Vec<Aligned<GeneralOperator<'a>>>,
 }
@@ -184,7 +187,12 @@ impl<'a> RawModule<'a> {
 
         for payload in parser.parse_all(wasm_bin) {
             if let ValidPayload::Func(func, body) = validator.payload(&payload?)? {
-                let RawFunction { params, results, locals, operators } = raw_functions.next().expect("one function");
+                let RawFunction {
+                    params,
+                    results,
+                    locals,
+                    operators,
+                } = raw_functions.next().expect("one function");
 
                 #[cfg(debug_assertions)]
                 Self::assert_bodies_match(&locals, &operators, &body)?;
@@ -196,8 +204,8 @@ impl<'a> RawModule<'a> {
                 }
 
                 let mut valid_function = ValidFunction {
-                    params,
-                    results,
+                    params: params.iter().map(parser_to_encoder).collect::<Vec<_>>(),
+                    results: results.iter().map(parser_to_encoder).collect::<Vec<_>>(),
                     locals,
                     operators: Vec::with_capacity(operators.len()),
                 };
@@ -513,28 +521,30 @@ impl<'a> ValidModule<'a> {
 
     fn classify(operation: &wasmparser::Operator, op_type: &CodillonType) -> InstrumentationFuncs {
         use wasmparser::Operator::*;
-        use InstrumentationFuncs::*;
         match operation {
             // Special Functions
-            LocalSet { local_index } | LocalTee { local_index } => match op_type.inputs.first().expect("local op type") {
-                InputType {
-                    instr_type: ValType::I32,
-                    ..
-                } => SetLocalI32(*local_index),
-                InputType {
-                    instr_type: ValType::F32,
-                    ..
-                } => SetLocalF32(*local_index),
-                InputType {
-                    instr_type: ValType::I64,
-                    ..
-                } => SetLocalI64(*local_index),
-                InputType {
-                    instr_type: ValType::F64,
-                    ..
-                } => SetLocalF64(*local_index),
-                _ => Other,
-            },
+            Call { function_index } => CallFunc(*function_index),
+            LocalSet { local_index } | LocalTee { local_index } => {
+                match op_type.inputs.first().expect("local op type") {
+                    InputType {
+                        instr_type: ValType::I32,
+                        ..
+                    } => SetLocalI32(*local_index),
+                    InputType {
+                        instr_type: ValType::F32,
+                        ..
+                    } => SetLocalF32(*local_index),
+                    InputType {
+                        instr_type: ValType::I64,
+                        ..
+                    } => SetLocalI64(*local_index),
+                    InputType {
+                        instr_type: ValType::F64,
+                        ..
+                    } => SetLocalF64(*local_index),
+                    _ => Other,
+                }
+            }
             GlobalSet { global_index } => match op_type.inputs.first().expect("global op type") {
                 InputType {
                     instr_type: ValType::I32,
@@ -554,13 +564,9 @@ impl<'a> ValidModule<'a> {
                 } => SetGlobalF64(*global_index),
                 _ => Other,
             },
-            I32Store { .. } | I32Store8 { .. } | I32Store16 { .. } => {
-                SetMemoryI32
-            }
+            I32Store { .. } | I32Store8 { .. } | I32Store16 { .. } => SetMemoryI32,
             F32Store { .. } => SetMemoryF32,
-            I64Store { .. } | I64Store8 { .. } | I64Store16 { .. } => {
-                SetMemoryI64
-            }
+            I64Store { .. } | I64Store8 { .. } | I64Store16 { .. } => SetMemoryI64,
             F64Store { .. } => SetMemoryF64,
             // Match based on outputs
             _ => match op_type.outputs.as_slice() {
@@ -582,17 +588,9 @@ impl<'a> ValidModule<'a> {
                 .function(params_slice.to_vec(), results_slice.to_vec());
         }
         for func in &self.functions {
-            let params = func
-                .params
-                .iter()
-                .map(Self::parser_to_encoder)
-                .collect::<Vec<_>>();
-            let results = func
-                .results
-                .iter()
-                .map(Self::parser_to_encoder)
-                .collect::<Vec<_>>();
-            types.ty().function(params, results);
+            types
+                .ty()
+                .function(func.params.clone(), func.results.clone());
         }
         types
     }
@@ -610,28 +608,17 @@ impl<'a> ValidModule<'a> {
         imports
     }
 
-    fn parser_to_encoder(value: &wasmparser::ValType) -> EncoderValType {
-        match value {
-            ValType::I32 => EncoderValType::I32,
-            ValType::I64 => EncoderValType::I64,
-            ValType::F32 => EncoderValType::F32,
-            ValType::F64 => EncoderValType::F64,
-            ValType::V128 => EncoderValType::V128,
-            // Reference types not yet supported
-            _ => panic!("unsupported valtype"),
-        }
-    }
-
     pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
-        use InstrumentationFuncs::*;
-        use EncoderInstruction::*;
         let mut module: wasm_encoder::Module = Default::default();
         module.section(&self.instr_func_types());
         module.section(&self.instr_imports());
 
-        // Encode the main function section.
+        // Encode the function section.
         let mut functions = FunctionSection::new();
-        functions.function(InstrumentImports::FUNC_SIGS.len() as u32,);
+        let func_type_offset = InstrumentImports::FUNC_SIGS.len();
+        for i in 0..self.functions.len() {
+            functions.function((func_type_offset + i) as u32);
+        }
         module.section(&functions);
 
         // Encode the global section.
@@ -657,145 +644,181 @@ impl<'a> ValidModule<'a> {
 
         // Encode the code section.
         let mut codes = CodeSection::new();
-        let first_function = self.functions.first().expect("one function");
+        // Start with first function
+        for func_idx in 0..self.functions.len() {
+            let _ = self.build_binary(func_idx, &mut codes, types);
+        }
+        module.section(&codes);
+
+        let wasm = module.finish();
+        Ok(wasm)
+    }
+
+    fn build_binary(
+        &self,
+        func_idx: usize,
+        codes: &mut CodeSection,
+        types: &TypesTable,
+    ) -> Result<(), anyhow::Error> {
+        let function = self.functions.get(func_idx).expect("valid func idx");
         let mut f = wasm_encoder::Function::new(
-            first_function
+            function
                 .locals
                 .iter()
-                .map(|(count, value)| (*count, Self::parser_to_encoder(value)))
+                .map(|(count, value)| (*count, parser_to_encoder(value)))
                 .collect::<Vec<(u32, EncoderValType)>>(),
         );
         let pop_debug = |func: &mut wasm_encoder::Function, num_pop: i32| {
             func.instruction(&I32Const(num_pop));
             func.instruction(&Call(InstrumentImports::PopI as u32));
         };
-        for (i, codillon_instruction) in first_function.operators.iter().enumerate() {
+        for (i, codillon_instruction) in function.operators.iter().enumerate() {
             if !codillon_instruction.op.prepended.is_empty() {
                 f.instruction(&Unreachable);
                 for preop in &codillon_instruction.op.prepended {
                     f.instruction(&RoundtripReencoder.instruction(preop.clone())?);
                 }
             }
-
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.op.clone())?;
-            let value_type = &types.functions.first().unwrap().types[i];
+            let value_type = &types.functions.get(func_idx).unwrap().types[i];
             let operation_type = Self::classify(&codillon_instruction.op.op, value_type);
-            // Instrumentation that needs to occur before execution
-            match operation_type {
-                SetMemoryI32 => {
-                    f.instruction(&Call(
-                        InstrumentImports::SetMemoryI32 as u32,
-                    ));
-                }
-                SetMemoryF32 => {
-                    f.instruction(&Call(
-                        InstrumentImports::SetMemoryF32 as u32,
-                    ));
-                }
-                SetMemoryI64 => {
-                    f.instruction(&Call(
-                        InstrumentImports::SetMemoryI64 as u32,
-                    ));
-                }
-                SetMemoryF64 => {
-                    f.instruction(&Call(
-                        InstrumentImports::SetMemoryF64 as u32,
-                    ));
-                }
-                _ => {}
+            if let CallFunc(function_idx) = operation_type {
+                f.instruction(&Call(
+                    function_idx + InstrumentImports::TYPE_INDICES.len() as u32,
+                ));
+                pop_debug(&mut f, value_type.inputs.len() as i32);
+            } else {
+                // Instrumentation that needs to occur before execution
+                Self::instrument_memory_ops(&mut f, &operation_type);
+                Self::instrument_global_ops(&mut f, &operation_type);
+                pop_debug(&mut f, value_type.inputs.len() as i32);
+                f.instruction(&instruction);
+                // Instrumentation that needs to occur after execution
+                Self::instrument_local_ops(&mut f, &operation_type);
+                Self::instrument_global_ops(&mut f, &operation_type);
+                Self::instrument_push_ops(&mut f, &operation_type);
             }
-            pop_debug(&mut f, value_type.inputs.len() as i32);
-            f.instruction(&instruction);
-            if i + 1 == self.functions.first().unwrap().operators.len() {
-                break;
+            if !matches!(
+                codillon_instruction.op.op,
+                wasmparser::Operator::End
+                    | wasmparser::Operator::Return
+                    | wasmparser::Operator::Unreachable
+            ) {
+                // Step after each instruction evaluation
+                f.instruction(&I32Const(line_idx));
+                f.instruction(&Call(InstrumentImports::Step as u32));
+                f.instruction(&I32Eqz);
+                f.instruction(&If(wasm_encoder::BlockType::Empty));
+                f.instruction(&Return);
+                f.instruction(&End);
             }
-            // Instrumentation that needs to occur after execution
-            match operation_type {
-                SetLocalI32(local_index) => {
-                    f.instruction(&I32Const(local_index as i32));
-                    f.instruction(&LocalGet(local_index));
-                    f.instruction(&Call(
-                        InstrumentImports::SetLocalI32 as u32,
-                    ));
-                }
-                SetLocalF32(local_index) => {
-                    f.instruction(&I32Const(local_index as i32));
-                    f.instruction(&LocalGet(local_index));
-                    f.instruction(&Call(
-                        InstrumentImports::SetLocalF32 as u32,
-                    ));
-                }
-                SetLocalI64(local_index) => {
-                    f.instruction(&I32Const(local_index as i32));
-                    f.instruction(&LocalGet(local_index));
-                    f.instruction(&Call(
-                        InstrumentImports::SetLocalI64 as u32,
-                    ));
-                }
-                SetLocalF64(local_index) => {
-                    f.instruction(&I32Const(local_index as i32));
-                    f.instruction(&LocalGet(local_index));
-                    f.instruction(&Call(
-                        InstrumentImports::SetLocalF64 as u32,
-                    ));
-                }
-                SetGlobalI32(global_index) => {
-                    f.instruction(&I32Const(global_index as i32));
-                    f.instruction(&GlobalGet(global_index));
-                    f.instruction(&Call(
-                        InstrumentImports::SetGlobalI32 as u32,
-                    ));
-                }
-                SetGlobalF32(global_index) => {
-                    f.instruction(&I32Const(global_index as i32));
-                    f.instruction(&GlobalGet(global_index));
-                    f.instruction(&Call(
-                        InstrumentImports::SetGlobalF32 as u32,
-                    ));
-                }
-                SetGlobalI64(global_index) => {
-                    f.instruction(&I32Const(global_index as i32));
-                    f.instruction(&GlobalGet(global_index));
-                    f.instruction(&Call(
-                        InstrumentImports::SetGlobalI64 as u32,
-                    ));
-                }
-                SetGlobalF64(global_index) => {
-                    f.instruction(&I32Const(global_index as i32));
-                    f.instruction(&GlobalGet(global_index));
-                    f.instruction(&Call(
-                        InstrumentImports::SetGlobalF64 as u32,
-                    ));
-                }
-                PushI32 => {
-                    web_sys::console::log_1(&format!("PushI32").into());
-                    f.instruction(&Call(InstrumentImports::PushI32 as u32));
-                }
-                PushF32 => {
-                    f.instruction(&Call(InstrumentImports::PushF32 as u32));
-                }
-                PushI64 => {
-                    f.instruction(&Call(InstrumentImports::PushI64 as u32));
-                }
-                PushF64 => {
-                    f.instruction(&Call(InstrumentImports::PushF64 as u32));
-                }
-                _ => {}
-            }
-            // Step after each instruction evaluation
-            f.instruction(&I32Const(line_idx));
-            f.instruction(&Call(InstrumentImports::Step as u32));
-            f.instruction(&I32Eqz);
-            f.instruction(&If(wasm_encoder::BlockType::Empty));
-            f.instruction(&Return);
-            f.instruction(&End);
         }
         codes.function(&f);
-        module.section(&codes);
+        Ok(())
+    }
 
-        let wasm = module.finish();
-        Ok(wasm)
+    fn instrument_memory_ops(
+        f: &mut wasm_encoder::Function,
+        operation_type: &InstrumentationFuncs,
+    ) {
+        match operation_type {
+            SetMemoryI32 => {
+                f.instruction(&Call(InstrumentImports::SetMemoryI32 as u32));
+            }
+            SetMemoryF32 => {
+                f.instruction(&Call(InstrumentImports::SetMemoryF32 as u32));
+            }
+            SetMemoryI64 => {
+                f.instruction(&Call(InstrumentImports::SetMemoryI64 as u32));
+            }
+            SetMemoryF64 => {
+                f.instruction(&Call(InstrumentImports::SetMemoryF64 as u32));
+            }
+            _ => {}
+        }
+    }
+    fn instrument_local_ops(f: &mut wasm_encoder::Function, operation_type: &InstrumentationFuncs) {
+        match operation_type {
+            SetLocalI32(local_index) => {
+                f.instruction(&I32Const(*local_index as i32));
+                f.instruction(&LocalGet(*local_index));
+                f.instruction(&Call(InstrumentImports::SetLocalI32 as u32));
+            }
+            SetLocalF32(local_index) => {
+                f.instruction(&I32Const(*local_index as i32));
+                f.instruction(&LocalGet(*local_index));
+                f.instruction(&Call(InstrumentImports::SetLocalF32 as u32));
+            }
+            SetLocalI64(local_index) => {
+                f.instruction(&I32Const(*local_index as i32));
+                f.instruction(&LocalGet(*local_index));
+                f.instruction(&Call(InstrumentImports::SetLocalI64 as u32));
+            }
+            SetLocalF64(local_index) => {
+                f.instruction(&I32Const(*local_index as i32));
+                f.instruction(&LocalGet(*local_index));
+                f.instruction(&Call(InstrumentImports::SetLocalF64 as u32));
+            }
+            _ => {}
+        }
+    }
+    fn instrument_global_ops(
+        f: &mut wasm_encoder::Function,
+        operation_type: &InstrumentationFuncs,
+    ) {
+        match operation_type {
+            SetGlobalI32(global_index) => {
+                f.instruction(&I32Const(*global_index as i32));
+                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&Call(InstrumentImports::SetGlobalI32 as u32));
+            }
+            SetGlobalF32(global_index) => {
+                f.instruction(&I32Const(*global_index as i32));
+                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&Call(InstrumentImports::SetGlobalF32 as u32));
+            }
+            SetGlobalI64(global_index) => {
+                f.instruction(&I32Const(*global_index as i32));
+                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&Call(InstrumentImports::SetGlobalI64 as u32));
+            }
+            SetGlobalF64(global_index) => {
+                f.instruction(&I32Const(*global_index as i32));
+                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&Call(InstrumentImports::SetGlobalF64 as u32));
+            }
+            _ => {}
+        }
+    }
+    fn instrument_push_ops(f: &mut wasm_encoder::Function, operation_type: &InstrumentationFuncs) {
+        match operation_type {
+            PushI32 => {
+                f.instruction(&Call(InstrumentImports::PushI32 as u32));
+            }
+            PushF32 => {
+                f.instruction(&Call(InstrumentImports::PushF32 as u32));
+            }
+            PushI64 => {
+                f.instruction(&Call(InstrumentImports::PushI64 as u32));
+            }
+            PushF64 => {
+                f.instruction(&Call(InstrumentImports::PushF64 as u32));
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parser_to_encoder(value: &wasmparser::ValType) -> EncoderValType {
+    match value {
+        ValType::I32 => EncoderValType::I32,
+        ValType::I64 => EncoderValType::I64,
+        ValType::F32 => EncoderValType::F32,
+        ValType::F64 => EncoderValType::F64,
+        ValType::V128 => EncoderValType::V128,
+        // Reference types not yet supported
+        _ => panic!("unsupported valtype"),
     }
 }
 
