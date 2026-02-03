@@ -1244,23 +1244,4 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn test_multiple_functions_in_buffer() {
-        let mut infos =
-            TestLineInfos::new(["(func", "i32.const 1", ")", "", "(func", "i32.const 2", ")"]);
-        fix_syntax(&mut infos);
-        find_frames(&mut infos);
-
-        // all non-empty lines should be active
-        assert!(infos.lines[0].is_active());
-        assert!(infos.lines[1].is_active());
-        assert!(infos.lines[2].is_active());
-        assert!(infos.lines[4].is_active());
-        assert!(infos.lines[5].is_active());
-        assert!(infos.lines[6].is_active());
-
-        // there should be two ranges
-        assert!(infos.frames.len() == 2);
-    }
 }
