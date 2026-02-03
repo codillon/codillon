@@ -631,7 +631,11 @@ impl Editor {
     }
 
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8], func_ranges: Vec<(usize, usize)>) -> Result<RawModule<'a>> {
+    fn to_raw_module<'a>(
+        &self,
+        wasm_bin: &'a [u8],
+        func_ranges: Vec<(usize, usize)>,
+    ) -> Result<RawModule<'a>> {
         let parser = Parser::new(0);
         let mut functions: Vec<RawFunction> = Vec::new();
         let mut func_params: Vec<Vec<wasmparser::ValType>> = Vec::new();
@@ -646,7 +650,7 @@ impl Editor {
                         func_params.push(ft.params().to_vec());
                         func_results.push(ft.results().to_vec());
                     }
-                },
+                }
                 Payload::CodeSectionEntry(body) => {
                     let mut locals: Vec<(u32, wasmparser::ValType)> = Vec::new();
                     let local_reader = body.get_locals_reader()?;
@@ -661,7 +665,7 @@ impl Editor {
                     }
                     //include the function's end opcode
                     func_ops.push(ops);
-                },
+                }
                 _ => {}
             }
         }

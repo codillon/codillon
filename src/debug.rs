@@ -110,7 +110,6 @@ pub fn make_imports() -> Result<Object, JsValue> {
 
     // Store i32.const expressions
     let push_i32 = Closure::wrap(Box::new(move |value: i32| {
-        web_sys::console::log_1(&format!("PushI32 debug").into());
         STATE.with(|cur_state| {
             cur_state
                 .borrow_mut()
@@ -326,7 +325,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr
     }) as Box<dyn Fn(i32, i32) -> js_sys::Array>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_memory_i32"),
         set_memory_i32.as_ref().unchecked_ref(),
     )
@@ -344,7 +343,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr
     }) as Box<dyn Fn(i32, f32) -> js_sys::Array>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_memory_f32"),
         set_memory_f32.as_ref().unchecked_ref(),
     )
@@ -362,7 +361,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr
     }) as Box<dyn Fn(i32, i64) -> js_sys::Array>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_memory_i64"),
         set_memory_i64.as_ref().unchecked_ref(),
     )
@@ -380,7 +379,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr
     }) as Box<dyn Fn(i32, f64) -> js_sys::Array>);
     Reflect::set(
-        &debug_numbers,
+        debug_numbers,
         &JsValue::from_str("set_memory_f64"),
         set_memory_f64.as_ref().unchecked_ref(),
     )
