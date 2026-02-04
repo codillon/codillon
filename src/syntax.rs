@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::ops::Deref;
 use wast::{
     Error,
-    core::{InlineImport, Instruction, LocalParser, ValType},
+    core::{InlineImport, Instruction, LocalParser, ValType, Memory, Table, Global},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
     token::Id,
@@ -32,6 +32,9 @@ pub enum ModulePart {
     Param,
     Result,
     Local,
+    Global,
+    Table,
+    Memory
 }
 
 impl From<ModulePart> for &'static str {
