@@ -73,6 +73,24 @@ impl<'a> From<LocalParser<'a>> for ModulePart {
     }
 }
 
+impl<'a> From<Memory<'a>> for ModulePart {
+    fn from(_: Memory) -> Self {
+        ModulePart::Local
+    }
+}
+
+impl<'a> From<Global<'a>> for ModulePart {
+    fn from(_: Global) -> Self {
+        ModulePart::Local
+    }
+}
+
+impl<'a> From<Table<'a>> for ModulePart {
+    fn from(_: Table) -> Self {
+        ModulePart::Local
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq, Clone)]
 pub enum LineKind {
     #[default]
