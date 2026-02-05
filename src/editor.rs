@@ -1,7 +1,10 @@
 // The Codillon code editor
 
 use crate::{
-    debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
+    debug::{
+        WebAssemblyTypes, get_all_locals, last_step, make_imports, program_state_to_js,
+        reset_debug_state, with_changes,
+    },
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
@@ -622,6 +625,7 @@ impl Editor {
         }
 
         // instrumentation
+        reset_debug_state();
         self.execute(&validized.build_executable_binary(&types)?);
 
         #[cfg(debug_assertions)]
@@ -825,6 +829,7 @@ impl Editor {
         let mut inner = self.0.borrow_mut();
         let line_count = inner.component.get().1.0.inner().len();
         inner.saved_states.resize_with(line_count, || None);
+        let mut all_locals = get_all_locals();
         with_changes(|changes| {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
                 inner.program_state.step_number = i + 1;
@@ -836,15 +841,13 @@ impl Editor {
                     .saturating_sub(change.num_pops as usize);
                 inner.program_state.stack_state.truncate(new_length);
                 for push in &change.stack_pushes {
-                    inner.program_state.stack_state.push(push.clone());
+                    inner.program_state.stack_state.push(*push);
                 }
-                if let Some((idx, val)) = &change.locals_change {
-                    let idx_usize = *idx as usize;
-                    let locals = &mut inner.program_state.locals_state;
-                    if locals.len() <= idx_usize {
-                        locals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
+                if let Some((func_idx, updates)) = &change.locals_change {
+                    for (idx, val) in updates {
+                        all_locals[*func_idx][*idx] = *val;
                     }
-                    locals[idx_usize] = val.clone();
+                    inner.program_state.locals_state = all_locals[*func_idx].clone();
                 }
                 // Resizing won't be necessary when number of globals are known
                 if let Some((idx, val)) = &change.globals_change {
@@ -853,7 +856,7 @@ impl Editor {
                     if globals.len() <= idx_usize {
                         globals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
                     }
-                    globals[idx_usize] = val.clone();
+                    globals[idx_usize] = *val;
                 }
                 if let Some((idx, val)) = &change.memory_change {
                     let idx_usize = *idx as usize;
@@ -861,7 +864,7 @@ impl Editor {
                     if memory.len() <= idx_usize {
                         memory.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
                     }
-                    memory[idx_usize] = val.clone();
+                    memory[idx_usize] = *val;
                 }
                 inner.saved_states[change.line_number as usize] = Some(inner.program_state.clone());
             }

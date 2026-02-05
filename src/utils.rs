@@ -62,10 +62,10 @@ impl InstrumentImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
         ("step", 1),
         ("pop_i", 0),
-        ("set_local_i32", 5),
-        ("set_local_f32", 10),
-        ("set_local_i64", 11),
-        ("set_local_f64", 12),
+        ("set_local_i32", 13),
+        ("set_local_f32", 14),
+        ("set_local_i64", 15),
+        ("set_local_f64", 16),
         ("set_global_i32", 5),
         ("set_global_f32", 10),
         ("set_global_i64", 11),
@@ -118,6 +118,42 @@ impl InstrumentImports {
         (&[EncoderValType::I32, EncoderValType::I64], &[]),
         // 12: (i32, f64) -> ()
         (&[EncoderValType::I32, EncoderValType::F64], &[]),
+        // 13: (i32, i32, i32) -> ()
+        (
+            &[
+                EncoderValType::I32,
+                EncoderValType::I32,
+                EncoderValType::I32,
+            ],
+            &[],
+        ),
+        // 14: (i32, i32, f32) -> ()
+        (
+            &[
+                EncoderValType::I32,
+                EncoderValType::I32,
+                EncoderValType::F32,
+            ],
+            &[],
+        ),
+        // 15: (i32, i32, i64) -> ()
+        (
+            &[
+                EncoderValType::I32,
+                EncoderValType::I32,
+                EncoderValType::I64,
+            ],
+            &[],
+        ),
+        // 16: (i32, i32, f64) -> ()
+        (
+            &[
+                EncoderValType::I32,
+                EncoderValType::I32,
+                EncoderValType::F64,
+            ],
+            &[],
+        ),
     ];
 }
 
@@ -140,8 +176,8 @@ pub struct RawFunction<'a> {
 }
 
 pub struct ValidFunction<'a> {
-    pub params: Vec<EncoderValType>,
-    pub results: Vec<EncoderValType>,
+    pub params: Vec<ValType>,
+    pub results: Vec<ValType>,
     pub locals: Vec<(u32, ValType)>,
     pub operators: Vec<Aligned<GeneralOperator<'a>>>,
 }
@@ -204,8 +240,8 @@ impl<'a> RawModule<'a> {
                 }
 
                 let mut valid_function = ValidFunction {
-                    params: params.iter().map(parser_to_encoder).collect::<Vec<_>>(),
-                    results: results.iter().map(parser_to_encoder).collect::<Vec<_>>(),
+                    params,
+                    results,
                     locals,
                     operators: Vec::with_capacity(operators.len()),
                 };
@@ -588,9 +624,18 @@ impl<'a> ValidModule<'a> {
                 .function(params_slice.to_vec(), results_slice.to_vec());
         }
         for func in &self.functions {
-            types
-                .ty()
-                .function(func.params.clone(), func.results.clone());
+            types.ty().function(
+                func.params
+                    .iter()
+                    .map(parser_to_encoder)
+                    .collect::<Vec<_>>()
+                    .clone(),
+                func.results
+                    .iter()
+                    .map(parser_to_encoder)
+                    .collect::<Vec<_>>()
+                    .clone(),
+            );
         }
         types
     }
@@ -646,6 +691,10 @@ impl<'a> ValidModule<'a> {
         let mut codes = CodeSection::new();
         // Start with first function
         for func_idx in 0..self.functions.len() {
+            crate::debug::initialize_locals(
+                &self.functions[func_idx].params,
+                &self.functions[func_idx].locals,
+            );
             let _ = self.build_function(func_idx, &mut codes, types);
         }
         module.section(&codes);
@@ -695,7 +744,7 @@ impl<'a> ValidModule<'a> {
                 pop_debug(&mut f, value_type.inputs.len() as i32);
                 f.instruction(&instruction);
                 // Instrumentation that needs to occur after execution
-                Self::instrument_local_ops(&mut f, &operation_type);
+                Self::instrument_local_ops(&mut f, &operation_type, func_idx);
                 Self::instrument_global_ops(&mut f, &operation_type);
                 Self::instrument_push_ops(&mut f, &operation_type);
             }
@@ -738,24 +787,32 @@ impl<'a> ValidModule<'a> {
             _ => {}
         }
     }
-    fn instrument_local_ops(f: &mut wasm_encoder::Function, operation_type: &InstrumentationFuncs) {
+    fn instrument_local_ops(
+        f: &mut wasm_encoder::Function,
+        operation_type: &InstrumentationFuncs,
+        func_idx: usize,
+    ) {
         match operation_type {
             SetLocalI32(local_index) => {
+                f.instruction(&I32Const(func_idx as i32));
                 f.instruction(&I32Const(*local_index as i32));
                 f.instruction(&LocalGet(*local_index));
                 f.instruction(&Call(InstrumentImports::SetLocalI32 as u32));
             }
             SetLocalF32(local_index) => {
+                f.instruction(&I32Const(func_idx as i32));
                 f.instruction(&I32Const(*local_index as i32));
                 f.instruction(&LocalGet(*local_index));
                 f.instruction(&Call(InstrumentImports::SetLocalF32 as u32));
             }
             SetLocalI64(local_index) => {
+                f.instruction(&I32Const(func_idx as i32));
                 f.instruction(&I32Const(*local_index as i32));
                 f.instruction(&LocalGet(*local_index));
                 f.instruction(&Call(InstrumentImports::SetLocalI64 as u32));
             }
             SetLocalF64(local_index) => {
+                f.instruction(&I32Const(func_idx as i32));
                 f.instruction(&I32Const(*local_index as i32));
                 f.instruction(&LocalGet(*local_index));
                 f.instruction(&Call(InstrumentImports::SetLocalF64 as u32));
