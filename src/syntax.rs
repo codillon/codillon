@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::ops::Deref;
 use wast::{
     Error,
-    core::{InlineImport, Instruction, LocalParser, ValType, Memory, Table, Global},
+    core::{Global, InlineImport, Instruction, LocalParser, Memory, Table, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
     token::Id,
@@ -34,7 +34,7 @@ pub enum ModulePart {
     Local,
     Global,
     Table,
-    Memory
+    Memory,
 }
 
 impl From<ModulePart> for &'static str {
@@ -217,7 +217,7 @@ impl<'a> Parse<'a> for ModulePart {
             parser.parens(|p| {
                 p.parse::<Global<'a>>()?;
                 Ok(ModulePart::Global)
-            })        
+            })
         } else if parser.step(|cursor| match cursor.lparen()? {
             Some(rest) => Ok((true, rest)),
             None => Ok((false, cursor)),
@@ -443,7 +443,9 @@ impl SyntaxState {
     fn transit_state_from_module_part(&mut self, part: ModulePart) -> Result<(), &'static str> {
         *self = match (&self, part) {
             (SyntaxState::Initial, ModulePart::LParen) => SyntaxState::AfterModuleFieldLParen,
-            (SyntaxState::Initial, ModulePart::Memory | ModulePart::Table | ModulePart::Global) => SyntaxState::Initial,
+            (SyntaxState::Initial, ModulePart::Memory | ModulePart::Table | ModulePart::Global) => {
+                SyntaxState::Initial
+            }
             (SyntaxState::AfterModuleFieldLParen, ModulePart::FuncKeyword) => {
                 SyntaxState::AfterFuncHeader(FuncHeader {
                     is_import: false,
