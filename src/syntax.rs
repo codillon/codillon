@@ -75,13 +75,13 @@ impl<'a> From<LocalParser<'a>> for ModulePart {
 
 impl<'a> From<Memory<'a>> for ModulePart {
     fn from(_: Memory) -> Self {
-        ModulePart::Local
+        ModulePart::Memory
     }
 }
 
 impl<'a> From<Global<'a>> for ModulePart {
     fn from(_: Global) -> Self {
-        ModulePart::Local
+        ModulePart::Global
     }
 }
 
