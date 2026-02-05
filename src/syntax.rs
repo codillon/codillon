@@ -87,7 +87,7 @@ impl<'a> From<Global<'a>> for ModulePart {
 
 impl<'a> From<Table<'a>> for ModulePart {
     fn from(_: Table) -> Self {
-        ModulePart::Local
+        ModulePart::Table
     }
 }
 
