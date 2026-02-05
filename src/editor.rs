@@ -1,7 +1,7 @@
 // The Codillon code editor
 
 use crate::{
-    autocomplete::{AutocompleteSuggestion, get_suggestions},
+    autocomplete::Autocomplete,
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -35,7 +35,7 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, ()),
+            (ElementHandle<HtmlInputElement>, (Autocomplete, ())),
         ),
     ),
     HtmlDivElement,
@@ -99,11 +99,6 @@ struct _Editor {
 
     program_state: ProgramState,
     saved_states: Vec<Option<ProgramState>>,
-
-    // Autocomplete state
-    autocomplete_suggestions: Vec<AutocompleteSuggestion>,
-    autocomplete_selected: usize,
-    autocomplete_visible: bool,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -122,7 +117,7 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), ()),
+                        (factory.input(), (Autocomplete::new(factory.clone()), ())),
                     ),
                 ),
                 factory.div(),
@@ -133,9 +128,6 @@ impl Editor {
             last_time_ms: 0.0,
             program_state: new_program_state(),
             saved_states: vec![Some(new_program_state())],
-            autocomplete_suggestions: Vec::new(),
-            autocomplete_selected: 0,
-            autocomplete_visible: false,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -414,20 +406,66 @@ impl Editor {
             )),
         }?;
 
-        // Trigger autocomplete based on current line content
+        self.update_autocomplete()?;
+
+        Ok(())
+    }
+
+    fn update_autocomplete(&mut self) -> Result<()> {
         let selection = get_selection();
-        if let Ok((line_idx, _)) = self.find_idx_and_utf16_pos(
-            selection.focus_node().context("focus node")?,
-            selection.focus_offset(),
-        ) {
-            let current_instr = self.line(line_idx).instr().get().to_string();
-            let prefix = current_instr.trim();
-            
-            if !prefix.is_empty() {
-                self.show_autocomplete(prefix);
-            } else {
-                self.hide_autocomplete();
+        if !selection.is_collapsed() {
+            self.autocomplete_mut().hide();
+            return Ok(());
+        }
+
+        let (line_idx, pos, _, _) = match self.get_lines_and_positions(&selection) {
+            Ok(x) => x,
+            Err(_) => {
+                self.autocomplete_mut().hide();
+                return Ok(());
             }
+        };
+
+        if !pos.in_instr {
+            self.autocomplete_mut().hide();
+            return Ok(());
+        }
+
+        // Extract current_word as owned String before calling autocomplete
+        let current_word: String = {
+            let line = self.line(line_idx);
+            let text = line.instr().get();
+
+            // Calculate byte offset from utf16 offset
+            let mut current_utf16 = 0;
+            let mut byte_idx = 0;
+            for c in text.chars() {
+                if current_utf16 >= pos.offset {
+                    break;
+                }
+                current_utf16 += c.len_utf16();
+                byte_idx += c.len_utf8();
+            }
+
+            let prefix_area = &text[..byte_idx];
+            let last_word_start = prefix_area
+                .rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            prefix_area[last_word_start..].to_string()
+        }; // line borrow ends here
+
+        if current_word.is_empty() {
+            self.autocomplete_mut().hide();
+        } else {
+            // Calculate approximate position based on line index
+            // Use fixed left margin and LINE_SPACING for vertical position
+            let left = 120.0; // Left margin where instructions start
+            let top = ((line_idx + 1) * LINE_SPACING) as f64 + 10.0; // Below current line
+
+            let factory = self.0.borrow().factory.clone();
+            self.autocomplete_mut()
+                .filter(&current_word, &factory, left, top);
         }
 
         Ok(())
@@ -437,37 +475,6 @@ impl Editor {
     // later in the line. It also has trouble deleting if the cursor position is at the end of the surrounding
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
     fn handle_keydown(&mut self, ev: web_sys::KeyboardEvent) -> Result<()> {
-        // Handle autocomplete navigation first
-        if self.is_autocomplete_visible() {
-            match ev.key().as_str() {
-                "ArrowUp" => {
-                    ev.prevent_default();
-                    self.autocomplete_move_up();
-                    return Ok(());
-                }
-                "ArrowDown" => {
-                    ev.prevent_default();
-                    self.autocomplete_move_down();
-                    return Ok(());
-                }
-                "Tab" | "Enter" => {
-                    if let Some(suggestion) = self.autocomplete_accept() {
-                        ev.prevent_default();
-                        log_1(&JsValue::from_str(&format!("Selected: {}", suggestion)));
-                        return Ok(());
-                    }
-                }
-                "Escape" => {
-                    ev.prevent_default();
-                    self.hide_autocomplete();
-                    return Ok(());
-                }
-                _ => {
-                    self.hide_autocomplete();
-                }
-            }
-        }
-
         match ev.key().as_str() {
             "ArrowRight" => {
                 let selection = get_selection();
@@ -486,6 +493,11 @@ impl Editor {
             }
 
             "ArrowDown" => {
+                if self.autocomplete().is_visible() {
+                    ev.prevent_default();
+                    self.autocomplete_mut().select_next();
+                    return Ok(());
+                }
                 let selection = get_selection();
                 if selection.is_collapsed() {
                     let (line_idx, _) = self.find_idx_and_utf16_pos(
@@ -493,10 +505,74 @@ impl Editor {
                         selection.focus_offset(),
                     )?;
                     if line_idx + 1 == self.text().len() {
-                        ev.prevent_default();
                         self.line(line_idx)
                             .set_cursor_position(self.line(line_idx).end_position());
                     }
+                }
+            }
+
+            "ArrowUp" => {
+                if self.autocomplete().is_visible() {
+                    ev.prevent_default();
+                    self.autocomplete_mut().select_prev();
+                    return Ok(());
+                }
+            }
+
+            "Tab" | "Enter" if self.autocomplete().is_visible() => {
+                ev.prevent_default();
+                let completion_opt = self.autocomplete().get_selected();
+                if let Some(completion) = completion_opt {
+                    // Insert the completion
+                    // We need to replace the current word with the completion
+                    // Find the word range first
+                    // Reuse logic from update_autocomplete basically
+
+                    // Get current position
+                    let selection = get_selection();
+                    let (line_idx, pos, _, _) = self.get_lines_and_positions(&selection)?;
+
+                    let start_utf16 = {
+                        let line = self.line(line_idx);
+                        let text = line.instr().get();
+
+                        let mut current_utf16 = 0;
+                        let mut byte_idx = 0;
+                        for c in text.chars() {
+                            if current_utf16 >= pos.offset {
+                                break;
+                            }
+                            current_utf16 += c.len_utf16();
+                            byte_idx += c.len_utf8();
+                        }
+                        let prefix_area = &text[..byte_idx];
+                        let last_word_start_byte = prefix_area
+                            .rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+                            .map(|i| i + 1)
+                            .unwrap_or(0);
+
+                        // Convert start byte to utf16 offset for replacement
+                        let start_chars = text[..last_word_start_byte].chars();
+                        start_chars.map(|c| c.len_utf16()).sum()
+                    };
+
+                    let range_start = Position {
+                        in_instr: true,
+                        offset: start_utf16,
+                    };
+                    let range_end = pos; // current cursor
+
+                    // Perform replacement
+                    self.line_mut(line_idx)
+                        .replace_range(range_start, range_end, &completion)?;
+                    self.autocomplete_mut().hide();
+                }
+            }
+
+            "Escape" => {
+                if self.autocomplete().is_visible() {
+                    ev.prevent_default();
+                    self.autocomplete_mut().hide();
                 }
             }
 
@@ -527,6 +603,20 @@ impl Editor {
             }
 
             _ => {}
+        }
+
+        if self.autocomplete().is_visible() && ev.key() != "ArrowDown" && ev.key() != "ArrowUp" {
+            // If we typed something else (e.g. Backspace or letters), handle_input will trigger update
+            // But navigation keys might need to close it if they move cursor out of word
+            // For now relying on update_autocomplete which is called on input.
+            // What about Left/Right? They don't trigger input.
+            // We should check cursor position after move.
+            // But simpler: just hide on Left/Right?
+            // Or update it?
+            // Since we don't have easy "on cursor move" event, let's hide on arrow left/right
+            if ev.key() == "ArrowLeft" || ev.key() == "ArrowRight" {
+                self.autocomplete_mut().hide();
+            }
         }
 
         Ok(())
@@ -575,6 +665,14 @@ impl Editor {
 
     fn image_mut(&self) -> RefMut<'_, DomImage> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().0)
+    }
+
+    fn autocomplete(&self) -> Ref<'_, Autocomplete> {
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.1.0)
+    }
+
+    fn autocomplete_mut(&self) -> RefMut<'_, Autocomplete> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.1.0)
     }
 
     fn text(&self) -> Ref<'_, TextType> {
@@ -1014,193 +1112,6 @@ impl Editor {
             inner.last_time_ms = 0.0;
         }
         Ok(())
-    }
-
-    // Autocomplete: Show the dropdown with filtered suggestions
-    fn show_autocomplete(&mut self, prefix: &str) {
-        let suggestions = get_suggestions(prefix);
-        
-        if suggestions.is_empty() {
-            self.hide_autocomplete();
-            return;
-        }
-
-        let mut inner = self.0.borrow_mut();
-        inner.autocomplete_suggestions = suggestions;
-        inner.autocomplete_selected = 0;
-        inner.autocomplete_visible = true;
-        
-        drop(inner);
-        self.render_autocomplete();
-    }
-
-    // Autocomplete: Hide the dropdown
-    fn hide_autocomplete(&mut self) {
-        let mut inner = self.0.borrow_mut();
-        inner.autocomplete_visible = false;
-        inner.autocomplete_suggestions.clear();
-        inner.autocomplete_selected = 0;
-        
-        // Remove dropdown from DOM
-        let document = web_sys::window().unwrap().document().unwrap();
-        if let Some(dropdown) = document.query_selector(".autocomplete-dropdown").unwrap() {
-            dropdown.remove();
-        }
-    }
-
-    // Autocomplete: Render suggestions in the dropdown
-    fn render_autocomplete(&self) {
-        let inner = self.0.borrow();
-        let suggestions = inner.autocomplete_suggestions.clone();
-        let selected = inner.autocomplete_selected;
-        drop(inner);
-        
-        // Create HTML content for the dropdown
-        let mut items_html = String::new();
-        for (i, suggestion) in suggestions.iter().enumerate() {
-            let selected_class = if i == selected { " selected" } else { "" };
-            let category_str = match suggestion.category {
-                crate::autocomplete::SuggestionCategory::Instruction => "instr",
-                crate::autocomplete::SuggestionCategory::Keyword => "kw",
-                crate::autocomplete::SuggestionCategory::Control => "ctrl",
-            };
-            items_html.push_str(&format!(
-                "<div class=\"autocomplete-item{}\" data-index=\"{}\" data-text=\"{}\"><span>{}</span><span class=\"category\">{}</span></div>",
-                selected_class, i, suggestion.text, suggestion.text, category_str
-            ));
-        }
-
-        // Create or update dropdown in DOM
-        let document = web_sys::window().unwrap().document().unwrap();
-        
-        let dropdown = if let Some(existing) = document.query_selector(".autocomplete-dropdown").unwrap() {
-            existing
-        } else {
-            let new_dropdown = document.create_element("div").unwrap();
-            new_dropdown.set_attribute("class", "autocomplete-dropdown").unwrap();
-            
-            if let Some(body) = document.body() {
-                body.append_child(&new_dropdown).unwrap();
-            }
-            new_dropdown
-        };
-        
-        dropdown.set_inner_html(&items_html);
-        
-        // Add click handlers to items
-        let items = dropdown.query_selector_all(".autocomplete-item").unwrap();
-        for i in 0..items.length() {
-            if let Some(item) = items.get(i) {
-                let item_el: web_sys::HtmlElement = item.dyn_into().unwrap();
-                let text = item_el.get_attribute("data-text").unwrap_or_default();
-                
-                // Create click handler closure
-                let closure = wasm_bindgen::closure::Closure::wrap(Box::new(move |_ev: web_sys::MouseEvent| {
-                    let doc = web_sys::window().unwrap().document().unwrap();
-                    
-                    log_1(&JsValue::from_str(&format!("Clicked: {}", text)));
-                    
-                    // Remove dropdown after click
-                    if let Some(dd) = doc.query_selector(".autocomplete-dropdown").unwrap() {
-                        dd.remove();
-                    }
-                }) as Box<dyn FnMut(_)>);
-                
-                item_el.set_onclick(Some(closure.as_ref().unchecked_ref()));
-                closure.forget(); // Keep closure alive
-            }
-        }
-        
-        // Position near cursor - find focused line element
-        if let Some(win) = web_sys::window() {
-            if let Ok(Some(selection)) = win.get_selection() {
-                if let Some(focus_node) = selection.focus_node() {
-                    // Walk up to find the line div
-                    let mut current = focus_node.parent_element();
-                    while let Some(el) = current {
-                        if el.class_list().contains("line") {
-                            let rect = el.get_bounding_client_rect();
-                            let top = rect.bottom() + 5.0;
-                            let left = rect.left() + 50.0;
-                            dropdown.set_attribute("style", &format!("left: {}px; top: {}px;", left, top)).unwrap();
-                            break;
-                        }
-                        current = el.parent_element();
-                    }
-                }
-            }
-        }
-    }
-
-    // Autocomplete: Move selection up
-    fn autocomplete_move_up(&mut self) {
-        let mut inner = self.0.borrow_mut();
-        if !inner.autocomplete_visible || inner.autocomplete_suggestions.is_empty() {
-            return;
-        }
-        if inner.autocomplete_selected > 0 {
-            inner.autocomplete_selected -= 1;
-        } else {
-            inner.autocomplete_selected = inner.autocomplete_suggestions.len() - 1;
-        }
-        drop(inner);
-        self.render_autocomplete();
-    }
-
-    // Autocomplete: Move selection down
-    fn autocomplete_move_down(&mut self) {
-        let mut inner = self.0.borrow_mut();
-        if !inner.autocomplete_visible || inner.autocomplete_suggestions.is_empty() {
-            return;
-        }
-        inner.autocomplete_selected = (inner.autocomplete_selected + 1) % inner.autocomplete_suggestions.len();
-        drop(inner);
-        self.render_autocomplete();
-    }
-
-    // Autocomplete: Accept the currently selected suggestion
-    fn autocomplete_accept(&mut self) -> Option<String> {
-        let inner = self.0.borrow();
-        if !inner.autocomplete_visible || inner.autocomplete_suggestions.is_empty() {
-            return None;
-        }
-        let selected = inner.autocomplete_selected;
-        let suggestion = inner.autocomplete_suggestions.get(selected).cloned();
-        drop(inner);
-        
-        // Insert the suggestion into the current line
-        if let Some(ref sugg) = suggestion {
-            let selection = get_selection();
-            if let Ok((line_idx, _pos)) = self.find_idx_and_utf16_pos(
-                selection.focus_node().context("focus node").ok()?,
-                selection.focus_offset(),
-            ) {
-                // Get end position first (immutable borrow)
-                let end_pos = self.line(line_idx).end_position();
-                
-                // Replace the entire instruction text with the suggestion (mutable borrow)
-                let replace_result = self.line_mut(line_idx).replace_range(
-                    crate::line::Position::begin(),
-                    end_pos,
-                    &sugg.text
-                );
-                
-                // Now that mutable borrow is done, set cursor
-                if replace_result.is_ok() {
-                    self.line(line_idx).set_cursor_position(
-                        crate::line::Position::begin()
-                    );
-                }
-            }
-        }
-        
-        self.hide_autocomplete();
-        suggestion.map(|s| s.text)
-    }
-
-    // Autocomplete: Check if visible
-    fn is_autocomplete_visible(&self) -> bool {
-        self.0.borrow().autocomplete_visible
     }
 }
 
