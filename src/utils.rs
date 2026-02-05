@@ -112,11 +112,11 @@ impl InstrumentImports {
             &[EncoderValType::I32, EncoderValType::F64],
             &[EncoderValType::I32, EncoderValType::F64],
         ),
-        // 10: (i32, f32) -> () -- for set_local_f32 / set_global_f32
+        // 10: (i32, f32) -> ()
         (&[EncoderValType::I32, EncoderValType::F32], &[]),
-        // 11: (i32, i64) -> () -- for set_local_i64 / set_global_i64
+        // 11: (i32, i64) -> ()
         (&[EncoderValType::I32, EncoderValType::I64], &[]),
-        // 12: (i32, f64) -> () -- for set_local_f64 / set_global_f64
+        // 12: (i32, f64) -> ()
         (&[EncoderValType::I32, EncoderValType::F64], &[]),
     ];
 }
@@ -646,7 +646,7 @@ impl<'a> ValidModule<'a> {
         let mut codes = CodeSection::new();
         // Start with first function
         for func_idx in 0..self.functions.len() {
-            let _ = self.build_binary(func_idx, &mut codes, types);
+            let _ = self.build_function(func_idx, &mut codes, types);
         }
         module.section(&codes);
 
@@ -654,7 +654,7 @@ impl<'a> ValidModule<'a> {
         Ok(wasm)
     }
 
-    fn build_binary(
+    fn build_function(
         &self,
         func_idx: usize,
         codes: &mut CodeSection,
