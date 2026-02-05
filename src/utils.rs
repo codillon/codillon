@@ -264,10 +264,7 @@ impl<'a> RawModule<'a> {
         // given a string describing a Wasm valtype, synthesize
         // the corresponding "const" instruction to produce
         // a value of that type. E.g. "i32" produces an "i32.const 0" instruction.
-        // For types that do not have a default value (e.g. "(ref func")),
-        // produce an "unreachable" instruction, which makes the stack
-        // polymorphic (a future instruction will be able to pop any type from
-        // the operand stack).
+        // Some types do not have a default value (e.g. "(ref func")).
         fn type_str_to_default_value(s: &str) -> Option<Operator<'static>> {
             match s {
                 "i32" => Some(Operator::I32Const { value: 0 }),
@@ -287,6 +284,9 @@ impl<'a> RawModule<'a> {
             }
         }
 
+        // Disable this operator (there's no way to make it valid in context),
+        // by replacing it with a nop unless it's the beginning of a block instruction,
+        // in which case preserve the block structure.
         fn bailout(op: &Aligned<GeneralOperator<'_>>) -> Aligned<GeneralOperator<'static>> {
             Aligned {
                 line_idx: op.line_idx,
@@ -337,22 +337,33 @@ impl<'a> RawModule<'a> {
                 Err(e) => {
                     match e.message().strip_prefix("type mismatch: expected ") {
                         None => {
-                            // some other reason for the invalidity (not a missing param)
+                            // some reason for the invalidity other than a missing/mismatched param
+                            // -> replace operator with something valid in this context
                             return Ok(bailout(&general_op));
                         }
                         Some(suffix) => match type_str_to_default_value(first_type(suffix)?) {
+                            // Invalidity is because of a missing or mismatched param.
+                            // Can we insert a default value?
                             Some(op) => general_op.op.prepended.insert(drop_count, op),
                             None => {
+                                // No default value possible.
                                 general_op.op.untyped = true;
                                 match &general_op.op.op {
+                                    // If the operator is an end, need to preserve block structure,
+                                    // but we can do this by marking block (which is almost ending anyway)
+                                    // unreachable. This will make the stack polymorphic and the `end`
+                                    // can pop whatever it needs.
                                     Operator::End => general_op
                                         .op
                                         .prepended
                                         .insert(drop_count, Operator::Unreachable),
+                                    // A polymorphic operator (e.g. `drop` or `select`) can take any param,
+                                    // so here give it an i32.
                                     _ if suffix == "a type but nothing on stack" => general_op
                                         .op
                                         .prepended
                                         .insert(drop_count, Operator::I32Const { value: 0 }),
+                                    // Otherwise, replace operator with something valid in this context.
                                     _ => return Ok(bailout(&general_op)),
                                 }
                             }
@@ -392,6 +403,7 @@ struct SimulatedStack {
 }
 
 impl SimulatedStack {
+    // Given an operator, validate it and return its type (the param and result types).
     fn op(
         &mut self,
         op: &Operator<'_>,
@@ -458,14 +470,8 @@ impl SimulatedStack {
 }
 
 impl<'a> ValidModule<'a> {
-    /// Returns input and output types for each instruction in a binary Wasm module
+    /// Computes the param and result types for each operator in the module.
     ///
-    /// # Parameters
-    /// wasm_bin: a binary Wasm module
-    ///
-    /// # Returns
-    /// Err if function is not valid, else:
-    /// a TypesTable
     pub fn to_types_table(&self, wasm_bin: &[u8]) -> Result<TypesTable> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = Validator::new();
