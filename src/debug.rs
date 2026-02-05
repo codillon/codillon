@@ -2,7 +2,7 @@
 // Currently support:
 // - all normal scalar value ops: i32, i64, f32, f64 (pushes from instructions are recorded)
 // - memory store ops: i32, i64, f32, f64 (stores record addr + value)
-// - local/global set ops for i32 (local/global i64, f32, f64 to be added)
+// - local/global set ops for i32
 // Currently do not support:
 // - other memory operations
 // - all SIMD/vector operations
@@ -22,7 +22,7 @@ thread_local! {
     static STATE: RefCell<DebugState> = RefCell::new(DebugState::new());
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub enum WebAssemblyTypes {
     I32(i32),
     I64(i64),
@@ -31,10 +31,36 @@ pub enum WebAssemblyTypes {
     V128(u128),
 }
 
+impl From<i32> for WebAssemblyTypes {
+    fn from(v: i32) -> Self {
+        WebAssemblyTypes::I32(v)
+    }
+}
+impl From<i64> for WebAssemblyTypes {
+    fn from(v: i64) -> Self {
+        WebAssemblyTypes::I64(v)
+    }
+}
+impl From<f32> for WebAssemblyTypes {
+    fn from(v: f32) -> Self {
+        WebAssemblyTypes::F32(v)
+    }
+}
+impl From<f64> for WebAssemblyTypes {
+    fn from(v: f64) -> Self {
+        WebAssemblyTypes::F64(v)
+    }
+}
+impl From<u128> for WebAssemblyTypes {
+    fn from(v: u128) -> Self {
+        WebAssemblyTypes::V128(v)
+    }
+}
+
 pub struct Change {
     pub line_number: i32,
     pub stack_pushes: Vec<WebAssemblyTypes>,
-    pub locals_change: Option<(u32, WebAssemblyTypes)>,
+    pub locals_change: Option<(usize, Vec<(usize, WebAssemblyTypes)>)>,
     pub globals_change: Option<(u32, WebAssemblyTypes)>,
     pub memory_change: Option<(u32, WebAssemblyTypes)>,
     pub num_pops: u32,
@@ -43,10 +69,11 @@ pub struct Change {
 struct DebugState {
     // Current State
     stack_pushes: Vec<WebAssemblyTypes>,
-    locals_change: Option<(u32, WebAssemblyTypes)>,
+    locals_change: Option<(usize, Vec<(usize, WebAssemblyTypes)>)>,
     globals_change: Option<(u32, WebAssemblyTypes)>,
     memory_change: Option<(u32, WebAssemblyTypes)>,
     num_pops: u32,
+    func_locals: Vec<Vec<WebAssemblyTypes>>,
     // Chronological per-step changes
     changes: Vec<Change>,
 }
@@ -59,14 +86,27 @@ impl DebugState {
             globals_change: None,
             memory_change: None,
             num_pops: 0,
+            func_locals: Vec::new(),
             changes: Vec::new(),
         }
     }
 }
+
+fn register_closure<F>(obj: &Object, name: &str, func: Closure<F>)
+where
+    F: ?Sized + 'static + wasm_bindgen::closure::WasmClosure,
+{
+    Reflect::set(obj, &JsValue::from_str(name), func.as_ref().unchecked_ref()).ok();
+    func.forget();
+}
+
+// Reset DebugState for new runs
+pub fn reset_debug_state() {
+    STATE.with(|cur_state| *cur_state.borrow_mut() = DebugState::new());
+}
+
 // Constructs the instrumentation functions for import
 pub fn make_imports() -> Result<Object, JsValue> {
-    // Reset DebugState for new runs
-    STATE.with(|cur_state| *cur_state.borrow_mut() = DebugState::new());
     let imports = Object::new();
     let debug_numbers = Object::new();
 
@@ -83,8 +123,8 @@ pub fn make_imports() -> Result<Object, JsValue> {
                 line_number: line_num,
                 stack_pushes: state.stack_pushes.clone(),
                 locals_change: state.locals_change.clone(),
-                globals_change: state.globals_change.clone(),
-                memory_change: state.memory_change.clone(),
+                globals_change: state.globals_change,
+                memory_change: state.memory_change,
                 num_pops: state.num_pops,
             };
             state.changes.push(cur_change);
@@ -96,19 +136,12 @@ pub fn make_imports() -> Result<Object, JsValue> {
             1
         })
     }) as Box<dyn Fn(i32) -> i32>);
-    Reflect::set(
-        &debug_numbers,
-        &JsValue::from_str("step"),
-        step_closure.as_ref().unchecked_ref(),
-    )
-    .ok();
-    step_closure.forget();
+    register_closure(&debug_numbers, "step", step_closure);
 
     create_closure_local_operations(&debug_numbers);
     create_closure_global_operations(&debug_numbers);
     create_closure_memory_operations(&debug_numbers);
 
-    // Store i32.const expressions
     let push_i32 = Closure::wrap(Box::new(move |value: i32| {
         STATE.with(|cur_state| {
             cur_state
@@ -118,15 +151,8 @@ pub fn make_imports() -> Result<Object, JsValue> {
         });
         value
     }) as Box<dyn Fn(i32) -> i32>);
-    Reflect::set(
-        &debug_numbers,
-        &JsValue::from_str("push_i32"),
-        push_i32.as_ref().unchecked_ref(),
-    )
-    .ok();
-    push_i32.forget();
+    register_closure(&debug_numbers, "push_i32", push_i32);
 
-    // Store f32.const expressions
     let push_f32 = Closure::wrap(Box::new(move |value: f32| {
         STATE.with(|cur_state| {
             cur_state
@@ -136,15 +162,8 @@ pub fn make_imports() -> Result<Object, JsValue> {
         });
         value
     }) as Box<dyn Fn(f32) -> f32>);
-    Reflect::set(
-        &debug_numbers,
-        &JsValue::from_str("push_f32"),
-        push_f32.as_ref().unchecked_ref(),
-    )
-    .ok();
-    push_f32.forget();
+    register_closure(&debug_numbers, "push_f32", push_f32);
 
-    // Store i64.const expressions
     let push_i64 = Closure::wrap(Box::new(move |value: i64| {
         STATE.with(|cur_state| {
             cur_state
@@ -154,13 +173,7 @@ pub fn make_imports() -> Result<Object, JsValue> {
         });
         value
     }) as Box<dyn Fn(i64) -> i64>);
-    Reflect::set(
-        &debug_numbers,
-        &JsValue::from_str("push_i64"),
-        push_i64.as_ref().unchecked_ref(),
-    )
-    .ok();
-    push_i64.forget();
+    register_closure(&debug_numbers, "push_i64", push_i64);
 
     // Store f64.const expressions
     let push_f64 = Closure::wrap(Box::new(move |value: f64| {
@@ -172,25 +185,14 @@ pub fn make_imports() -> Result<Object, JsValue> {
         });
         value
     }) as Box<dyn Fn(f64) -> f64>);
-    Reflect::set(
-        &debug_numbers,
-        &JsValue::from_str("push_f64"),
-        push_f64.as_ref().unchecked_ref(),
-    )
-    .ok();
-    push_f64.forget();
+    register_closure(&debug_numbers, "push_f64", push_f64);
 
     let pop_i = Closure::wrap(Box::new(move |pop_num: i32| {
         STATE.with(|cur_state| {
             cur_state.borrow_mut().num_pops = pop_num as u32;
         });
     }) as Box<dyn Fn(i32)>);
-    Reflect::set(
-        &debug_numbers,
-        &JsValue::from_str("pop_i"),
-        pop_i.as_ref().unchecked_ref(),
-    )?;
-    pop_i.forget();
+    register_closure(&debug_numbers, "pop_i", pop_i);
 
     Reflect::set(
         &imports,
@@ -207,13 +209,7 @@ fn create_closure_global_operations(debug_numbers: &Object) {
                 Some((idx as u32, WebAssemblyTypes::I32(value)));
         });
     }) as Box<dyn Fn(i32, i32)>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_global_i32"),
-        set_global_i32.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_global_i32.forget();
+    register_closure(debug_numbers, "set_global_i32", set_global_i32);
 
     let set_global_f32 = Closure::wrap(Box::new(move |idx: i32, value: f32| {
         STATE.with(|cur_state| {
@@ -221,13 +217,7 @@ fn create_closure_global_operations(debug_numbers: &Object) {
                 Some((idx as u32, WebAssemblyTypes::F32(value)));
         });
     }) as Box<dyn Fn(i32, f32)>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_global_f32"),
-        set_global_f32.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_global_f32.forget();
+    register_closure(debug_numbers, "set_global_f32", set_global_f32);
 
     let set_global_i64 = Closure::wrap(Box::new(move |idx: i32, value: i64| {
         STATE.with(|cur_state| {
@@ -235,13 +225,7 @@ fn create_closure_global_operations(debug_numbers: &Object) {
                 Some((idx as u32, WebAssemblyTypes::I64(value)));
         });
     }) as Box<dyn Fn(i32, i64)>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_global_i64"),
-        set_global_i64.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_global_i64.forget();
+    register_closure(debug_numbers, "set_global_i64", set_global_i64);
 
     let set_global_f64 = Closure::wrap(Box::new(move |idx: i32, value: f64| {
         STATE.with(|cur_state| {
@@ -249,67 +233,39 @@ fn create_closure_global_operations(debug_numbers: &Object) {
                 Some((idx as u32, WebAssemblyTypes::F64(value)));
         });
     }) as Box<dyn Fn(i32, f64)>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_global_f64"),
-        set_global_f64.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_global_f64.forget();
+    register_closure(debug_numbers, "set_global_f64", set_global_f64);
 }
 
 fn create_closure_local_operations(debug_numbers: &Object) {
-    let set_local_i32 = Closure::wrap(Box::new(move |idx: i32, value: i32| {
+    let record_local_change = |func_idx: usize, idx: usize, value: WebAssemblyTypes| {
         STATE.with(|cur_state| {
-            cur_state.borrow_mut().locals_change = Some((idx as u32, WebAssemblyTypes::I32(value)));
+            let mut state = cur_state.borrow_mut();
+            if let Some(cur_locals) = &mut state.locals_change {
+                cur_locals.1.push((idx, value));
+            } else {
+                state.locals_change = Some((func_idx, vec![(idx, value)]));
+            }
         });
-    }) as Box<dyn Fn(i32, i32)>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_local_i32"),
-        set_local_i32.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_local_i32.forget();
+    };
+    let set_local_i32 = Closure::wrap(Box::new(move |func_idx: i32, idx: i32, value: i32| {
+        record_local_change(func_idx as usize, idx as usize, value.into());
+    }) as Box<dyn Fn(i32, i32, i32)>);
+    register_closure(debug_numbers, "set_local_i32", set_local_i32);
 
-    let set_local_f32 = Closure::wrap(Box::new(move |idx: i32, value: f32| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().locals_change = Some((idx as u32, WebAssemblyTypes::F32(value)));
-        });
-    }) as Box<dyn Fn(i32, f32)>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_local_f32"),
-        set_local_f32.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_local_f32.forget();
+    let set_local_f32 = Closure::wrap(Box::new(move |func_idx: i32, idx: i32, value: f32| {
+        record_local_change(func_idx as usize, idx as usize, value.into());
+    }) as Box<dyn Fn(i32, i32, f32)>);
+    register_closure(debug_numbers, "set_local_f32", set_local_f32);
 
-    let set_local_i64 = Closure::wrap(Box::new(move |idx: i32, value: i64| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().locals_change = Some((idx as u32, WebAssemblyTypes::I64(value)));
-        });
-    }) as Box<dyn Fn(i32, i64)>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_local_i64"),
-        set_local_i64.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_local_i64.forget();
+    let set_local_i64 = Closure::wrap(Box::new(move |func_idx: i32, idx: i32, value: i64| {
+        record_local_change(func_idx as usize, idx as usize, value.into());
+    }) as Box<dyn Fn(i32, i32, i64)>);
+    register_closure(debug_numbers, "set_local_i64", set_local_i64);
 
-    let set_local_f64 = Closure::wrap(Box::new(move |idx: i32, value: f64| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().locals_change = Some((idx as u32, WebAssemblyTypes::F64(value)));
-        });
-    }) as Box<dyn Fn(i32, f64)>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_local_f64"),
-        set_local_f64.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_local_f64.forget();
+    let set_local_f64 = Closure::wrap(Box::new(move |func_idx: i32, idx: i32, value: f64| {
+        record_local_change(func_idx as usize, idx as usize, value.into());
+    }) as Box<dyn Fn(i32, i32, f64)>);
+    register_closure(debug_numbers, "set_local_f64", set_local_f64);
 }
 
 fn create_closure_memory_operations(debug_numbers: &Object) {
@@ -324,13 +280,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr.push(&JsValue::from_f64(value as f64));
         arr
     }) as Box<dyn Fn(i32, i32) -> js_sys::Array>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_memory_i32"),
-        set_memory_i32.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_memory_i32.forget();
+    register_closure(debug_numbers, "set_memory_i32", set_memory_i32);
 
     let set_memory_f32 = Closure::wrap(Box::new(move |addr: i32, value: f32| {
         STATE.with(|cur_state| {
@@ -342,13 +292,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr.push(&JsValue::from_f64(value as f64));
         arr
     }) as Box<dyn Fn(i32, f32) -> js_sys::Array>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_memory_f32"),
-        set_memory_f32.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_memory_f32.forget();
+    register_closure(debug_numbers, "set_memory_f32", set_memory_f32);
 
     let set_memory_i64 = Closure::wrap(Box::new(move |addr: i32, value: i64| {
         STATE.with(|cur_state| {
@@ -360,13 +304,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr.push(&JsValue::from_f64(value as f64));
         arr
     }) as Box<dyn Fn(i32, i64) -> js_sys::Array>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_memory_i64"),
-        set_memory_i64.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_memory_i64.forget();
+    register_closure(debug_numbers, "set_memory_i64", set_memory_i64);
 
     let set_memory_f64 = Closure::wrap(Box::new(move |addr: i32, value: f64| {
         STATE.with(|cur_state| {
@@ -378,13 +316,36 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr.push(&JsValue::from_f64(value));
         arr
     }) as Box<dyn Fn(i32, f64) -> js_sys::Array>);
-    Reflect::set(
-        debug_numbers,
-        &JsValue::from_str("set_memory_f64"),
-        set_memory_f64.as_ref().unchecked_ref(),
-    )
-    .ok();
-    set_memory_f64.forget();
+    register_closure(debug_numbers, "set_memory_f64", set_memory_f64);
+}
+
+fn valtype_default(ty: &wasmparser::ValType) -> WebAssemblyTypes {
+    match ty {
+        wasmparser::ValType::I32 => WebAssemblyTypes::I32(0),
+        wasmparser::ValType::I64 => WebAssemblyTypes::I64(0),
+        wasmparser::ValType::F32 => WebAssemblyTypes::F32(0.0),
+        wasmparser::ValType::F64 => WebAssemblyTypes::F64(0.0),
+        wasmparser::ValType::V128 => WebAssemblyTypes::V128(0u128),
+        _ => panic!("unsupported valtype for locals"),
+    }
+}
+
+pub fn initialize_locals(
+    params: &Vec<wasmparser::ValType>,
+    locals: &Vec<(u32, wasmparser::ValType)>,
+) {
+    STATE.with(|cur_state| {
+        let mut cur_locals: Vec<WebAssemblyTypes> = Vec::new();
+        for param in params {
+            cur_locals.push(valtype_default(param));
+        }
+        for (count, local_type) in locals {
+            for _ in 0..*count {
+                cur_locals.push(valtype_default(local_type));
+            }
+        }
+        cur_state.borrow_mut().func_locals.push(cur_locals);
+    });
 }
 
 pub fn last_step() -> usize {
@@ -396,6 +357,10 @@ where
     F: FnOnce(std::slice::Iter<'_, Change>) -> T,
 {
     STATE.with(|cur_state| get_iter(cur_state.borrow().changes.iter()))
+}
+
+pub fn get_all_locals() -> Vec<Vec<WebAssemblyTypes>> {
+    STATE.with(|cur_state| cur_state.borrow().func_locals.clone())
 }
 
 fn type_to_string(value: &WebAssemblyTypes) -> String {
