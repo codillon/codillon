@@ -523,12 +523,7 @@ impl Editor {
                 ev.prevent_default();
                 let completion_opt = self.autocomplete().get_selected();
                 if let Some(completion) = completion_opt {
-                    // Insert the completion
-                    // We need to replace the current word with the completion
-                    // Find the word range first
-                    // Reuse logic from update_autocomplete basically
-
-                    // Get current position
+                    //Gets position.
                     let selection = get_selection();
                     let (line_idx, pos, _, _) = self.get_lines_and_positions(&selection)?;
 
@@ -606,14 +601,7 @@ impl Editor {
         }
 
         if self.autocomplete().is_visible() && ev.key() != "ArrowDown" && ev.key() != "ArrowUp" {
-            // If we typed something else (e.g. Backspace or letters), handle_input will trigger update
-            // But navigation keys might need to close it if they move cursor out of word
-            // For now relying on update_autocomplete which is called on input.
-            // What about Left/Right? They don't trigger input.
-            // We should check cursor position after move.
-            // But simpler: just hide on Left/Right?
-            // Or update it?
-            // Since we don't have easy "on cursor move" event, let's hide on arrow left/right
+            // Typing other then it will update.
             if ev.key() == "ArrowLeft" || ev.key() == "ArrowRight" {
                 self.autocomplete_mut().hide();
             }
