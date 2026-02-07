@@ -101,6 +101,7 @@ struct _Editor {
 
     program_state: ProgramState,
     saved_states: Vec<Option<ProgramState>>,
+    function_ranges: Vec<(usize, usize)>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -130,6 +131,7 @@ impl Editor {
             last_time_ms: 0.0,
             program_state: new_program_state(),
             saved_states: vec![Some(new_program_state())],
+            function_ranges: Vec::new(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -556,7 +558,7 @@ impl Editor {
         // find frames in the function
         find_frames(self);
 
-        let func_ranges = match find_function_ranges(self) {
+        self.0.borrow_mut().function_ranges = match find_function_ranges(self) {
             None => return Ok(()),
             Some(range) if range.is_empty() => return Ok(()),
             Some(ranges) => ranges,
@@ -568,7 +570,7 @@ impl Editor {
                 .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
         )?;
 
-        let raw_module = self.to_raw_module(&wasm_bin, func_ranges)?;
+        let raw_module = self.to_raw_module(&wasm_bin)?;
         let validized = raw_module.fix_validity(&wasm_bin, self)?;
         let types = validized.to_types_table(&wasm_bin)?;
 
@@ -638,7 +640,6 @@ impl Editor {
     fn to_raw_module<'a>(
         &self,
         wasm_bin: &'a [u8],
-        func_ranges: Vec<(usize, usize)>,
     ) -> Result<RawModule<'a>> {
         let parser = Parser::new(0);
         let mut functions: Vec<RawFunction> = Vec::new();
@@ -673,7 +674,7 @@ impl Editor {
                 _ => {}
             }
         }
-        for (func_idx, (func_start, func_end)) in func_ranges.iter().enumerate() {
+        for (func_idx, (func_start, func_end)) in self.0.borrow().function_ranges.iter().enumerate() {
             //match each operator with its idx in the editor
             let mut aligned_ops = Vec::new();
             let mut ops_iter = func_ops[func_idx].clone().into_iter();
@@ -834,6 +835,11 @@ impl Editor {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
                 inner.program_state.step_number = i + 1;
                 inner.program_state.line_number = change.line_number;
+                let line_num = change.line_number as usize;
+                let func_idx = inner
+                    .function_ranges
+                    .iter()
+                    .position(|(s, e)| line_num >= *s && line_num <= *e).expect("line inside function");
                 let new_length = inner
                     .program_state
                     .stack_state
@@ -843,12 +849,12 @@ impl Editor {
                 for push in &change.stack_pushes {
                     inner.program_state.stack_state.push(*push);
                 }
-                if let Some((func_idx, updates)) = &change.locals_change {
+                if let Some(updates) = &change.locals_change {
                     for (idx, val) in updates {
-                        all_locals[*func_idx][*idx] = *val;
+                        all_locals[func_idx][*idx] = *val;
                     }
-                    inner.program_state.locals_state = all_locals[*func_idx].clone();
                 }
+                inner.program_state.locals_state = all_locals[func_idx].clone();
                 // Resizing won't be necessary when number of globals are known
                 if let Some((idx, val)) = &change.globals_change {
                     let idx_usize = *idx as usize;

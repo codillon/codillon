@@ -35,10 +35,11 @@ enum InstrumentationFuncs {
     PushI64,
     PushF64,
     CallFunc(u32),
+    EndFunc,
     Other,
 }
 #[repr(u32)]
-enum InstrumentImports {
+enum InstrImports {
     Step,
     PopI,
     SetLocalI32,
@@ -58,14 +59,14 @@ enum InstrumentImports {
     PushI64,
     PushF64,
 }
-impl InstrumentImports {
+impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
         ("step", 1),
         ("pop_i", 0),
-        ("set_local_i32", 13),
-        ("set_local_f32", 14),
-        ("set_local_i64", 15),
-        ("set_local_f64", 16),
+        ("set_local_i32", 5),
+        ("set_local_f32", 10),
+        ("set_local_i64", 11),
+        ("set_local_f64", 12),
         ("set_global_i32", 5),
         ("set_global_f32", 10),
         ("set_global_i64", 11),
@@ -118,42 +119,6 @@ impl InstrumentImports {
         (&[EncoderValType::I32, EncoderValType::I64], &[]),
         // 12: (i32, f64) -> ()
         (&[EncoderValType::I32, EncoderValType::F64], &[]),
-        // 13: (i32, i32, i32) -> ()
-        (
-            &[
-                EncoderValType::I32,
-                EncoderValType::I32,
-                EncoderValType::I32,
-            ],
-            &[],
-        ),
-        // 14: (i32, i32, f32) -> ()
-        (
-            &[
-                EncoderValType::I32,
-                EncoderValType::I32,
-                EncoderValType::F32,
-            ],
-            &[],
-        ),
-        // 15: (i32, i32, i64) -> ()
-        (
-            &[
-                EncoderValType::I32,
-                EncoderValType::I32,
-                EncoderValType::I64,
-            ],
-            &[],
-        ),
-        // 16: (i32, i32, f64) -> ()
-        (
-            &[
-                EncoderValType::I32,
-                EncoderValType::I32,
-                EncoderValType::F64,
-            ],
-            &[],
-        ),
     ];
 }
 
@@ -560,6 +525,7 @@ impl<'a> ValidModule<'a> {
         match operation {
             // Special Functions
             Call { function_index } => CallFunc(*function_index),
+            Return | End => EndFunc,
             LocalSet { local_index } | LocalTee { local_index } => {
                 match op_type.inputs.first().expect("local op type") {
                     InputType {
@@ -618,7 +584,7 @@ impl<'a> ValidModule<'a> {
     fn instr_func_types(&self) -> TypeSection {
         // Encode the type section.
         let mut types = TypeSection::new();
-        for (params_slice, results_slice) in InstrumentImports::FUNC_SIGS.iter() {
+        for (params_slice, results_slice) in InstrImports::FUNC_SIGS.iter() {
             types
                 .ty()
                 .function(params_slice.to_vec(), results_slice.to_vec());
@@ -643,7 +609,7 @@ impl<'a> ValidModule<'a> {
     fn instr_imports(&self) -> wasm_encoder::ImportSection {
         // Encode the instrumentation functions as imports.
         let mut imports = wasm_encoder::ImportSection::new();
-        for (name, type_idx) in InstrumentImports::TYPE_INDICES.iter() {
+        for (name, type_idx) in InstrImports::TYPE_INDICES.iter() {
             imports.import(
                 "codillon_debug",
                 name,
@@ -660,7 +626,7 @@ impl<'a> ValidModule<'a> {
 
         // Encode the function section.
         let mut functions = FunctionSection::new();
-        let func_type_offset = InstrumentImports::FUNC_SIGS.len();
+        let func_type_offset = InstrImports::FUNC_SIGS.len();
         for i in 0..self.functions.len() {
             functions.function((func_type_offset + i) as u32);
         }
@@ -683,13 +649,12 @@ impl<'a> ValidModule<'a> {
         exports.export(
             "main",
             wasm_encoder::ExportKind::Func,
-            InstrumentImports::TYPE_INDICES.len() as u32,
+            InstrImports::TYPE_INDICES.len() as u32,
         );
         module.section(&exports);
 
         // Encode the code section.
         let mut codes = CodeSection::new();
-        // Start with first function
         for func_idx in 0..self.functions.len() {
             crate::debug::initialize_locals(
                 &self.functions[func_idx].params,
@@ -719,8 +684,9 @@ impl<'a> ValidModule<'a> {
         );
         let pop_debug = |func: &mut wasm_encoder::Function, num_pop: i32| {
             func.instruction(&I32Const(num_pop));
-            func.instruction(&Call(InstrumentImports::PopI as u32));
+            func.instruction(&Call(InstrImports::PopI as u32));
         };
+        self.record_params(func_idx, &mut f);
         for (i, codillon_instruction) in function.operators.iter().enumerate() {
             if !codillon_instruction.op.prepended.is_empty() {
                 f.instruction(&Unreachable);
@@ -732,19 +698,20 @@ impl<'a> ValidModule<'a> {
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.op.clone())?;
             let value_type = &types.functions.get(func_idx).unwrap().types[i];
             let operation_type = Self::classify(&codillon_instruction.op.op, value_type);
+            if value_type.inputs.len() > 0 {
+                pop_debug(&mut f, value_type.inputs.len() as i32);
+            }
             if let CallFunc(function_idx) = operation_type {
                 f.instruction(&Call(
-                    function_idx + InstrumentImports::TYPE_INDICES.len() as u32,
+                    function_idx + InstrImports::TYPE_INDICES.len() as u32,
                 ));
-                pop_debug(&mut f, value_type.inputs.len() as i32);
             } else {
                 // Instrumentation that needs to occur before execution
                 Self::instrument_memory_ops(&mut f, &operation_type);
                 Self::instrument_global_ops(&mut f, &operation_type);
-                pop_debug(&mut f, value_type.inputs.len() as i32);
                 f.instruction(&instruction);
                 // Instrumentation that needs to occur after execution
-                Self::instrument_local_ops(&mut f, &operation_type, func_idx);
+                Self::instrument_local_ops(&mut f, &operation_type);
                 Self::instrument_global_ops(&mut f, &operation_type);
                 Self::instrument_push_ops(&mut f, &operation_type);
             }
@@ -756,15 +723,32 @@ impl<'a> ValidModule<'a> {
             ) {
                 // Step after each instruction evaluation
                 f.instruction(&I32Const(line_idx));
-                f.instruction(&Call(InstrumentImports::Step as u32));
+                f.instruction(&Call(InstrImports::Step as u32));
                 f.instruction(&I32Eqz);
                 f.instruction(&If(wasm_encoder::BlockType::Empty));
-                f.instruction(&Return);
+                f.instruction(&Unreachable);
                 f.instruction(&End);
             }
         }
         codes.function(&f);
         Ok(())
+    }
+
+    fn record_params(
+        &self,
+        func_idx: usize,
+        f: &mut wasm_encoder::Function) {
+        for (param_idx, param) in self.functions[func_idx].params.iter().enumerate() {
+            f.instruction(&I32Const(param_idx as i32));
+            f.instruction(&LocalGet(param_idx as u32));
+            match param {
+                ValType::I32 => {f.instruction(&Call(InstrImports::SetLocalI32 as u32));}
+                ValType::F32 => {f.instruction(&Call(InstrImports::SetLocalF32 as u32));}
+                ValType::I64 => {f.instruction(&Call(InstrImports::SetLocalI64 as u32));}
+                ValType::F64 => {f.instruction(&Call(InstrImports::SetLocalF64 as u32));}
+                _ => {}
+            }
+        }
     }
 
     fn instrument_memory_ops(
@@ -773,49 +757,44 @@ impl<'a> ValidModule<'a> {
     ) {
         match operation_type {
             SetMemoryI32 => {
-                f.instruction(&Call(InstrumentImports::SetMemoryI32 as u32));
+                f.instruction(&Call(InstrImports::SetMemoryI32 as u32));
             }
             SetMemoryF32 => {
-                f.instruction(&Call(InstrumentImports::SetMemoryF32 as u32));
+                f.instruction(&Call(InstrImports::SetMemoryF32 as u32));
             }
             SetMemoryI64 => {
-                f.instruction(&Call(InstrumentImports::SetMemoryI64 as u32));
+                f.instruction(&Call(InstrImports::SetMemoryI64 as u32));
             }
             SetMemoryF64 => {
-                f.instruction(&Call(InstrumentImports::SetMemoryF64 as u32));
+                f.instruction(&Call(InstrImports::SetMemoryF64 as u32));
             }
             _ => {}
         }
     }
     fn instrument_local_ops(
         f: &mut wasm_encoder::Function,
-        operation_type: &InstrumentationFuncs,
-        func_idx: usize,
+        operation_type: &InstrumentationFuncs
     ) {
         match operation_type {
             SetLocalI32(local_index) => {
-                f.instruction(&I32Const(func_idx as i32));
                 f.instruction(&I32Const(*local_index as i32));
                 f.instruction(&LocalGet(*local_index));
-                f.instruction(&Call(InstrumentImports::SetLocalI32 as u32));
+                f.instruction(&Call(InstrImports::SetLocalI32 as u32));
             }
             SetLocalF32(local_index) => {
-                f.instruction(&I32Const(func_idx as i32));
                 f.instruction(&I32Const(*local_index as i32));
                 f.instruction(&LocalGet(*local_index));
-                f.instruction(&Call(InstrumentImports::SetLocalF32 as u32));
+                f.instruction(&Call(InstrImports::SetLocalF32 as u32));
             }
             SetLocalI64(local_index) => {
-                f.instruction(&I32Const(func_idx as i32));
                 f.instruction(&I32Const(*local_index as i32));
                 f.instruction(&LocalGet(*local_index));
-                f.instruction(&Call(InstrumentImports::SetLocalI64 as u32));
+                f.instruction(&Call(InstrImports::SetLocalI64 as u32));
             }
             SetLocalF64(local_index) => {
-                f.instruction(&I32Const(func_idx as i32));
                 f.instruction(&I32Const(*local_index as i32));
                 f.instruction(&LocalGet(*local_index));
-                f.instruction(&Call(InstrumentImports::SetLocalF64 as u32));
+                f.instruction(&Call(InstrImports::SetLocalF64 as u32));
             }
             _ => {}
         }
@@ -828,22 +807,22 @@ impl<'a> ValidModule<'a> {
             SetGlobalI32(global_index) => {
                 f.instruction(&I32Const(*global_index as i32));
                 f.instruction(&GlobalGet(*global_index));
-                f.instruction(&Call(InstrumentImports::SetGlobalI32 as u32));
+                f.instruction(&Call(InstrImports::SetGlobalI32 as u32));
             }
             SetGlobalF32(global_index) => {
                 f.instruction(&I32Const(*global_index as i32));
                 f.instruction(&GlobalGet(*global_index));
-                f.instruction(&Call(InstrumentImports::SetGlobalF32 as u32));
+                f.instruction(&Call(InstrImports::SetGlobalF32 as u32));
             }
             SetGlobalI64(global_index) => {
                 f.instruction(&I32Const(*global_index as i32));
                 f.instruction(&GlobalGet(*global_index));
-                f.instruction(&Call(InstrumentImports::SetGlobalI64 as u32));
+                f.instruction(&Call(InstrImports::SetGlobalI64 as u32));
             }
             SetGlobalF64(global_index) => {
                 f.instruction(&I32Const(*global_index as i32));
                 f.instruction(&GlobalGet(*global_index));
-                f.instruction(&Call(InstrumentImports::SetGlobalF64 as u32));
+                f.instruction(&Call(InstrImports::SetGlobalF64 as u32));
             }
             _ => {}
         }
@@ -851,16 +830,16 @@ impl<'a> ValidModule<'a> {
     fn instrument_push_ops(f: &mut wasm_encoder::Function, operation_type: &InstrumentationFuncs) {
         match operation_type {
             PushI32 => {
-                f.instruction(&Call(InstrumentImports::PushI32 as u32));
+                f.instruction(&Call(InstrImports::PushI32 as u32));
             }
             PushF32 => {
-                f.instruction(&Call(InstrumentImports::PushF32 as u32));
+                f.instruction(&Call(InstrImports::PushF32 as u32));
             }
             PushI64 => {
-                f.instruction(&Call(InstrumentImports::PushI64 as u32));
+                f.instruction(&Call(InstrImports::PushI64 as u32));
             }
             PushF64 => {
-                f.instruction(&Call(InstrumentImports::PushF64 as u32));
+                f.instruction(&Call(InstrImports::PushF64 as u32));
             }
             _ => {}
         }

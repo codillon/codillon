@@ -60,7 +60,7 @@ impl From<u128> for WebAssemblyTypes {
 pub struct Change {
     pub line_number: i32,
     pub stack_pushes: Vec<WebAssemblyTypes>,
-    pub locals_change: Option<(usize, Vec<(usize, WebAssemblyTypes)>)>,
+    pub locals_change: Option<Vec<(usize, WebAssemblyTypes)>>,
     pub globals_change: Option<(u32, WebAssemblyTypes)>,
     pub memory_change: Option<(u32, WebAssemblyTypes)>,
     pub num_pops: u32,
@@ -69,7 +69,7 @@ pub struct Change {
 struct DebugState {
     // Current State
     stack_pushes: Vec<WebAssemblyTypes>,
-    locals_change: Option<(usize, Vec<(usize, WebAssemblyTypes)>)>,
+    locals_change: Option<Vec<(usize, WebAssemblyTypes)>>,
     globals_change: Option<(u32, WebAssemblyTypes)>,
     memory_change: Option<(u32, WebAssemblyTypes)>,
     num_pops: u32,
@@ -237,34 +237,34 @@ fn create_closure_global_operations(debug_numbers: &Object) {
 }
 
 fn create_closure_local_operations(debug_numbers: &Object) {
-    let record_local_change = |func_idx: usize, idx: usize, value: WebAssemblyTypes| {
+    let record_local_change = |idx: usize, value: WebAssemblyTypes| {
         STATE.with(|cur_state| {
             let mut state = cur_state.borrow_mut();
             if let Some(cur_locals) = &mut state.locals_change {
-                cur_locals.1.push((idx, value));
+                cur_locals.push((idx, value));
             } else {
-                state.locals_change = Some((func_idx, vec![(idx, value)]));
+                state.locals_change = Some(vec![(idx, value)]);
             }
         });
     };
-    let set_local_i32 = Closure::wrap(Box::new(move |func_idx: i32, idx: i32, value: i32| {
-        record_local_change(func_idx as usize, idx as usize, value.into());
-    }) as Box<dyn Fn(i32, i32, i32)>);
+    let set_local_i32 = Closure::wrap(Box::new(move |idx: i32, value: i32| {
+        record_local_change(idx as usize, value.into());
+    }) as Box<dyn Fn(i32, i32)>);
     register_closure(debug_numbers, "set_local_i32", set_local_i32);
 
-    let set_local_f32 = Closure::wrap(Box::new(move |func_idx: i32, idx: i32, value: f32| {
-        record_local_change(func_idx as usize, idx as usize, value.into());
-    }) as Box<dyn Fn(i32, i32, f32)>);
+    let set_local_f32 = Closure::wrap(Box::new(move |idx: i32, value: f32| {
+        record_local_change(idx as usize, value.into());
+    }) as Box<dyn Fn(i32, f32)>);
     register_closure(debug_numbers, "set_local_f32", set_local_f32);
 
-    let set_local_i64 = Closure::wrap(Box::new(move |func_idx: i32, idx: i32, value: i64| {
-        record_local_change(func_idx as usize, idx as usize, value.into());
-    }) as Box<dyn Fn(i32, i32, i64)>);
+    let set_local_i64 = Closure::wrap(Box::new(move |idx: i32, value: i64| {
+        record_local_change(idx as usize, value.into());
+    }) as Box<dyn Fn(i32, i64)>);
     register_closure(debug_numbers, "set_local_i64", set_local_i64);
 
-    let set_local_f64 = Closure::wrap(Box::new(move |func_idx: i32, idx: i32, value: f64| {
-        record_local_change(func_idx as usize, idx as usize, value.into());
-    }) as Box<dyn Fn(i32, i32, f64)>);
+    let set_local_f64 = Closure::wrap(Box::new(move |idx: i32, value: f64| {
+        record_local_change(idx as usize, value.into());
+    }) as Box<dyn Fn(i32, f64)>);
     register_closure(debug_numbers, "set_local_f64", set_local_f64);
 }
 
