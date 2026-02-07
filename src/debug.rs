@@ -69,6 +69,7 @@ pub struct Change {
 struct DebugState {
     // Current State
     stack_pushes: Vec<WebAssemblyTypes>,
+    // Vector of local variable indices and values
     locals_change: Option<Vec<(usize, WebAssemblyTypes)>>,
     globals_change: Option<(u32, WebAssemblyTypes)>,
     memory_change: Option<(u32, WebAssemblyTypes)>,
