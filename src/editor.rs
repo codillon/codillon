@@ -13,9 +13,9 @@ use crate::{
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
-        find_frames, find_function_end, fix_syntax,
+        find_frames, find_function_ranges, fix_syntax,
     },
-    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, str_to_binary},
+    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, ValidModule, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -97,7 +97,9 @@ struct _Editor {
     last_time_ms: f64,
 
     program_state: ProgramState,
+    function_locals: Vec<Vec<WebAssemblyTypes>>,
     saved_states: Vec<Option<ProgramState>>,
+    function_ranges: Vec<(usize, usize)>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -126,7 +128,9 @@ impl Editor {
             redo_stack: Vec::new(),
             last_time_ms: 0.0,
             program_state: new_program_state(),
+            function_locals: Vec::new(),
             saved_states: vec![Some(new_program_state())],
+            function_ranges: Vec::new(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -553,19 +557,23 @@ impl Editor {
         // find frames in the function
         find_frames(self);
 
-        // find the end of the function, if there is one
-        if let Some(function_end) = find_function_end(self) {
-            let wasm_bin = str_to_binary(
-                self.buffer_as_text()
-                    .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
-            )?;
+        // Get function ranges
+        self.0.borrow_mut().function_ranges = match find_function_ranges(self) {
+            None => return Ok(()),
+            Some(range) if range.is_empty() => return Ok(()),
+            Some(ranges) => ranges,
+        };
+        let wasm_bin = str_to_binary(
+            self.buffer_as_text()
+                .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
+        )?;
 
-            let raw_module = self.to_raw_module(&wasm_bin, function_end)?;
-            let validized = raw_module.fix_validity(&wasm_bin, self)?;
-            let types = validized.to_types_table(&wasm_bin)?;
+        let raw_module = self.to_raw_module(&wasm_bin)?;
+        let validized = raw_module.fix_validity(&wasm_bin, self)?;
+        let types = validized.to_types_table(&wasm_bin)?;
 
-            let mut last_line_no = 0;
-
+        let mut last_line_no = 0;
+        for i in 0..validized.functions.len() {
             for (
                 op,
                 CodillonType {
@@ -573,7 +581,7 @@ impl Editor {
                     outputs,
                     input_arity,
                 },
-            ) in std::iter::zip(&validized.functions[0].operators, &types.functions[0].types)
+            ) in std::iter::zip(&validized.functions[i].operators, &types.functions[i].types)
             {
                 let mut type_str = String::new();
 
@@ -610,14 +618,15 @@ impl Editor {
                 self.line_mut(op.line_idx)
                     .set_type_annotation(Some(&type_str));
             }
-
-            for i in last_line_no..self.len() {
-                self.line_mut(i).set_type_annotation(None);
-            }
-
-            // instrumentation
-            self.execute(&validized.build_executable_binary(&types)?);
         }
+
+        for i in last_line_no..self.len() {
+            self.line_mut(i).set_type_annotation(None);
+        }
+
+        // instrumentation
+        self.initialize_locals(&validized);
+        self.execute(&validized.build_executable_binary(&types)?);
 
         #[cfg(debug_assertions)]
         self.audit();
@@ -626,64 +635,78 @@ impl Editor {
     }
 
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8], function_end: usize) -> Result<RawModule<'a>> {
+    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8]) -> Result<RawModule<'a>> {
         let parser = Parser::new(0);
-        let mut locals = Vec::new();
-        let mut ops = Vec::new();
+        let mut functions: Vec<RawFunction> = Vec::new();
+        let mut func_params: Vec<Vec<wasmparser::ValType>> = Vec::new();
+        let mut func_results: Vec<Vec<wasmparser::ValType>> = Vec::new();
+        let mut func_locals: Vec<Vec<(u32, wasmparser::ValType)>> = Vec::new();
+        let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
-            if let Payload::CodeSectionEntry(body) = payload? {
-                let mut local_reader = body.get_locals_reader()?.into_iter();
-                for local in local_reader.by_ref() {
-                    let entry = local?;
-                    locals.push((entry.0, entry.1));
+            match payload? {
+                Payload::TypeSection(reader) => {
+                    for ft in reader.into_iter_err_on_gc_types().flatten() {
+                        func_params.push(ft.params().to_vec());
+                        func_results.push(ft.results().to_vec());
+                    }
                 }
-                let mut op_reader = local_reader.into_operators_reader();
-                while !op_reader.eof() {
-                    ops.push(op_reader.read()?);
+                Payload::CodeSectionEntry(body) => {
+                    let mut locals: Vec<(u32, wasmparser::ValType)> = Vec::new();
+                    let local_reader = body.get_locals_reader()?;
+                    for local in local_reader {
+                        let entry = local?;
+                        locals.push((entry.0, entry.1));
+                    }
+                    func_locals.push(locals);
+                    let mut ops = Vec::new();
+                    for op in body.get_operators_reader()?.into_iter() {
+                        ops.push(op?);
+                    }
+                    //include the function's end opcode
+                    func_ops.push(ops);
                 }
-                op_reader.finish()?;
+                _ => {}
             }
         }
-
-        //include the function's end opcode
-
-        //match each operator with its idx in the editor
-        let mut aligned_ops = Vec::new();
-        let mut ops_iter = ops.into_iter();
-
-        for line_idx in 0..self.len() {
-            for _ in 0..self.line(line_idx).num_ops() {
-                let op = ops_iter.next().context("not enough operators")?;
-                aligned_ops.push(Aligned { op, line_idx });
+        for (func_idx, (func_start, func_end)) in self.0.borrow().function_ranges.iter().enumerate()
+        {
+            //match each operator with its idx in the editor
+            let mut aligned_ops = Vec::new();
+            let mut ops_iter = func_ops[func_idx].clone().into_iter();
+            for line_idx in *func_start..=*func_end {
+                for _ in 0..self.line(line_idx).num_ops() {
+                    let op = ops_iter.next().context("not enough operators")?;
+                    aligned_ops.push(Aligned { op, line_idx });
+                }
             }
-        }
-
-        match ops_iter.next() {
-            Some(end @ wasmparser::Operator::End) => {
-                aligned_ops.push(Aligned {
-                    op: end,
-                    line_idx: function_end,
-                });
+            match ops_iter.next() {
+                Some(end @ wasmparser::Operator::End) => {
+                    aligned_ops.push(Aligned {
+                        op: end,
+                        line_idx: *func_end,
+                    });
+                }
+                Some(_) => {
+                    bail!("not enough instructions");
+                }
+                None => {
+                    bail!("not enough operators");
+                }
             }
-            Some(_) => {
+            if ops_iter.next().is_some() {
                 bail!("not enough instructions");
             }
-            None => {
-                bail!("not enough operators");
-            }
-        }
-
-        if ops_iter.next().is_some() {
-            bail!("not enough instructions");
-        }
-
-        Ok(RawModule {
-            functions: vec![RawFunction {
+            let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
+            functions.push(RawFunction {
                 locals,
+                params: func_params.get(func_idx).unwrap_or(&Vec::new()).clone(),
+                results: func_results.get(func_idx).unwrap_or(&Vec::new()).clone(),
                 operators: aligned_ops,
-            }],
-        })
+            });
+        }
+
+        Ok(RawModule { functions })
     }
 
     fn execute(&self, binary: &[u8]) {
@@ -799,6 +822,35 @@ impl Editor {
         self.update_debug_panel(None);
     }
 
+    fn valtype_default_editor(ty: &wasmparser::ValType) -> WebAssemblyTypes {
+        match ty {
+            wasmparser::ValType::I32 => WebAssemblyTypes::I32(0),
+            wasmparser::ValType::I64 => WebAssemblyTypes::I64(0),
+            wasmparser::ValType::F32 => WebAssemblyTypes::F32(0.0),
+            wasmparser::ValType::F64 => WebAssemblyTypes::F64(0.0),
+            wasmparser::ValType::V128 => WebAssemblyTypes::V128(0u128),
+            _ => panic!("unsupported valtype for locals"),
+        }
+    }
+
+    fn initialize_locals(&self, validized: &ValidModule) {
+        let mut function_locals: Vec<Vec<WebAssemblyTypes>> =
+            Vec::with_capacity(validized.functions.len());
+        for func in &validized.functions {
+            let mut locals: Vec<WebAssemblyTypes> = Vec::with_capacity(func.params.len());
+            for param in &func.params {
+                locals.push(Self::valtype_default_editor(param));
+            }
+            for (count, local_type) in &func.locals {
+                for _ in 0..*count {
+                    locals.push(Self::valtype_default_editor(local_type));
+                }
+            }
+            function_locals.push(locals);
+        }
+        self.0.borrow_mut().function_locals = function_locals;
+    }
+
     fn build_program_state(&self, start: usize, stop: usize) {
         let mut inner = self.0.borrow_mut();
         let line_count = inner.component.get().1.0.inner().len();
@@ -807,6 +859,12 @@ impl Editor {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
                 inner.program_state.step_number = i + 1;
                 inner.program_state.line_number = change.line_number;
+                let line_num = change.line_number as usize;
+                let func_idx = inner
+                    .function_ranges
+                    .iter()
+                    .position(|(s, e)| line_num >= *s && line_num <= *e)
+                    .expect("line inside function");
                 let new_length = inner
                     .program_state
                     .stack_state
@@ -814,16 +872,14 @@ impl Editor {
                     .saturating_sub(change.num_pops as usize);
                 inner.program_state.stack_state.truncate(new_length);
                 for push in &change.stack_pushes {
-                    inner.program_state.stack_state.push(push.clone());
+                    inner.program_state.stack_state.push(*push);
                 }
-                if let Some((idx, val)) = &change.locals_change {
-                    let idx_usize = *idx as usize;
-                    let locals = &mut inner.program_state.locals_state;
-                    if locals.len() <= idx_usize {
-                        locals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
+                if let Some(updates) = &change.locals_change {
+                    for (idx, val) in updates {
+                        inner.function_locals[func_idx][*idx] = *val;
                     }
-                    locals[idx_usize] = val.clone();
                 }
+                inner.program_state.locals_state = inner.function_locals[func_idx].clone();
                 // Resizing won't be necessary when number of globals are known
                 if let Some((idx, val)) = &change.globals_change {
                     let idx_usize = *idx as usize;
@@ -831,7 +887,7 @@ impl Editor {
                     if globals.len() <= idx_usize {
                         globals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
                     }
-                    globals[idx_usize] = val.clone();
+                    globals[idx_usize] = *val;
                 }
                 if let Some((idx, val)) = &change.memory_change {
                     let idx_usize = *idx as usize;
@@ -839,7 +895,7 @@ impl Editor {
                     if memory.len() <= idx_usize {
                         memory.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
                     }
-                    memory[idx_usize] = val.clone();
+                    memory[idx_usize] = *val;
                 }
                 inner.saved_states[change.line_number as usize] = Some(inner.program_state.clone());
             }
