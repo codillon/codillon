@@ -698,7 +698,7 @@ impl<'a> ValidModule<'a> {
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.op.clone())?;
             let value_type = &types.functions.get(func_idx).unwrap().types[i];
             let operation_type = Self::classify(&codillon_instruction.op.op, value_type);
-            if value_type.inputs.len() > 0 {
+            if !value_type.inputs.is_empty() {
                 pop_debug(&mut f, value_type.inputs.len() as i32);
             }
             if let CallFunc(function_idx) = operation_type {
@@ -734,18 +734,23 @@ impl<'a> ValidModule<'a> {
         Ok(())
     }
 
-    fn record_params(
-        &self,
-        func_idx: usize,
-        f: &mut wasm_encoder::Function) {
+    fn record_params(&self, func_idx: usize, f: &mut wasm_encoder::Function) {
         for (param_idx, param) in self.functions[func_idx].params.iter().enumerate() {
             f.instruction(&I32Const(param_idx as i32));
             f.instruction(&LocalGet(param_idx as u32));
             match param {
-                ValType::I32 => {f.instruction(&Call(InstrImports::SetLocalI32 as u32));}
-                ValType::F32 => {f.instruction(&Call(InstrImports::SetLocalF32 as u32));}
-                ValType::I64 => {f.instruction(&Call(InstrImports::SetLocalI64 as u32));}
-                ValType::F64 => {f.instruction(&Call(InstrImports::SetLocalF64 as u32));}
+                ValType::I32 => {
+                    f.instruction(&Call(InstrImports::SetLocalI32 as u32));
+                }
+                ValType::F32 => {
+                    f.instruction(&Call(InstrImports::SetLocalF32 as u32));
+                }
+                ValType::I64 => {
+                    f.instruction(&Call(InstrImports::SetLocalI64 as u32));
+                }
+                ValType::F64 => {
+                    f.instruction(&Call(InstrImports::SetLocalF64 as u32));
+                }
                 _ => {}
             }
         }
@@ -771,10 +776,7 @@ impl<'a> ValidModule<'a> {
             _ => {}
         }
     }
-    fn instrument_local_ops(
-        f: &mut wasm_encoder::Function,
-        operation_type: &InstrumentationFuncs
-    ) {
+    fn instrument_local_ops(f: &mut wasm_encoder::Function, operation_type: &InstrumentationFuncs) {
         match operation_type {
             SetLocalI32(local_index) => {
                 f.instruction(&I32Const(*local_index as i32));

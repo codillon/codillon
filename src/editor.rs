@@ -637,10 +637,7 @@ impl Editor {
     }
 
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_raw_module<'a>(
-        &self,
-        wasm_bin: &'a [u8],
-    ) -> Result<RawModule<'a>> {
+    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8]) -> Result<RawModule<'a>> {
         let parser = Parser::new(0);
         let mut functions: Vec<RawFunction> = Vec::new();
         let mut func_params: Vec<Vec<wasmparser::ValType>> = Vec::new();
@@ -674,7 +671,8 @@ impl Editor {
                 _ => {}
             }
         }
-        for (func_idx, (func_start, func_end)) in self.0.borrow().function_ranges.iter().enumerate() {
+        for (func_idx, (func_start, func_end)) in self.0.borrow().function_ranges.iter().enumerate()
+        {
             //match each operator with its idx in the editor
             let mut aligned_ops = Vec::new();
             let mut ops_iter = func_ops[func_idx].clone().into_iter();
@@ -839,7 +837,8 @@ impl Editor {
                 let func_idx = inner
                     .function_ranges
                     .iter()
-                    .position(|(s, e)| line_num >= *s && line_num <= *e).expect("line inside function");
+                    .position(|(s, e)| line_num >= *s && line_num <= *e)
+                    .expect("line inside function");
                 let new_length = inner
                     .program_state
                     .stack_state
