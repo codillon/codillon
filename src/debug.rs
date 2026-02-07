@@ -2,12 +2,12 @@
 // Currently support:
 // - all normal scalar value ops: i32, i64, f32, f64 (pushes from instructions are recorded)
 // - memory store ops: i32, i64, f32, f64 (stores record addr + value)
-// - local/global set ops for i32
+// - local/global set ops: i32, i64, f32, f64
+// - function call tracking
 // Currently do not support:
 // - other memory operations
 // - all SIMD/vector operations
 // - all reference types operations
-// - call tracking (dynamic function types)
 
 use js_sys::{Array, Object, Reflect};
 use std::cell::RefCell;
@@ -74,7 +74,6 @@ struct DebugState {
     globals_change: Option<(u32, WebAssemblyTypes)>,
     memory_change: Option<(u32, WebAssemblyTypes)>,
     num_pops: u32,
-    func_locals: Vec<Vec<WebAssemblyTypes>>,
     // Chronological per-step changes
     changes: Vec<Change>,
 }
@@ -87,7 +86,6 @@ impl DebugState {
             globals_change: None,
             memory_change: None,
             num_pops: 0,
-            func_locals: Vec::new(),
             changes: Vec::new(),
         }
     }
@@ -101,13 +99,9 @@ where
     func.forget();
 }
 
-// Reset DebugState for new runs
-pub fn reset_debug_state() {
-    STATE.with(|cur_state| *cur_state.borrow_mut() = DebugState::new());
-}
-
 // Constructs the instrumentation functions for import
 pub fn make_imports() -> Result<Object, JsValue> {
+    STATE.with(|cur_state| *cur_state.borrow_mut() = DebugState::new());
     let imports = Object::new();
     let debug_numbers = Object::new();
 
@@ -320,35 +314,6 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
     register_closure(debug_numbers, "set_memory_f64", set_memory_f64);
 }
 
-fn valtype_default(ty: &wasmparser::ValType) -> WebAssemblyTypes {
-    match ty {
-        wasmparser::ValType::I32 => WebAssemblyTypes::I32(0),
-        wasmparser::ValType::I64 => WebAssemblyTypes::I64(0),
-        wasmparser::ValType::F32 => WebAssemblyTypes::F32(0.0),
-        wasmparser::ValType::F64 => WebAssemblyTypes::F64(0.0),
-        wasmparser::ValType::V128 => WebAssemblyTypes::V128(0u128),
-        _ => panic!("unsupported valtype for locals"),
-    }
-}
-
-pub fn initialize_locals(
-    params: &Vec<wasmparser::ValType>,
-    locals: &Vec<(u32, wasmparser::ValType)>,
-) {
-    STATE.with(|cur_state| {
-        let mut cur_locals: Vec<WebAssemblyTypes> = Vec::new();
-        for param in params {
-            cur_locals.push(valtype_default(param));
-        }
-        for (count, local_type) in locals {
-            for _ in 0..*count {
-                cur_locals.push(valtype_default(local_type));
-            }
-        }
-        cur_state.borrow_mut().func_locals.push(cur_locals);
-    });
-}
-
 pub fn last_step() -> usize {
     STATE.with(|cur_state| cur_state.borrow().changes.len().saturating_sub(1))
 }
@@ -358,10 +323,6 @@ where
     F: FnOnce(std::slice::Iter<'_, Change>) -> T,
 {
     STATE.with(|cur_state| get_iter(cur_state.borrow().changes.iter()))
-}
-
-pub fn get_all_locals() -> Vec<Vec<WebAssemblyTypes>> {
-    STATE.with(|cur_state| cur_state.borrow().func_locals.clone())
 }
 
 fn type_to_string(value: &WebAssemblyTypes) -> String {

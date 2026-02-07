@@ -646,20 +646,17 @@ impl<'a> ValidModule<'a> {
 
         // Encode the export section.
         let mut exports = ExportSection::new();
+        let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
         exports.export(
             "main",
             wasm_encoder::ExportKind::Func,
-            InstrImports::TYPE_INDICES.len() as u32,
+            num_instr_imports,
         );
         module.section(&exports);
 
         // Encode the code section.
         let mut codes = CodeSection::new();
         for func_idx in 0..self.functions.len() {
-            crate::debug::initialize_locals(
-                &self.functions[func_idx].params,
-                &self.functions[func_idx].locals,
-            );
             let _ = self.build_function(func_idx, &mut codes, types);
         }
         module.section(&codes);
@@ -674,6 +671,7 @@ impl<'a> ValidModule<'a> {
         codes: &mut CodeSection,
         types: &TypesTable,
     ) -> Result<(), anyhow::Error> {
+        let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
         let function = self.functions.get(func_idx).expect("valid func idx");
         let mut f = wasm_encoder::Function::new(
             function
@@ -703,8 +701,12 @@ impl<'a> ValidModule<'a> {
             }
             if let CallFunc(function_idx) = operation_type {
                 f.instruction(&Call(
-                    function_idx + InstrImports::TYPE_INDICES.len() as u32,
+                    function_idx + num_instr_imports,
                 ));
+            } else if matches!(operation_type, EndFunc) {
+                // Don't need to pop on returns
+                pop_debug(&mut f, 0);
+                f.instruction(&instruction);
             } else {
                 // Instrumentation that needs to occur before execution
                 Self::instrument_memory_ops(&mut f, &operation_type);
@@ -726,6 +728,7 @@ impl<'a> ValidModule<'a> {
                 f.instruction(&Call(InstrImports::Step as u32));
                 f.instruction(&I32Eqz);
                 f.instruction(&If(wasm_encoder::BlockType::Empty));
+                // Trap when run out of steps
                 f.instruction(&Unreachable);
                 f.instruction(&End);
             }

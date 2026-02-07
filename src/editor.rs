@@ -2,8 +2,8 @@
 
 use crate::{
     debug::{
-        WebAssemblyTypes, get_all_locals, last_step, make_imports, program_state_to_js,
-        reset_debug_state, with_changes,
+        WebAssemblyTypes, last_step, make_imports, program_state_to_js,
+        with_changes,
     },
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -18,7 +18,7 @@ use crate::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         find_frames, find_function_ranges, fix_syntax,
     },
-    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, str_to_binary},
+    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, ValidModule, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -100,6 +100,7 @@ struct _Editor {
     last_time_ms: f64,
 
     program_state: ProgramState,
+    function_locals: Vec<Vec<WebAssemblyTypes>>,
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
 }
@@ -130,6 +131,7 @@ impl Editor {
             redo_stack: Vec::new(),
             last_time_ms: 0.0,
             program_state: new_program_state(),
+            function_locals: Vec::new(),
             saved_states: vec![Some(new_program_state())],
             function_ranges: Vec::new(),
         };
@@ -558,13 +560,12 @@ impl Editor {
         // find frames in the function
         find_frames(self);
 
+        // Get function ranges
         self.0.borrow_mut().function_ranges = match find_function_ranges(self) {
             None => return Ok(()),
             Some(range) if range.is_empty() => return Ok(()),
             Some(ranges) => ranges,
         };
-
-        // find the end of the function, if there is one
         let wasm_bin = str_to_binary(
             self.buffer_as_text()
                 .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
@@ -627,7 +628,7 @@ impl Editor {
         }
 
         // instrumentation
-        reset_debug_state();
+        self.initialize_locals(&validized);
         self.execute(&validized.build_executable_binary(&types)?);
 
         #[cfg(debug_assertions)]
@@ -824,11 +825,38 @@ impl Editor {
         self.update_debug_panel(None);
     }
 
+    fn valtype_default_editor(ty: &wasmparser::ValType) -> WebAssemblyTypes {
+        match ty {
+            wasmparser::ValType::I32 => WebAssemblyTypes::I32(0),
+            wasmparser::ValType::I64 => WebAssemblyTypes::I64(0),
+            wasmparser::ValType::F32 => WebAssemblyTypes::F32(0.0),
+            wasmparser::ValType::F64 => WebAssemblyTypes::F64(0.0),
+            wasmparser::ValType::V128 => WebAssemblyTypes::V128(0u128),
+            _ => panic!("unsupported valtype for locals"),
+        }
+    }
+
+    fn initialize_locals(&self, validized: &ValidModule) {
+        let mut function_locals: Vec<Vec<WebAssemblyTypes>> = Vec::with_capacity(validized.functions.len());
+        for func in &validized.functions {
+            let mut locals: Vec<WebAssemblyTypes> = Vec::with_capacity(func.params.len());
+            for param in &func.params {
+                locals.push(Self::valtype_default_editor(param));
+            }
+            for (count, local_type) in &func.locals {
+                for _ in 0..*count {
+                    locals.push(Self::valtype_default_editor(local_type));
+                }
+            }
+            function_locals.push(locals);
+        }
+        self.0.borrow_mut().function_locals = function_locals;
+    }
+
     fn build_program_state(&self, start: usize, stop: usize) {
         let mut inner = self.0.borrow_mut();
         let line_count = inner.component.get().1.0.inner().len();
         inner.saved_states.resize_with(line_count, || None);
-        let mut all_locals = get_all_locals();
         with_changes(|changes| {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
                 inner.program_state.step_number = i + 1;
@@ -850,10 +878,10 @@ impl Editor {
                 }
                 if let Some(updates) = &change.locals_change {
                     for (idx, val) in updates {
-                        all_locals[func_idx][*idx] = *val;
+                        inner.function_locals[func_idx][*idx] = *val;
                     }
                 }
-                inner.program_state.locals_state = all_locals[func_idx].clone();
+                inner.program_state.locals_state = inner.function_locals[func_idx].clone();
                 // Resizing won't be necessary when number of globals are known
                 if let Some((idx, val)) = &change.globals_change {
                     let idx_usize = *idx as usize;
