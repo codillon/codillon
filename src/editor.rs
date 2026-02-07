@@ -1,10 +1,7 @@
 // The Codillon code editor
 
 use crate::{
-    debug::{
-        WebAssemblyTypes, last_step, make_imports, program_state_to_js,
-        with_changes,
-    },
+    debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
@@ -837,7 +834,8 @@ impl Editor {
     }
 
     fn initialize_locals(&self, validized: &ValidModule) {
-        let mut function_locals: Vec<Vec<WebAssemblyTypes>> = Vec::with_capacity(validized.functions.len());
+        let mut function_locals: Vec<Vec<WebAssemblyTypes>> =
+            Vec::with_capacity(validized.functions.len());
         for func in &validized.functions {
             let mut locals: Vec<WebAssemblyTypes> = Vec::with_capacity(func.params.len());
             for param in &func.params {

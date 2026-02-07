@@ -647,11 +647,7 @@ impl<'a> ValidModule<'a> {
         // Encode the export section.
         let mut exports = ExportSection::new();
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
-        exports.export(
-            "main",
-            wasm_encoder::ExportKind::Func,
-            num_instr_imports,
-        );
+        exports.export("main", wasm_encoder::ExportKind::Func, num_instr_imports);
         module.section(&exports);
 
         // Encode the code section.
@@ -700,9 +696,7 @@ impl<'a> ValidModule<'a> {
                 pop_debug(&mut f, value_type.inputs.len() as i32);
             }
             if let CallFunc(function_idx) = operation_type {
-                f.instruction(&Call(
-                    function_idx + num_instr_imports,
-                ));
+                f.instruction(&Call(function_idx + num_instr_imports));
             } else if matches!(operation_type, EndFunc) {
                 // Don't need to pop on returns
                 pop_debug(&mut f, 0);
