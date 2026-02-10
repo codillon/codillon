@@ -1,6 +1,7 @@
 // The Codillon code editor
 
 use crate::{
+    autocomplete::Autocomplete,
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -13,9 +14,9 @@ use crate::{
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
-        find_frames, find_function_ranges, fix_syntax,
+        find_frames, find_function_end, fix_syntax,
     },
-    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, ValidModule, str_to_binary},
+    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -34,7 +35,7 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, ()),
+            (ElementHandle<HtmlInputElement>, (Autocomplete, ())),
         ),
     ),
     HtmlDivElement,
@@ -97,9 +98,7 @@ struct _Editor {
     last_time_ms: f64,
 
     program_state: ProgramState,
-    function_locals: Vec<Vec<WebAssemblyTypes>>,
     saved_states: Vec<Option<ProgramState>>,
-    function_ranges: Vec<(usize, usize)>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -118,7 +117,7 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), ()),
+                        (factory.input(), (Autocomplete::new(factory.clone()), ())),
                     ),
                 ),
                 factory.div(),
@@ -128,9 +127,7 @@ impl Editor {
             redo_stack: Vec::new(),
             last_time_ms: 0.0,
             program_state: new_program_state(),
-            function_locals: Vec::new(),
             saved_states: vec![Some(new_program_state())],
-            function_ranges: Vec::new(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -164,6 +161,18 @@ impl Editor {
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
         ret.image_mut().set_attribute("class", "annotations");
+
+        {
+            let mut binding = ret.0.borrow_mut();
+            let autocomplete = &mut binding.component.get_mut().1.1.1.0;
+            let editor_weak = Rc::downgrade(&ret.0);
+            autocomplete.set_on_select(move |s| {
+                if let Some(editor_rc) = editor_weak.upgrade() {
+                    let mut editor = Editor(editor_rc);
+                    editor.apply_completion(s).expect("completion");
+                }
+            });
+        }
 
         ret.push_line("(func");
         ret.push_line("i32.const 5");
@@ -200,14 +209,24 @@ impl Editor {
 
     // Replace a given range (currently within a single line) with new text
     fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
+        let (start_line, start_pos, end_line, end_pos) =
+            self.get_lines_and_positions(&target_range)?;
+        self.replace_range_impl(start_line, start_pos, end_line, end_pos, new_str)
+    }
+
+    fn replace_range_impl(
+        &mut self,
+        start_line: usize,
+        start_pos: Position,
+        end_line: usize,
+        end_pos: Position,
+        new_str: &str,
+    ) -> Result<()> {
         if new_str.chars().any(|x| x.is_control() && x != '\n') {
             bail!("unhandled control char in input");
         }
 
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
-
-        let (start_line, start_pos, end_line, end_pos) =
-            self.get_lines_and_positions(&target_range)?;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -409,6 +428,109 @@ impl Editor {
             )),
         }?;
 
+        self.update_autocomplete()?;
+
+        Ok(())
+    }
+
+    fn update_autocomplete(&mut self) -> Result<()> {
+        let selection = get_selection();
+        if !selection.is_collapsed() {
+            self.autocomplete_mut().hide();
+            return Ok(());
+        }
+
+        let (line_idx, pos, _, _) = match self.get_lines_and_positions(&selection) {
+            Ok(x) => x,
+            Err(_) => {
+                self.autocomplete_mut().hide();
+                return Ok(());
+            }
+        };
+
+        if !pos.in_instr {
+            self.autocomplete_mut().hide();
+            return Ok(());
+        }
+
+        // Extract current_word as owned String before calling autocomplete
+        let current_word: String = {
+            let line = self.line(line_idx);
+            let text = line.instr().get();
+
+            // Calculate byte offset from utf16 offset
+            let mut current_utf16 = 0;
+            let mut byte_idx = 0;
+            for c in text.chars() {
+                if current_utf16 >= pos.offset {
+                    break;
+                }
+                current_utf16 += c.len_utf16();
+                byte_idx += c.len_utf8();
+            }
+
+            let prefix_area = &text[..byte_idx];
+            let last_word_start = prefix_area
+                .rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            prefix_area[last_word_start..].to_string()
+        }; // line borrow ends here
+
+        if current_word.is_empty() {
+            self.autocomplete_mut().hide();
+        } else {
+            // Calculate approximate position based on line index
+            // Use fixed left margin and LINE_SPACING for vertical position
+            let left = 120.0; // Left margin where instructions start
+            let top = ((line_idx + 1) * LINE_SPACING) as f64 + 10.0; // Below current line
+
+            let factory = self.0.borrow().factory.clone();
+            self.autocomplete_mut()
+                .filter(&current_word, &factory, left, top);
+        }
+
+        Ok(())
+    }
+
+    fn apply_completion(&mut self, completion: String) -> Result<()> {
+        // Get position.
+        let selection = get_selection();
+        let (line_idx, pos, _, _) = self.get_lines_and_positions(&selection)?;
+
+        let start_utf16 = {
+            let line = self.line(line_idx);
+            let text = line.instr().get();
+
+            let mut current_utf16 = 0;
+            let mut byte_idx = 0;
+            for c in text.chars() {
+                if current_utf16 >= pos.offset {
+                    break;
+                }
+                current_utf16 += c.len_utf16();
+                byte_idx += c.len_utf8();
+            }
+            let prefix_area = &text[..byte_idx];
+            let last_word_start_byte = prefix_area
+                .rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+
+            // Convert start byte to utf16 offset for replacement
+            let start_chars = text[..last_word_start_byte].chars();
+            start_chars.map(|c| c.len_utf16()).sum()
+        };
+
+        let range_start = Position {
+            in_instr: true,
+            offset: start_utf16,
+        };
+        let range_end = pos; // current cursor
+
+        // Perform replacement
+        self.replace_range_impl(line_idx, range_start, line_idx, range_end, &completion)?;
+        self.autocomplete_mut().hide();
         Ok(())
     }
 
@@ -434,6 +556,11 @@ impl Editor {
             }
 
             "ArrowDown" => {
+                if self.autocomplete().is_visible() {
+                    ev.prevent_default();
+                    self.autocomplete_mut().select_next();
+                    return Ok(());
+                }
                 let selection = get_selection();
                 if selection.is_collapsed() {
                     let (line_idx, _) = self.find_idx_and_utf16_pos(
@@ -441,10 +568,32 @@ impl Editor {
                         selection.focus_offset(),
                     )?;
                     if line_idx + 1 == self.text().len() {
-                        ev.prevent_default();
                         self.line(line_idx)
                             .set_cursor_position(self.line(line_idx).end_position());
                     }
+                }
+            }
+
+            "ArrowUp" => {
+                if self.autocomplete().is_visible() {
+                    ev.prevent_default();
+                    self.autocomplete_mut().select_prev();
+                    return Ok(());
+                }
+            }
+
+            "Tab" | "Enter" if self.autocomplete().is_visible() => {
+                ev.prevent_default();
+                let completion_opt = self.autocomplete().get_selected();
+                if let Some(completion) = completion_opt {
+                    self.apply_completion(completion)?;
+                }
+            }
+
+            "Escape" => {
+                if self.autocomplete().is_visible() {
+                    ev.prevent_default();
+                    self.autocomplete_mut().hide();
                 }
             }
 
@@ -475,6 +624,14 @@ impl Editor {
             }
 
             _ => {}
+        }
+
+        if self.autocomplete().is_visible()
+            && ev.key() != "ArrowDown"
+            && ev.key() != "ArrowUp"
+            && (ev.key() == "ArrowLeft" || ev.key() == "ArrowRight")
+        {
+            self.autocomplete_mut().hide();
         }
 
         Ok(())
@@ -525,6 +682,14 @@ impl Editor {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().0)
     }
 
+    fn autocomplete(&self) -> Ref<'_, Autocomplete> {
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.1.0)
+    }
+
+    fn autocomplete_mut(&self) -> RefMut<'_, Autocomplete> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.1.0)
+    }
+
     fn text(&self) -> Ref<'_, TextType> {
         Ref::map(self.textbox(), |c| c.inner())
     }
@@ -557,23 +722,19 @@ impl Editor {
         // find frames in the function
         find_frames(self);
 
-        // Get function ranges
-        self.0.borrow_mut().function_ranges = match find_function_ranges(self) {
-            None => return Ok(()),
-            Some(range) if range.is_empty() => return Ok(()),
-            Some(ranges) => ranges,
-        };
-        let wasm_bin = str_to_binary(
-            self.buffer_as_text()
-                .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
-        )?;
+        // find the end of the function, if there is one
+        if let Some(function_end) = find_function_end(self) {
+            let wasm_bin = str_to_binary(
+                self.buffer_as_text()
+                    .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
+            )?;
 
-        let raw_module = self.to_raw_module(&wasm_bin)?;
-        let validized = raw_module.fix_validity(&wasm_bin, self)?;
-        let types = validized.to_types_table(&wasm_bin)?;
+            let raw_module = self.to_raw_module(&wasm_bin, function_end)?;
+            let validized = raw_module.fix_validity(&wasm_bin, self)?;
+            let types = validized.to_types_table(&wasm_bin)?;
 
-        let mut last_line_no = 0;
-        for i in 0..validized.functions.len() {
+            let mut last_line_no = 0;
+
             for (
                 op,
                 CodillonType {
@@ -581,7 +742,7 @@ impl Editor {
                     outputs,
                     input_arity,
                 },
-            ) in std::iter::zip(&validized.functions[i].operators, &types.functions[i].types)
+            ) in std::iter::zip(&validized.functions[0].operators, &types.functions[0].types)
             {
                 let mut type_str = String::new();
 
@@ -618,15 +779,14 @@ impl Editor {
                 self.line_mut(op.line_idx)
                     .set_type_annotation(Some(&type_str));
             }
-        }
 
-        for i in last_line_no..self.len() {
-            self.line_mut(i).set_type_annotation(None);
-        }
+            for i in last_line_no..self.len() {
+                self.line_mut(i).set_type_annotation(None);
+            }
 
-        // instrumentation
-        self.initialize_locals(&validized);
-        self.execute(&validized.build_executable_binary(&types)?);
+            // instrumentation
+            self.execute(&validized.build_executable_binary(&types)?);
+        }
 
         #[cfg(debug_assertions)]
         self.audit();
@@ -635,78 +795,64 @@ impl Editor {
     }
 
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8]) -> Result<RawModule<'a>> {
+    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8], function_end: usize) -> Result<RawModule<'a>> {
         let parser = Parser::new(0);
-        let mut functions: Vec<RawFunction> = Vec::new();
-        let mut func_params: Vec<Vec<wasmparser::ValType>> = Vec::new();
-        let mut func_results: Vec<Vec<wasmparser::ValType>> = Vec::new();
-        let mut func_locals: Vec<Vec<(u32, wasmparser::ValType)>> = Vec::new();
-        let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
+        let mut locals = Vec::new();
+        let mut ops = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
-            match payload? {
-                Payload::TypeSection(reader) => {
-                    for ft in reader.into_iter_err_on_gc_types().flatten() {
-                        func_params.push(ft.params().to_vec());
-                        func_results.push(ft.results().to_vec());
-                    }
+            if let Payload::CodeSectionEntry(body) = payload? {
+                let mut local_reader = body.get_locals_reader()?.into_iter();
+                for local in local_reader.by_ref() {
+                    let entry = local?;
+                    locals.push((entry.0, entry.1));
                 }
-                Payload::CodeSectionEntry(body) => {
-                    let mut locals: Vec<(u32, wasmparser::ValType)> = Vec::new();
-                    let local_reader = body.get_locals_reader()?;
-                    for local in local_reader {
-                        let entry = local?;
-                        locals.push((entry.0, entry.1));
-                    }
-                    func_locals.push(locals);
-                    let mut ops = Vec::new();
-                    for op in body.get_operators_reader()?.into_iter() {
-                        ops.push(op?);
-                    }
-                    //include the function's end opcode
-                    func_ops.push(ops);
+                let mut op_reader = local_reader.into_operators_reader();
+                while !op_reader.eof() {
+                    ops.push(op_reader.read()?);
                 }
-                _ => {}
+                op_reader.finish()?;
             }
-        }
-        for (func_idx, (func_start, func_end)) in self.0.borrow().function_ranges.iter().enumerate()
-        {
-            //match each operator with its idx in the editor
-            let mut aligned_ops = Vec::new();
-            let mut ops_iter = func_ops[func_idx].clone().into_iter();
-            for line_idx in *func_start..=*func_end {
-                for _ in 0..self.line(line_idx).num_ops() {
-                    let op = ops_iter.next().context("not enough operators")?;
-                    aligned_ops.push(Aligned { op, line_idx });
-                }
-            }
-            match ops_iter.next() {
-                Some(end @ wasmparser::Operator::End) => {
-                    aligned_ops.push(Aligned {
-                        op: end,
-                        line_idx: *func_end,
-                    });
-                }
-                Some(_) => {
-                    bail!("not enough instructions");
-                }
-                None => {
-                    bail!("not enough operators");
-                }
-            }
-            if ops_iter.next().is_some() {
-                bail!("not enough instructions");
-            }
-            let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
-            functions.push(RawFunction {
-                locals,
-                params: func_params.get(func_idx).unwrap_or(&Vec::new()).clone(),
-                results: func_results.get(func_idx).unwrap_or(&Vec::new()).clone(),
-                operators: aligned_ops,
-            });
         }
 
-        Ok(RawModule { functions })
+        //include the function's end opcode
+
+        //match each operator with its idx in the editor
+        let mut aligned_ops = Vec::new();
+        let mut ops_iter = ops.into_iter();
+
+        for line_idx in 0..self.len() {
+            for _ in 0..self.line(line_idx).num_ops() {
+                let op = ops_iter.next().context("not enough operators")?;
+                aligned_ops.push(Aligned { op, line_idx });
+            }
+        }
+
+        match ops_iter.next() {
+            Some(end @ wasmparser::Operator::End) => {
+                aligned_ops.push(Aligned {
+                    op: end,
+                    line_idx: function_end,
+                });
+            }
+            Some(_) => {
+                bail!("not enough instructions");
+            }
+            None => {
+                bail!("not enough operators");
+            }
+        }
+
+        if ops_iter.next().is_some() {
+            bail!("not enough instructions");
+        }
+
+        Ok(RawModule {
+            functions: vec![RawFunction {
+                locals,
+                operators: aligned_ops,
+            }],
+        })
     }
 
     fn execute(&self, binary: &[u8]) {
@@ -822,35 +968,6 @@ impl Editor {
         self.update_debug_panel(None);
     }
 
-    fn valtype_default_editor(ty: &wasmparser::ValType) -> WebAssemblyTypes {
-        match ty {
-            wasmparser::ValType::I32 => WebAssemblyTypes::I32(0),
-            wasmparser::ValType::I64 => WebAssemblyTypes::I64(0),
-            wasmparser::ValType::F32 => WebAssemblyTypes::F32(0.0),
-            wasmparser::ValType::F64 => WebAssemblyTypes::F64(0.0),
-            wasmparser::ValType::V128 => WebAssemblyTypes::V128(0u128),
-            _ => panic!("unsupported valtype for locals"),
-        }
-    }
-
-    fn initialize_locals(&self, validized: &ValidModule) {
-        let mut function_locals: Vec<Vec<WebAssemblyTypes>> =
-            Vec::with_capacity(validized.functions.len());
-        for func in &validized.functions {
-            let mut locals: Vec<WebAssemblyTypes> = Vec::with_capacity(func.params.len());
-            for param in &func.params {
-                locals.push(Self::valtype_default_editor(param));
-            }
-            for (count, local_type) in &func.locals {
-                for _ in 0..*count {
-                    locals.push(Self::valtype_default_editor(local_type));
-                }
-            }
-            function_locals.push(locals);
-        }
-        self.0.borrow_mut().function_locals = function_locals;
-    }
-
     fn build_program_state(&self, start: usize, stop: usize) {
         let mut inner = self.0.borrow_mut();
         let line_count = inner.component.get().1.0.inner().len();
@@ -859,12 +976,6 @@ impl Editor {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
                 inner.program_state.step_number = i + 1;
                 inner.program_state.line_number = change.line_number;
-                let line_num = change.line_number as usize;
-                let func_idx = inner
-                    .function_ranges
-                    .iter()
-                    .position(|(s, e)| line_num >= *s && line_num <= *e)
-                    .expect("line inside function");
                 let new_length = inner
                     .program_state
                     .stack_state
@@ -872,14 +983,16 @@ impl Editor {
                     .saturating_sub(change.num_pops as usize);
                 inner.program_state.stack_state.truncate(new_length);
                 for push in &change.stack_pushes {
-                    inner.program_state.stack_state.push(*push);
+                    inner.program_state.stack_state.push(push.clone());
                 }
-                if let Some(updates) = &change.locals_change {
-                    for (idx, val) in updates {
-                        inner.function_locals[func_idx][*idx] = *val;
+                if let Some((idx, val)) = &change.locals_change {
+                    let idx_usize = *idx as usize;
+                    let locals = &mut inner.program_state.locals_state;
+                    if locals.len() <= idx_usize {
+                        locals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
                     }
+                    locals[idx_usize] = val.clone();
                 }
-                inner.program_state.locals_state = inner.function_locals[func_idx].clone();
                 // Resizing won't be necessary when number of globals are known
                 if let Some((idx, val)) = &change.globals_change {
                     let idx_usize = *idx as usize;
@@ -887,7 +1000,7 @@ impl Editor {
                     if globals.len() <= idx_usize {
                         globals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
                     }
-                    globals[idx_usize] = *val;
+                    globals[idx_usize] = val.clone();
                 }
                 if let Some((idx, val)) = &change.memory_change {
                     let idx_usize = *idx as usize;
@@ -895,7 +1008,7 @@ impl Editor {
                     if memory.len() <= idx_usize {
                         memory.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
                     }
-                    memory[idx_usize] = *val;
+                    memory[idx_usize] = val.clone();
                 }
                 inner.saved_states[change.line_number as usize] = Some(inner.program_state.clone());
             }

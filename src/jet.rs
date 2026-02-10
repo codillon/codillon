@@ -358,6 +358,38 @@ impl<T: AnyElement> ElementHandle<T> {
             .element()
             .scroll_into_view_with_scroll_into_view_options(&opts);
     }
+
+    pub fn set_onclick<F>(&mut self, handler: F)
+    where
+        T: AsRef<web_sys::HtmlElement>,
+        F: 'static + FnMut(web_sys::MouseEvent),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
+        self.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onclick(Some(closure.as_ref().unchecked_ref()));
+            },
+            TOKEN,
+        );
+        closure.forget();
+    }
+
+    pub fn set_onmousedown<F>(&mut self, handler: F)
+    where
+        T: AsRef<web_sys::HtmlElement>,
+        F: 'static + FnMut(web_sys::MouseEvent),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
+        self.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onmousedown(Some(closure.as_ref().unchecked_ref()));
+            },
+            TOKEN,
+        );
+        closure.forget();
+    }
 }
 
 impl<T: AnyElement> Component for ElementHandle<T> {

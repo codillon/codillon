@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::ops::Deref;
 use wast::{
     Error,
-    core::{Global, InlineImport, Instruction, LocalParser, Memory, Table, ValType},
+    core::{InlineImport, Instruction, LocalParser, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
     token::Id,
@@ -32,9 +32,6 @@ pub enum ModulePart {
     Param,
     Result,
     Local,
-    Global,
-    Table,
-    Memory,
 }
 
 impl From<ModulePart> for &'static str {
@@ -70,24 +67,6 @@ impl<'a> From<InlineImport<'a>> for ModulePart {
 impl<'a> From<LocalParser<'a>> for ModulePart {
     fn from(_: LocalParser) -> Self {
         ModulePart::Local
-    }
-}
-
-impl<'a> From<Memory<'a>> for ModulePart {
-    fn from(_: Memory) -> Self {
-        ModulePart::Memory
-    }
-}
-
-impl<'a> From<Global<'a>> for ModulePart {
-    fn from(_: Global) -> Self {
-        ModulePart::Global
-    }
-}
-
-impl<'a> From<Table<'a>> for ModulePart {
-    fn from(_: Table) -> Self {
-        ModulePart::Table
     }
 }
 
@@ -203,21 +182,6 @@ impl<'a> Parse<'a> for ModulePart {
         } else if parser.peek2::<kw::local>()? {
             // Modified from Local parse_remainder
             parser.parens(|_| Ok(parser.parse::<LocalParser<'a>>()?.into()))
-        } else if parser.peek2::<kw::memory>()? {
-            parser.parens(|p| {
-                p.parse::<Memory<'a>>()?;
-                Ok(ModulePart::Memory)
-            })
-        } else if parser.peek2::<kw::table>()? {
-            parser.parens(|p| {
-                p.parse::<Table<'a>>()?;
-                Ok(ModulePart::Table)
-            })
-        } else if parser.peek2::<kw::global>()? {
-            parser.parens(|p| {
-                p.parse::<Global<'a>>()?;
-                Ok(ModulePart::Global)
-            })
         } else if parser.step(|cursor| match cursor.lparen()? {
             Some(rest) => Ok((true, rest)),
             None => Ok((false, cursor)),
@@ -443,9 +407,6 @@ impl SyntaxState {
     fn transit_state_from_module_part(&mut self, part: ModulePart) -> Result<(), &'static str> {
         *self = match (&self, part) {
             (SyntaxState::Initial, ModulePart::LParen) => SyntaxState::AfterModuleFieldLParen,
-            (SyntaxState::Initial, ModulePart::Memory | ModulePart::Table | ModulePart::Global) => {
-                SyntaxState::Initial
-            }
             (SyntaxState::AfterModuleFieldLParen, ModulePart::FuncKeyword) => {
                 SyntaxState::AfterFuncHeader(FuncHeader {
                     is_import: false,
@@ -468,11 +429,8 @@ impl SyntaxState {
                 SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction,
                 ModulePart::RParen,
             ) => SyntaxState::AfterModuleFieldRParen,
-            (SyntaxState::AfterModuleFieldRParen, ModulePart::LParen) => {
-                SyntaxState::AfterModuleFieldLParen
-            }
             (SyntaxState::AfterModuleFieldRParen, _) => {
-                return Err("text outside functions");
+                return Err("todo: text after end of module field");
             }
             _ => return Err("invalid field order"),
         };
@@ -545,7 +503,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.clear();
-                        state = Initial;
                     }
                 }
                 Err(e) => {
@@ -627,34 +584,17 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     }
 }
 
-pub fn find_function_ranges(code: &impl LineInfos) -> Option<Vec<(usize, usize)>> {
-    if code.len() == 0 {
-        return None;
-    }
-    let mut ranges = Vec::new();
+pub fn find_function_end(code: &impl LineInfos) -> Option<usize> {
     let mut state = SyntaxState::Initial;
-    let mut current_start: Option<usize> = None;
-
     for line_no in 0..code.len() {
-        let orig_state = state;
-        match state.transit_state(&code.info(line_no)) {
-            Ok(()) => {
-                if orig_state == SyntaxState::Initial && state != SyntaxState::Initial {
-                    current_start = Some(line_no);
-                }
-
-                if state == SyntaxState::AfterModuleFieldRParen {
-                    let start = current_start.take().unwrap_or(line_no);
-                    ranges.push((start, line_no));
-                    state = SyntaxState::Initial;
-                }
-            }
-            Err(_) => {
-                state = orig_state;
-            }
+        state
+            .transit_state(&code.info(line_no))
+            .expect("well-formed");
+        if state == SyntaxState::AfterModuleFieldRParen {
+            return Some(line_no);
         }
     }
-    Some(ranges)
+    None
 }
 
 pub fn find_frames(code: &mut impl FrameInfosMut) {

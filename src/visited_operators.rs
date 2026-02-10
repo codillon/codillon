@@ -60,6 +60,5 @@ mod tests {
             names.contains(&"memory.copy".to_string()),
             "Missing memory.copy"
         );
-
     }
 }

@@ -1,15 +1,15 @@
 @font-face {
-   font-family: 'MLMRoman12-Regular';
-   src: url('/fonts/mlmr12.woff2') format('woff2');
-   font-weight: normal;
-   font-style: normal;
+    font-family: 'MLMRoman12-Regular';
+    src: url('/fonts/mlmr12.woff2') format('woff2');
+    font-weight: normal;
+    font-style: normal;
 }
 
 @font-face {
-   font-family: 'MLMSansDemiCond10-Regular';
-   src: url('/fonts/mlmssdc10.woff2') format('woff2');
-   font-weight: normal;
-   font-style: normal;
+    font-family: 'MLMSansDemiCond10-Regular';
+    src: url('/fonts/mlmssdc10.woff2') format('woff2');
+    font-weight: normal;
+    font-style: normal;
 }
 
 body {
@@ -21,7 +21,7 @@ body {
 div.textentry {
     position: relative;
     top: 0;
-    right: 0; 
+    right: 0;
     bottom: 0;
     left: 0;
     user-select: none;
@@ -145,19 +145,47 @@ span.debug[data-debug]::after {
 }
 
 @keyframes shake-a {
- 0% { transform: translateX(0) }
- 25% { transform: translateX(5px) }
- 50% { transform: translateX(-5px) }
- 75% { transform: translateX(5px) }
- 100% { transform: translateX(0) }
+    0% {
+        transform: translateX(0)
+    }
+
+    25% {
+        transform: translateX(5px)
+    }
+
+    50% {
+        transform: translateX(-5px)
+    }
+
+    75% {
+        transform: translateX(5px)
+    }
+
+    100% {
+        transform: translateX(0)
+    }
 }
 
 @keyframes shake-b {
- 0% { transform: translateX(0) }
- 25% { transform: translateX(5px) }
- 50% { transform: translateX(-5px) }
- 75% { transform: translateX(5px) }
- 100% { transform: translateX(0) }
+    0% {
+        transform: translateX(0)
+    }
+
+    25% {
+        transform: translateX(5px)
+    }
+
+    50% {
+        transform: translateX(-5px)
+    }
+
+    75% {
+        transform: translateX(5px)
+    }
+
+    100% {
+        transform: translateX(0)
+    }
 }
 
 .reveal-a {
@@ -169,13 +197,23 @@ span.debug[data-debug]::after {
 }
 
 @keyframes reveal-a {
-    0% { transform: scaleY(0%) }
-    100% { transform: scaleY(100%) }
+    0% {
+        transform: scaleY(0%)
+    }
+
+    100% {
+        transform: scaleY(100%)
+    }
 }
 
 @keyframes reveal-b {
-    0% { transform: scaleY(0%) }
-    100% { transform: scaleY(100%) }
+    0% {
+        transform: scaleY(0%)
+    }
+
+    100% {
+        transform: scaleY(100%)
+    }
 }
 
 .flyend-a .instr::before {
@@ -195,13 +233,23 @@ span.debug[data-debug]::after {
 }
 
 @keyframes flyend-a {
-    0% { transform: translateY(var(--codillon-line-spacing)) scaleY(100%) }
-    100% { transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%) }
+    0% {
+        transform: translateY(var(--codillon-line-spacing)) scaleY(100%)
+    }
+
+    100% {
+        transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%)
+    }
 }
 
 @keyframes flyend-b {
-    0% { transform: translateY(var(--codillon-line-spacing)) scaleY(100%) }
-    100% { transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%) }
+    0% {
+        transform: translateY(var(--codillon-line-spacing)) scaleY(100%)
+    }
+
+    100% {
+        transform: translateY(calc(0.5 * var(--codillon-line-spacing))) scaleY(0%)
+    }
 }
 
 .annotations {
@@ -264,4 +312,38 @@ span.debug[data-debug]::after {
     border: var(--slider-thumb-border);
     cursor: pointer;
     box-shadow: none;
+}
+
+/* Autocomplete suggestion list */
+.autocomplete-list {
+    position: fixed;
+    bottom: 0px;
+    left: 0px;
+    right: 0px;
+    background: white;
+    border-top: 2px solid darkred;
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: row;
+    overflow-x: auto;
+    z-index: 1000;
+    font-family: 'MLMRoman12-Regular';
+    font-size: 20pt;
+    white-space: nowrap;
+}
+
+.suggestion-item {
+    padding: 8px 16px;
+    cursor: pointer;
+    border-right: 1px solid #f0f0f0;
+}
+
+.suggestion-item:hover,
+.suggestion-item.selected {
+    background-color: #fffff0;
+    color: darkred;
+}
+
+.suggestion-item:last-child {
+    border-right: none;
 }
