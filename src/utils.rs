@@ -148,10 +148,12 @@ pub struct ValidFunction<'a> {
 }
 
 pub struct RawModule<'a> {
+    pub globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)>,
     pub functions: Vec<RawFunction<'a>>,
 }
 
 pub struct ValidModule<'a> {
+    pub globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)>,
     pub functions: Vec<ValidFunction<'a>>,
 }
 
@@ -181,6 +183,7 @@ impl<'a> RawModule<'a> {
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
 
         let mut ret = ValidModule {
+            globals: self.globals,
             functions: Vec::with_capacity(self.functions.len()),
         };
 
@@ -619,6 +622,34 @@ impl<'a> ValidModule<'a> {
         imports
     }
 
+    fn build_globals(&self) -> wasm_encoder::GlobalSection {
+        use wasm_encoder::ConstExpr;
+        use wasmparser::Operator::*;
+        let mut globals = GlobalSection::new();
+        for (global_type, mutable, shared, init_expr) in &self.globals {
+            let mut init_reader = init_expr.get_operators_reader();
+            if let Ok(op) = init_reader.read() {
+                let initial_expression = match op {
+                    I32Const { value } => ConstExpr::i32_const(value),
+                    F32Const { value } => ConstExpr::f32_const(value.into()),
+                    I64Const { value } => ConstExpr::i64_const(value),
+                    F64Const { value } => ConstExpr::f64_const(value.into()),
+                    V128Const { value } => ConstExpr::v128_const(value.into()),
+                    _ => ConstExpr::empty(),
+                };
+                globals.global(
+                    wasm_encoder::GlobalType {
+                        val_type: parser_to_encoder(global_type),
+                        mutable: *mutable,
+                        shared: *shared,
+                    },
+                    &initial_expression,
+                );
+            }
+        }
+        globals
+    }
+
     pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
         module.section(&self.instr_func_types());
@@ -631,18 +662,7 @@ impl<'a> ValidModule<'a> {
             functions.function((func_type_offset + i) as u32);
         }
         module.section(&functions);
-
-        // Encode the global section.
-        let mut global = GlobalSection::new();
-        global.global(
-            wasm_encoder::GlobalType {
-                val_type: EncoderValType::I32,
-                mutable: true,
-                shared: false,
-            },
-            &wasm_encoder::ConstExpr::i32_const(0),
-        );
-        module.section(&global);
+        module.section(&self.build_globals());
 
         // Encode the export section.
         let mut exports = ExportSection::new();
@@ -975,7 +995,10 @@ pub(crate) mod tests {
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
-            let mut ret = ValidModule { functions: vec![] };
+            let mut ret = ValidModule {
+                globals: vec![],
+                functions: vec![],
+            };
 
             for func in raw.functions {
                 let mut valid = ValidFunction {
@@ -1045,6 +1068,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1122,6 +1146,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1219,6 +1244,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1318,6 +1344,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1385,6 +1412,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
