@@ -90,25 +90,6 @@ impl<Child: Structure, Element: AnyElement> Component for DomStruct<Child, Eleme
     }
 }
 
-impl<Child: Structure, Element: AnyElement> DomStruct<Child, Element>
-where
-    Element: AsRef<web_sys::HtmlElement>,
-{
-    pub fn set_onclick<F>(&mut self, handler: F)
-    where
-        F: 'static + FnMut(web_sys::MouseEvent),
-    {
-        self.elem.set_onclick(handler);
-    }
-
-    pub fn set_onmousedown<F>(&mut self, handler: F)
-    where
-        F: 'static + FnMut(web_sys::MouseEvent),
-    {
-        self.elem.set_onmousedown(handler);
-    }
-}
-
 // Accessors for the parent element (only usable by the jet (web support) module).
 impl<Child: Structure, Element: AnyElement> WithElement for DomStruct<Child, Element> {
     type Element = Element;

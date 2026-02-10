@@ -36,10 +36,6 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         self.contents.drain(begin..end);
     }
 
-    pub fn clear(&mut self) {
-        self.contents.clear();
-    }
-
     pub fn set_contents(&mut self, elem: Child) {
         self.contents = vec![elem];
         self.elem.attach_node(self.contents.last().unwrap());
