@@ -162,6 +162,18 @@ impl Editor {
         }
         ret.image_mut().set_attribute("class", "annotations");
 
+        {
+            let mut binding = ret.0.borrow_mut();
+            let autocomplete = &mut binding.component.get_mut().1.1.1.0;
+            let editor_weak = Rc::downgrade(&ret.0);
+            autocomplete.set_on_select(move |s| {
+                if let Some(editor_rc) = editor_weak.upgrade() {
+                    let mut editor = Editor(editor_rc);
+                    editor.apply_completion(s).expect("completion");
+                }
+            });
+        }
+
         ret.push_line("(func");
         ret.push_line("i32.const 5");
         ret.push_line("i32.const 6");
@@ -197,14 +209,24 @@ impl Editor {
 
     // Replace a given range (currently within a single line) with new text
     fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
+        let (start_line, start_pos, end_line, end_pos) =
+            self.get_lines_and_positions(&target_range)?;
+        self.replace_range_impl(start_line, start_pos, end_line, end_pos, new_str)
+    }
+
+    fn replace_range_impl(
+        &mut self,
+        start_line: usize,
+        start_pos: Position,
+        end_line: usize,
+        end_pos: Position,
+        new_str: &str,
+    ) -> Result<()> {
         if new_str.chars().any(|x| x.is_control() && x != '\n') {
             bail!("unhandled control char in input");
         }
 
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
-
-        let (start_line, start_pos, end_line, end_pos) =
-            self.get_lines_and_positions(&target_range)?;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -471,6 +493,47 @@ impl Editor {
         Ok(())
     }
 
+    fn apply_completion(&mut self, completion: String) -> Result<()> {
+        // Get position.
+        let selection = get_selection();
+        let (line_idx, pos, _, _) = self.get_lines_and_positions(&selection)?;
+
+        let start_utf16 = {
+            let line = self.line(line_idx);
+            let text = line.instr().get();
+
+            let mut current_utf16 = 0;
+            let mut byte_idx = 0;
+            for c in text.chars() {
+                if current_utf16 >= pos.offset {
+                    break;
+                }
+                current_utf16 += c.len_utf16();
+                byte_idx += c.len_utf8();
+            }
+            let prefix_area = &text[..byte_idx];
+            let last_word_start_byte = prefix_area
+                .rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+
+            // Convert start byte to utf16 offset for replacement
+            let start_chars = text[..last_word_start_byte].chars();
+            start_chars.map(|c| c.len_utf16()).sum()
+        };
+
+        let range_start = Position {
+            in_instr: true,
+            offset: start_utf16,
+        };
+        let range_end = pos; // current cursor
+
+        // Perform replacement
+        self.replace_range_impl(line_idx, range_start, line_idx, range_end, &completion)?;
+        self.autocomplete_mut().hide();
+        Ok(())
+    }
+
     // Keydown helpers. Firefox has trouble advancing to the next line if there is an ::after pseudo-element
     // later in the line. It also has trouble deleting if the cursor position is at the end of the surrounding
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
@@ -523,44 +586,7 @@ impl Editor {
                 ev.prevent_default();
                 let completion_opt = self.autocomplete().get_selected();
                 if let Some(completion) = completion_opt {
-                    //Gets position.
-                    let selection = get_selection();
-                    let (line_idx, pos, _, _) = self.get_lines_and_positions(&selection)?;
-
-                    let start_utf16 = {
-                        let line = self.line(line_idx);
-                        let text = line.instr().get();
-
-                        let mut current_utf16 = 0;
-                        let mut byte_idx = 0;
-                        for c in text.chars() {
-                            if current_utf16 >= pos.offset {
-                                break;
-                            }
-                            current_utf16 += c.len_utf16();
-                            byte_idx += c.len_utf8();
-                        }
-                        let prefix_area = &text[..byte_idx];
-                        let last_word_start_byte = prefix_area
-                            .rfind(|c: char| !c.is_alphanumeric() && c != '.' && c != '_')
-                            .map(|i| i + 1)
-                            .unwrap_or(0);
-
-                        // Convert start byte to utf16 offset for replacement
-                        let start_chars = text[..last_word_start_byte].chars();
-                        start_chars.map(|c| c.len_utf16()).sum()
-                    };
-
-                    let range_start = Position {
-                        in_instr: true,
-                        offset: start_utf16,
-                    };
-                    let range_end = pos; // current cursor
-
-                    // Perform replacement
-                    self.line_mut(line_idx)
-                        .replace_range(range_start, range_end, &completion)?;
-                    self.autocomplete_mut().hide();
+                    self.apply_completion(completion)?;
                 }
             }
 
@@ -570,6 +596,7 @@ impl Editor {
                     self.autocomplete_mut().hide();
                 }
             }
+
 
             "ArrowLeft" => {
                 let selection = get_selection();
@@ -601,7 +628,6 @@ impl Editor {
         }
 
         if self.autocomplete().is_visible() && ev.key() != "ArrowDown" && ev.key() != "ArrowUp" {
-            // Typing other then it will update.
             if ev.key() == "ArrowLeft" || ev.key() == "ArrowRight" {
                 self.autocomplete_mut().hide();
             }

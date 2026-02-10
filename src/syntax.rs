@@ -4,7 +4,7 @@ use anyhow::Result;
 use std::ops::Deref;
 use wast::{
     Error,
-    core::{Global, InlineImport, Instruction, LocalParser, Memory, Table, ValType},
+    core::{InlineImport, Instruction, LocalParser, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
     token::Id,
@@ -32,9 +32,6 @@ pub enum ModulePart {
     Param,
     Result,
     Local,
-    Global,
-    Table,
-    Memory,
 }
 
 impl From<ModulePart> for &'static str {
@@ -70,24 +67,6 @@ impl<'a> From<InlineImport<'a>> for ModulePart {
 impl<'a> From<LocalParser<'a>> for ModulePart {
     fn from(_: LocalParser) -> Self {
         ModulePart::Local
-    }
-}
-
-impl<'a> From<Memory<'a>> for ModulePart {
-    fn from(_: Memory) -> Self {
-        ModulePart::Memory
-    }
-}
-
-impl<'a> From<Global<'a>> for ModulePart {
-    fn from(_: Global) -> Self {
-        ModulePart::Global
-    }
-}
-
-impl<'a> From<Table<'a>> for ModulePart {
-    fn from(_: Table) -> Self {
-        ModulePart::Table
     }
 }
 
@@ -203,21 +182,6 @@ impl<'a> Parse<'a> for ModulePart {
         } else if parser.peek2::<kw::local>()? {
             // Modified from Local parse_remainder
             parser.parens(|_| Ok(parser.parse::<LocalParser<'a>>()?.into()))
-        } else if parser.peek2::<kw::memory>()? {
-            parser.parens(|p| {
-                p.parse::<Memory<'a>>()?;
-                Ok(ModulePart::Memory)
-            })
-        } else if parser.peek2::<kw::table>()? {
-            parser.parens(|p| {
-                p.parse::<Table<'a>>()?;
-                Ok(ModulePart::Table)
-            })
-        } else if parser.peek2::<kw::global>()? {
-            parser.parens(|p| {
-                p.parse::<Global<'a>>()?;
-                Ok(ModulePart::Global)
-            })
         } else if parser.step(|cursor| match cursor.lparen()? {
             Some(rest) => Ok((true, rest)),
             None => Ok((false, cursor)),
@@ -443,9 +407,6 @@ impl SyntaxState {
     fn transit_state_from_module_part(&mut self, part: ModulePart) -> Result<(), &'static str> {
         *self = match (&self, part) {
             (SyntaxState::Initial, ModulePart::LParen) => SyntaxState::AfterModuleFieldLParen,
-            (SyntaxState::Initial, ModulePart::Memory | ModulePart::Table | ModulePart::Global) => {
-                SyntaxState::Initial
-            }
             (SyntaxState::AfterModuleFieldLParen, ModulePart::FuncKeyword) => {
                 SyntaxState::AfterFuncHeader(FuncHeader {
                     is_import: false,
