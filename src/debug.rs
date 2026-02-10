@@ -1,13 +1,16 @@
 // Debug manager for time-travel instrumentation
 // Currently support:
-// - all normal scalar value ops: i32, i64, f32, f64 (pushes from instructions are recorded)
-// - memory store ops: i32, i64, f32, f64 (stores record addr + value)
-// - local/global set ops: i32, i64, f32, f64
+// - all scalar value ops: i32, i64, f32, f64 (pushes from instructions are recorded)
+// - v128 (SIMD) value ops: pushes, local.set/tee, global.set, v128.store, v128.load
+// - memory store ops: i32.store, i64.store, f32.store, f64.store, v128.store (record addr + value)
+// - memory load ops: via push instrumentation (recorded as stack push)
+// - memory.size, memory.grow: via push instrumentation (return i32)
+// - local/global set ops: i32, i64, f32, f64, v128
 // - function call tracking
 // Currently do not support:
-// - other memory operations
-// - all SIMD/vector operations
-// - all reference types operations
+// - bulk memory operations (memory.copy, memory.fill, memory.init, data.drop)
+// - atomic memory operations (i32.atomic.*, i64.atomic.*, etc.)
+// - all reference types operations (funcref, externref)
 
 use js_sys::{Array, Object, Reflect};
 use std::cell::RefCell;
@@ -182,6 +185,18 @@ pub fn make_imports() -> Result<Object, JsValue> {
     }) as Box<dyn Fn(f64) -> f64>);
     register_closure(&debug_numbers, "push_f64", push_f64);
 
+    // Store v128 as two i64 halves - returns void since v128 is restored from temp local
+    let push_v128 = Closure::wrap(Box::new(move |high: i64, low: i64| {
+        let value: u128 = ((high as u64 as u128) << 64) | (low as u64 as u128);
+        STATE.with(|cur_state| {
+            cur_state
+                .borrow_mut()
+                .stack_pushes
+                .push(WebAssemblyTypes::V128(value));
+        });
+    }) as Box<dyn Fn(i64, i64)>);
+    register_closure(&debug_numbers, "push_v128", push_v128);
+
     let pop_i = Closure::wrap(Box::new(move |pop_num: i32| {
         STATE.with(|cur_state| {
             cur_state.borrow_mut().num_pops = pop_num as u32;
@@ -229,6 +244,15 @@ fn create_closure_global_operations(debug_numbers: &Object) {
         });
     }) as Box<dyn Fn(i32, f64)>);
     register_closure(debug_numbers, "set_global_f64", set_global_f64);
+
+    let set_global_v128 = Closure::wrap(Box::new(move |idx: i32, high: i64, low: i64| {
+        let value: u128 = ((high as u64 as u128) << 64) | (low as u64 as u128);
+        STATE.with(|cur_state| {
+            cur_state.borrow_mut().globals_change =
+                Some((idx as u32, WebAssemblyTypes::V128(value)));
+        });
+    }) as Box<dyn Fn(i32, i64, i64)>);
+    register_closure(debug_numbers, "set_global_v128", set_global_v128);
 }
 
 fn create_closure_local_operations(debug_numbers: &Object) {
@@ -261,6 +285,13 @@ fn create_closure_local_operations(debug_numbers: &Object) {
         record_local_change(idx as usize, value.into());
     }) as Box<dyn Fn(i32, f64)>);
     register_closure(debug_numbers, "set_local_f64", set_local_f64);
+
+    // v128 local - passed as idx + two i64 (high and low halves)
+    let set_local_v128 = Closure::wrap(Box::new(move |idx: i32, high: i64, low: i64| {
+        let value: u128 = ((high as u64 as u128) << 64) | (low as u64 as u128);
+        record_local_change(idx as usize, WebAssemblyTypes::V128(value));
+    }) as Box<dyn Fn(i32, i64, i64)>);
+    register_closure(debug_numbers, "set_local_v128", set_local_v128);
 }
 
 fn create_closure_memory_operations(debug_numbers: &Object) {
@@ -312,6 +343,15 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr
     }) as Box<dyn Fn(i32, f64) -> js_sys::Array>);
     register_closure(debug_numbers, "set_memory_f64", set_memory_f64);
+
+    let set_memory_v128 = Closure::wrap(Box::new(move |addr: i32, high: i64, low: i64| {
+        let value: u128 = ((high as u64 as u128) << 64) | (low as u64 as u128);
+        STATE.with(|cur_state| {
+            cur_state.borrow_mut().memory_change =
+                Some((addr as u32, WebAssemblyTypes::V128(value)));
+        });
+    }) as Box<dyn Fn(i32, i64, i64)>);
+    register_closure(debug_numbers, "set_memory_v128", set_memory_v128);
 }
 
 pub fn last_step() -> usize {
@@ -331,7 +371,7 @@ fn type_to_string(value: &WebAssemblyTypes) -> String {
         WebAssemblyTypes::I64(v) => format!("i64({})", v),
         WebAssemblyTypes::F32(v) => format!("f32({})", v),
         WebAssemblyTypes::F64(v) => format!("f64({})", v),
-        WebAssemblyTypes::V128(v) => format!("v128({}", v),
+        WebAssemblyTypes::V128(v) => format!("v128({})", v),
     }
 }
 

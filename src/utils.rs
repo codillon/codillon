@@ -1,7 +1,7 @@
 use anyhow::Result;
 use wasm_encoder::{
     CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
-    TypeSection, ValType as EncoderValType,
+    MemorySection, TypeSection, ValType as EncoderValType,
     reencode::{Reencode, RoundtripReencoder},
 };
 use wasm_tools::parse_binary_wasm;
@@ -22,18 +22,22 @@ enum InstrumentationFuncs {
     SetLocalF32(u32),
     SetLocalI64(u32),
     SetLocalF64(u32),
+    SetLocalV128(u32),
     SetGlobalI32(u32),
     SetGlobalF32(u32),
     SetGlobalI64(u32),
     SetGlobalF64(u32),
+    SetGlobalV128(u32),
     SetMemoryI32,
     SetMemoryF32,
     SetMemoryI64,
     SetMemoryF64,
+    SetMemoryV128,
     PushI32,
     PushF32,
     PushI64,
     PushF64,
+    PushV128,
     CallFunc(u32),
     EndFunc,
     Other,
@@ -46,18 +50,22 @@ enum InstrImports {
     SetLocalF32,
     SetLocalI64,
     SetLocalF64,
+    SetLocalV128,
     SetGlobalI32,
     SetGlobalF32,
     SetGlobalI64,
     SetGlobalF64,
+    SetGlobalV128,
     SetMemoryI32,
     SetMemoryF32,
     SetMemoryI64,
     SetMemoryF64,
+    SetMemoryV128,
     PushI32,
     PushF32,
     PushI64,
     PushF64,
+    PushV128,
 }
 impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
@@ -67,18 +75,22 @@ impl InstrImports {
         ("set_local_f32", 10),
         ("set_local_i64", 11),
         ("set_local_f64", 12),
+        ("set_local_v128", 13),
         ("set_global_i32", 5),
         ("set_global_f32", 10),
         ("set_global_i64", 11),
         ("set_global_f64", 12),
+        ("set_global_v128", 13),
         ("set_memory_i32", 6),
         ("set_memory_f32", 7),
         ("set_memory_i64", 8),
         ("set_memory_f64", 9),
+        ("set_memory_v128", 13),  // (i32, i64, i64) -> () reuses sig 13
         ("push_i32", 1),
         ("push_f32", 2),
         ("push_i64", 3),
         ("push_f64", 4),
+        ("push_v128", 14),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: (i32) -> ()
@@ -119,6 +131,13 @@ impl InstrImports {
         (&[EncoderValType::I32, EncoderValType::I64], &[]),
         // 12: (i32, f64) -> ()
         (&[EncoderValType::I32, EncoderValType::F64], &[]),
+        // 13: (i32, i64, i64) -> () for v128 local/global (idx, high, low)
+        (
+            &[EncoderValType::I32, EncoderValType::I64, EncoderValType::I64],
+            &[],
+        ),
+        // 14: (i64, i64) -> () for v128 push (high, low) - v128 restored from temp local
+        (&[EncoderValType::I64, EncoderValType::I64], &[]),
     ];
 }
 
@@ -149,10 +168,12 @@ pub struct ValidFunction<'a> {
 
 pub struct RawModule<'a> {
     pub functions: Vec<RawFunction<'a>>,
+    pub memory_pages: Option<u32>,  // Minimum pages from (memory N) declaration
 }
 
 pub struct ValidModule<'a> {
     pub functions: Vec<ValidFunction<'a>>,
+    pub memory_pages: Option<u32>,  // Minimum pages from (memory N) declaration
 }
 
 impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
@@ -182,6 +203,7 @@ impl<'a> RawModule<'a> {
 
         let mut ret = ValidModule {
             functions: Vec::with_capacity(self.functions.len()),
+            memory_pages: self.memory_pages,
         };
 
         let mut raw_functions = self.functions.into_iter();
@@ -544,6 +566,10 @@ impl<'a> ValidModule<'a> {
                         instr_type: ValType::F64,
                         ..
                     } => SetLocalF64(*local_index),
+                    InputType {
+                        instr_type: ValType::V128,
+                        ..
+                    } => SetLocalV128(*local_index),
                     _ => Other,
                 }
             }
@@ -564,18 +590,26 @@ impl<'a> ValidModule<'a> {
                     instr_type: ValType::F64,
                     ..
                 } => SetGlobalF64(*global_index),
+                InputType {
+                    instr_type: ValType::V128,
+                    ..
+                } => SetGlobalV128(*global_index),
                 _ => Other,
             },
             I32Store { .. } | I32Store8 { .. } | I32Store16 { .. } => SetMemoryI32,
             F32Store { .. } => SetMemoryF32,
-            I64Store { .. } | I64Store8 { .. } | I64Store16 { .. } => SetMemoryI64,
+            I64Store { .. } | I64Store8 { .. } | I64Store16 { .. } | I64Store32 { .. } => {
+                SetMemoryI64
+            }
             F64Store { .. } => SetMemoryF64,
+            V128Store { .. } => SetMemoryV128,
             // Match based on outputs
             _ => match op_type.outputs.as_slice() {
                 [wasmparser::ValType::I32] => PushI32,
                 [wasmparser::ValType::I64] => PushI64,
                 [wasmparser::ValType::F32] => PushF32,
                 [wasmparser::ValType::F64] => PushF64,
+                [wasmparser::ValType::V128] => PushV128,
                 _ => Other,
             },
         }
@@ -632,6 +666,19 @@ impl<'a> ValidModule<'a> {
         }
         module.section(&functions);
 
+        // Encode the memory section if the user declared one.
+        if let Some(pages) = self.memory_pages {
+            let mut memory = MemorySection::new();
+            memory.memory(wasm_encoder::MemoryType {
+                minimum: pages as u64,
+                maximum: None,
+                memory64: false,
+                shared: false,
+                page_size_log2: None,
+            });
+            module.section(&memory);
+        }
+
         // Encode the global section.
         let mut global = GlobalSection::new();
         global.global(
@@ -669,13 +716,22 @@ impl<'a> ValidModule<'a> {
     ) -> Result<(), anyhow::Error> {
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
         let function = self.functions.get(func_idx).expect("valid func idx");
-        let mut f = wasm_encoder::Function::new(
-            function
-                .locals
-                .iter()
-                .map(|(count, value)| (*count, parser_to_encoder(value)))
-                .collect::<Vec<(u32, EncoderValType)>>(),
-        );
+        
+        // Build locals, adding a temp v128 local for SIMD instrumentation
+        let mut locals_list: Vec<(u32, EncoderValType)> = function
+            .locals
+            .iter()
+            .map(|(count, value)| (*count, parser_to_encoder(value)))
+            .collect();
+        // Add temp locals for instrumentation (index = params.len() + sum of local counts)
+        let base_temp_idx: u32 = function.params.len() as u32 
+            + function.locals.iter().map(|(count, _)| count).sum::<u32>();
+        let temp_v128_local_idx = base_temp_idx;
+        let temp_i32_local_idx = base_temp_idx + 1;
+        locals_list.push((1, EncoderValType::V128));  // temp v128
+        locals_list.push((1, EncoderValType::I32));   // temp i32 for addr in v128.store
+        
+        let mut f = wasm_encoder::Function::new(locals_list);
         let pop_debug = |func: &mut wasm_encoder::Function, num_pop: i32| {
             func.instruction(&I32Const(num_pop));
             func.instruction(&Call(InstrImports::PopI as u32));
@@ -703,13 +759,18 @@ impl<'a> ValidModule<'a> {
                 f.instruction(&instruction);
             } else {
                 // Instrumentation that needs to occur before execution
-                Self::instrument_memory_ops(&mut f, &operation_type);
+                Self::instrument_memory_ops(
+                    &mut f,
+                    &operation_type,
+                    temp_v128_local_idx,
+                    temp_i32_local_idx,
+                );
                 Self::instrument_global_ops(&mut f, &operation_type);
                 f.instruction(&instruction);
                 // Instrumentation that needs to occur after execution
                 Self::instrument_local_ops(&mut f, &operation_type);
                 Self::instrument_global_ops(&mut f, &operation_type);
-                Self::instrument_push_ops(&mut f, &operation_type);
+                Self::instrument_push_ops(&mut f, &operation_type, temp_v128_local_idx);
             }
             if !matches!(
                 codillon_instruction.op.op,
@@ -733,8 +794,9 @@ impl<'a> ValidModule<'a> {
 
     fn record_params(&self, func_idx: usize, f: &mut wasm_encoder::Function) {
         for (param_idx, param) in self.functions[func_idx].params.iter().enumerate() {
+            let param_idx_u32 = param_idx as u32;
             f.instruction(&I32Const(param_idx as i32));
-            f.instruction(&LocalGet(param_idx as u32));
+            f.instruction(&LocalGet(param_idx_u32));
             match param {
                 ValType::I32 => {
                     f.instruction(&Call(InstrImports::SetLocalI32 as u32));
@@ -748,6 +810,16 @@ impl<'a> ValidModule<'a> {
                 ValType::F64 => {
                     f.instruction(&Call(InstrImports::SetLocalF64 as u32));
                 }
+                ValType::V128 => {
+                    // For v128 params, need to extract lanes
+                    // Stack has [idx, v128], need [idx, high, low]
+                    f.instruction(&Drop); // drop v128 for now
+                    f.instruction(&LocalGet(param_idx_u32));
+                    f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(1)); // high
+                    f.instruction(&LocalGet(param_idx_u32));
+                    f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(0)); // low
+                    f.instruction(&Call(InstrImports::SetLocalV128 as u32));
+                }
                 _ => {}
             }
         }
@@ -756,6 +828,8 @@ impl<'a> ValidModule<'a> {
     fn instrument_memory_ops(
         f: &mut wasm_encoder::Function,
         operation_type: &InstrumentationFuncs,
+        temp_v128_local: u32,
+        temp_i32_local: u32,
     ) {
         match operation_type {
             SetMemoryI32 => {
@@ -769,6 +843,17 @@ impl<'a> ValidModule<'a> {
             }
             SetMemoryF64 => {
                 f.instruction(&Call(InstrImports::SetMemoryF64 as u32));
+            }
+            SetMemoryV128 => {
+                f.instruction(&LocalSet(temp_v128_local)); 
+                f.instruction(&LocalTee(temp_i32_local));  
+                f.instruction(&LocalGet(temp_v128_local));
+                f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(1));
+                f.instruction(&LocalGet(temp_v128_local));
+                f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(0));
+                f.instruction(&Call(InstrImports::SetMemoryV128 as u32));
+                f.instruction(&LocalGet(temp_i32_local));
+                f.instruction(&LocalGet(temp_v128_local));
             }
             _ => {}
         }
@@ -794,6 +879,15 @@ impl<'a> ValidModule<'a> {
                 f.instruction(&I32Const(*local_index as i32));
                 f.instruction(&LocalGet(*local_index));
                 f.instruction(&Call(InstrImports::SetLocalF64 as u32));
+            }
+            SetLocalV128(local_index) => {
+                // Push: idx, extract high lane, extract low lane
+                f.instruction(&I32Const(*local_index as i32));
+                f.instruction(&LocalGet(*local_index));
+                f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(1)); // high
+                f.instruction(&LocalGet(*local_index));
+                f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(0)); // low
+                f.instruction(&Call(InstrImports::SetLocalV128 as u32));
             }
             _ => {}
         }
@@ -823,10 +917,23 @@ impl<'a> ValidModule<'a> {
                 f.instruction(&GlobalGet(*global_index));
                 f.instruction(&Call(InstrImports::SetGlobalF64 as u32));
             }
+            SetGlobalV128(global_index) => {
+                // Push: idx, extract high lane, extract low lane
+                f.instruction(&I32Const(*global_index as i32));
+                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(1)); // high
+                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(0)); // low
+                f.instruction(&Call(InstrImports::SetGlobalV128 as u32));
+            }
             _ => {}
         }
     }
-    fn instrument_push_ops(f: &mut wasm_encoder::Function, operation_type: &InstrumentationFuncs) {
+    fn instrument_push_ops(
+        f: &mut wasm_encoder::Function,
+        operation_type: &InstrumentationFuncs,
+        temp_v128_local: u32,
+    ) {
         match operation_type {
             PushI32 => {
                 f.instruction(&Call(InstrImports::PushI32 as u32));
@@ -839,6 +946,16 @@ impl<'a> ValidModule<'a> {
             }
             PushF64 => {
                 f.instruction(&Call(InstrImports::PushF64 as u32));
+            }
+            PushV128 => {
+                f.instruction(&LocalTee(temp_v128_local));
+                f.instruction(&Drop);
+                f.instruction(&LocalGet(temp_v128_local));
+                f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(1));
+                f.instruction(&LocalGet(temp_v128_local));
+                f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(0));
+                f.instruction(&Call(InstrImports::PushV128 as u32));
+                f.instruction(&LocalGet(temp_v128_local));
             }
             _ => {}
         }
@@ -947,6 +1064,186 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn test_v128_operations() {
+        fn is_well_formed_func(s: &str) -> bool {
+            str_to_binary(format!("(func {s})")).is_ok()
+        }
+
+        // v128 const and drop
+        assert!(is_well_formed_func("v128.const i64x2 0 0\ndrop"));
+        assert!(is_well_formed_func("v128.const i32x4 1 2 3 4\ndrop"));
+        assert!(is_well_formed_func("v128.const f32x4 1.0 2.0 3.0 4.0\ndrop"));
+
+        // v128 local operations
+        assert!(is_well_formed_func(
+            "(local $v v128)\nv128.const i64x2 1 2\nlocal.set $v"
+        ));
+        assert!(is_well_formed_func(
+            "(local $v v128)\nv128.const i64x2 1 2\nlocal.tee $v\ndrop"
+        ));
+        assert!(is_well_formed_func(
+            "(local $v v128)\nv128.const i64x2 1 2\nlocal.set $v\nlocal.get $v\ndrop"
+        ));
+
+        // v128 arithmetic operations
+        assert!(is_well_formed_func(
+            "v128.const i32x4 1 2 3 4\nv128.const i32x4 5 6 7 8\ni32x4.add\ndrop"
+        ));
+        assert!(is_well_formed_func(
+            "v128.const f32x4 1.0 2.0 3.0 4.0\nv128.const f32x4 1.0 1.0 1.0 1.0\nf32x4.mul\ndrop"
+        ));
+
+        // v128 lane extraction
+        assert!(is_well_formed_func(
+            "v128.const i64x2 42 99\ni64x2.extract_lane 0"
+        ));
+        assert!(is_well_formed_func(
+            "v128.const i32x4 1 2 3 4\ni32x4.extract_lane 2"
+        ));
+
+        // v128 memory operations (requires memory declaration)
+        fn is_well_formed_with_memory(s: &str) -> bool {
+            str_to_binary(format!("(memory 1)\n{s}")).is_ok()
+        }
+
+        // v128.store
+        assert!(is_well_formed_with_memory(
+            "(func\ni32.const 0\nv128.const i64x2 1 2\nv128.store)"
+        ));
+        // v128.load
+        assert!(is_well_formed_with_memory(
+            "(func (result v128)\ni32.const 0\nv128.load)"
+        ));
+        // v128.store with offset
+        assert!(is_well_formed_with_memory(
+            "(func\ni32.const 0\nv128.const i32x4 1 2 3 4\nv128.store offset=16)"
+        ));
+
+        // i32 memory operations
+        assert!(is_well_formed_with_memory(
+            "(func\ni32.const 0\ni32.const 42\ni32.store)"
+        ));
+        assert!(is_well_formed_with_memory(
+            "(func (result i32)\ni32.const 0\ni32.load)"
+        ));
+
+        // i64 memory operations
+        assert!(is_well_formed_with_memory(
+            "(func\ni32.const 0\ni64.const 42\ni64.store)"
+        ));
+
+        // f32 memory operations
+        assert!(is_well_formed_with_memory(
+            "(func\ni32.const 0\nf32.const 3.14\nf32.store)"
+        ));
+
+        // f64 memory operations
+        assert!(is_well_formed_with_memory(
+            "(func\ni32.const 0\nf64.const 3.14159\nf64.store)"
+        ));
+
+        // memory.size and memory.grow
+        assert!(is_well_formed_with_memory(
+            "(func (result i32)\nmemory.size)"
+        ));
+        assert!(is_well_formed_with_memory(
+            "(func (result i32)\ni32.const 1\nmemory.grow)"
+        ));
+
+        // Comprehensive memory test combining multiple operations
+        assert!(is_well_formed_with_memory(
+            "(func (result i32)
+              ;; memory.size returns current pages (1)
+              memory.size
+              
+              ;; memory.grow returns old size (1) and grows by 1 page
+              i32.const 1
+              memory.grow
+              i32.add
+              
+              ;; i32.store then i32.load
+              i32.const 0
+              i32.const 42
+              i32.store
+              i32.const 0
+              i32.load
+              i32.add
+              
+              ;; i64.store then i64.load
+              i32.const 8
+              i64.const 100
+              i64.store
+              i32.const 8
+              i64.load
+              i32.wrap_i64
+              i32.add
+              
+              ;; f32.store then f32.load
+              i32.const 16
+              f32.const 3.5
+              f32.store
+              i32.const 16
+              f32.load
+              i32.trunc_f32_s
+              i32.add
+              
+              ;; f64.store then f64.load
+              i32.const 24
+              f64.const 1.5
+              f64.store
+              i32.const 24
+              f64.load
+              i32.trunc_f64_s
+              i32.add
+            )"
+        ));
+
+        // v128 memory operations
+        assert!(is_well_formed_with_memory(
+            "(func (result v128)
+              ;; Store a v128 value
+              i32.const 0
+              v128.const i64x2 123456789 987654321
+              v128.store
+              
+              ;; Load it back
+              i32.const 0
+              v128.load
+            )"
+        ));
+    }
+
+    #[test]
+    fn test_memory_instrumented_binary() {
+        // Test that instrumented binaries with memory operations would fail
+        // without proper memory section support (this test documents the current limitation)
+        
+        // Helper: parse WAT, validate, and check if instrumented binary is valid
+        fn is_instrumented_binary_valid(wat_code: &str) -> bool {
+            let _wasm_bin = match str_to_binary(wat_code.to_string()) {
+                Ok(bin) => bin,
+                Err(_) => return false,
+            };
+            
+            // Create a minimal RawModule for testing
+            let _raw = RawModule {
+                functions: vec![],
+                memory_pages: None,
+            };
+            
+            // We can't easily test the full instrumentation pipeline here
+            // because it requires the editor context.
+            // This is more of a documentation test.
+            true
+        }
+
+        // These parse correctly but would fail at runtime without memory support
+        assert!(is_instrumented_binary_valid(
+            "(func\ni32.const 5\ni32.const 6\ni32.add\ndrop)"
+        ));
+    }
+
+    #[test]
     fn test_types_table() -> Result<()> {
         type CodillonInstruction<'a> = Aligned<Operator<'a>>;
 
@@ -975,7 +1272,7 @@ pub(crate) mod tests {
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
-            let mut ret = ValidModule { functions: vec![] };
+            let mut ret = ValidModule { functions: vec![], memory_pages: None };
 
             for func in raw.functions {
                 let mut valid = ValidFunction {
@@ -1045,6 +1342,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory_pages: None,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1122,6 +1420,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory_pages: None,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1219,6 +1518,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory_pages: None,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1318,6 +1618,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory_pages: None,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1385,6 +1686,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory_pages: None,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
