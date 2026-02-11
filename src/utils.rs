@@ -238,7 +238,7 @@ impl<'a> RawModule<'a> {
                 };
 
                 for op in operators {
-                    match func_validator.atomic_op(DUMMY_OFFSET, &op.op) {
+                    match func_validator.try_op(DUMMY_OFFSET, &op.op) {
                         Ok(()) => valid_function.operators.push(op.into()),
                         Err(e) => {
                             editor.set_invalid(op.line_idx, Some(e.message().to_string()));
@@ -357,7 +357,7 @@ impl<'a> RawModule<'a> {
                     .expect("prepended op is valid");
             }
 
-            match validator_copy.atomic_op(DUMMY_OFFSET, &general_op.op.op) {
+            match validator_copy.try_op(DUMMY_OFFSET, &general_op.op.op) {
                 Ok(()) => {
                     return Ok(general_op);
                 }
