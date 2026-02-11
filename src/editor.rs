@@ -654,10 +654,9 @@ impl Editor {
                 }
                 Payload::MemorySection(reader) => {
                     // Parse the first memory declaration (WASM 1.0 only allows one memory)
-                    for mem in reader {
+                    if let Some(mem) = reader.into_iter().next() {
                         let mem = mem?;
                         memory_pages = Some(mem.initial as u32);
-                        break; // Only use the first memory
                     }
                 }
                 Payload::CodeSectionEntry(body) => {

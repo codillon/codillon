@@ -661,7 +661,7 @@ impl<'a> ValidModule<'a> {
         let mut module: wasm_encoder::Module = Default::default();
 
         // Check if first function has v128 in params or results (not JS-callable)
-        let needs_wrapper = self.functions.first().map_or(false, |f| {
+        let needs_wrapper = self.functions.first().is_some_and(|f| {
             f.params
                 .iter()
                 .any(|t| matches!(t, wasmparser::ValType::V128))
