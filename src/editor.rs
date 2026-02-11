@@ -642,6 +642,7 @@ impl Editor {
         let mut func_results: Vec<Vec<wasmparser::ValType>> = Vec::new();
         let mut func_locals: Vec<Vec<(u32, wasmparser::ValType)>> = Vec::new();
         let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
+        let mut memory_pages: Option<u32> = None;
 
         for payload in parser.parse_all(wasm_bin) {
             match payload? {
@@ -649,6 +650,13 @@ impl Editor {
                     for ft in reader.into_iter_err_on_gc_types().flatten() {
                         func_params.push(ft.params().to_vec());
                         func_results.push(ft.results().to_vec());
+                    }
+                }
+                Payload::MemorySection(reader) => {
+                    // Parse the first memory declaration (WASM 1.0 only allows one memory)
+                    if let Some(mem) = reader.into_iter().next() {
+                        let mem = mem?;
+                        memory_pages = Some(mem.initial as u32);
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
@@ -706,7 +714,10 @@ impl Editor {
             });
         }
 
-        Ok(RawModule { functions })
+        Ok(RawModule {
+            functions,
+            memory_pages,
+        })
     }
 
     fn execute(&self, binary: &[u8]) {
