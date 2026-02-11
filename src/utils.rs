@@ -655,7 +655,24 @@ impl<'a> ValidModule<'a> {
 
     pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
-        module.section(&self.instr_func_types());
+        
+        // Check if first function has v128 in params or results (not JS-callable)
+        let needs_wrapper = self.functions.first().map_or(false, |f| {
+            f.params.iter().any(|t| matches!(t, wasmparser::ValType::V128))
+                || f.results.iter().any(|t| matches!(t, wasmparser::ValType::V128))
+        });
+        
+        // Build type section with optional wrapper type
+        let mut type_section = self.instr_func_types();
+        let wrapper_type_idx = if needs_wrapper {
+            let idx = InstrImports::FUNC_SIGS.len() + self.functions.len();
+            // Add () -> () type for the wrapper
+            type_section.ty().function(vec![], vec![]);
+            Some(idx as u32)
+        } else {
+            None
+        };
+        module.section(&type_section);
         module.section(&self.instr_imports());
 
         // Encode the function section.
@@ -663,6 +680,10 @@ impl<'a> ValidModule<'a> {
         let func_type_offset = InstrImports::FUNC_SIGS.len();
         for i in 0..self.functions.len() {
             functions.function((func_type_offset + i) as u32);
+        }
+        // Add wrapper function if needed
+        if let Some(type_idx) = wrapper_type_idx {
+            functions.function(type_idx);
         }
         module.section(&functions);
 
@@ -694,13 +715,35 @@ impl<'a> ValidModule<'a> {
         // Encode the export section.
         let mut exports = ExportSection::new();
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
-        exports.export("main", wasm_encoder::ExportKind::Func, num_instr_imports);
+        if needs_wrapper {
+            // Export the wrapper function (last function)
+            let wrapper_func_idx = num_instr_imports + self.functions.len() as u32;
+            exports.export("main", wasm_encoder::ExportKind::Func, wrapper_func_idx);
+        } else {
+            // Export the original function directly
+            exports.export("main", wasm_encoder::ExportKind::Func, num_instr_imports);
+        }
         module.section(&exports);
 
         // Encode the code section.
         let mut codes = CodeSection::new();
         for func_idx in 0..self.functions.len() {
             let _ = self.build_function(func_idx, &mut codes, types);
+        }
+        
+        // Add wrapper function if needed
+        if needs_wrapper {
+            let mut wrapper = wasm_encoder::Function::new(vec![]);
+            // Call the original function (first user function)
+            wrapper.instruction(&Call(num_instr_imports));
+            // Drop each result value (they're v128 or other non-JS types)
+            if let Some(f) = self.functions.first() {
+                for _ in &f.results {
+                    wrapper.instruction(&Drop);
+                }
+            }
+            wrapper.instruction(&End);
+            codes.function(&wrapper);
         }
         module.section(&codes);
 
