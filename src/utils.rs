@@ -85,7 +85,7 @@ impl InstrImports {
         ("set_memory_f32", 7),
         ("set_memory_i64", 8),
         ("set_memory_f64", 9),
-        ("set_memory_v128", 13),  // (i32, i64, i64) -> () reuses sig 13
+        ("set_memory_v128", 13), // (i32, i64, i64) -> () reuses sig 13
         ("push_i32", 1),
         ("push_f32", 2),
         ("push_i64", 3),
@@ -133,7 +133,11 @@ impl InstrImports {
         (&[EncoderValType::I32, EncoderValType::F64], &[]),
         // 13: (i32, i64, i64) -> () for v128 local/global (idx, high, low)
         (
-            &[EncoderValType::I32, EncoderValType::I64, EncoderValType::I64],
+            &[
+                EncoderValType::I32,
+                EncoderValType::I64,
+                EncoderValType::I64,
+            ],
             &[],
         ),
         // 14: (i64, i64) -> () for v128 push (high, low) - v128 restored from temp local
@@ -168,12 +172,12 @@ pub struct ValidFunction<'a> {
 
 pub struct RawModule<'a> {
     pub functions: Vec<RawFunction<'a>>,
-    pub memory_pages: Option<u32>,  // Minimum pages from (memory N) declaration
+    pub memory_pages: Option<u32>, // Minimum pages from (memory N) declaration
 }
 
 pub struct ValidModule<'a> {
     pub functions: Vec<ValidFunction<'a>>,
-    pub memory_pages: Option<u32>,  // Minimum pages from (memory N) declaration
+    pub memory_pages: Option<u32>, // Minimum pages from (memory N) declaration
 }
 
 impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
@@ -655,13 +659,17 @@ impl<'a> ValidModule<'a> {
 
     pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
-        
+
         // Check if first function has v128 in params or results (not JS-callable)
         let needs_wrapper = self.functions.first().map_or(false, |f| {
-            f.params.iter().any(|t| matches!(t, wasmparser::ValType::V128))
-                || f.results.iter().any(|t| matches!(t, wasmparser::ValType::V128))
+            f.params
+                .iter()
+                .any(|t| matches!(t, wasmparser::ValType::V128))
+                || f.results
+                    .iter()
+                    .any(|t| matches!(t, wasmparser::ValType::V128))
         });
-        
+
         // Build type section with optional wrapper type
         let mut type_section = self.instr_func_types();
         let wrapper_type_idx = if needs_wrapper {
@@ -730,7 +738,7 @@ impl<'a> ValidModule<'a> {
         for func_idx in 0..self.functions.len() {
             let _ = self.build_function(func_idx, &mut codes, types);
         }
-        
+
         // Add wrapper function if needed
         if needs_wrapper {
             let mut wrapper = wasm_encoder::Function::new(vec![]);
@@ -759,7 +767,7 @@ impl<'a> ValidModule<'a> {
     ) -> Result<(), anyhow::Error> {
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
         let function = self.functions.get(func_idx).expect("valid func idx");
-        
+
         // Build locals, adding a temp v128 local for SIMD instrumentation
         let mut locals_list: Vec<(u32, EncoderValType)> = function
             .locals
@@ -767,13 +775,13 @@ impl<'a> ValidModule<'a> {
             .map(|(count, value)| (*count, parser_to_encoder(value)))
             .collect();
         // Add temp locals for instrumentation (index = params.len() + sum of local counts)
-        let base_temp_idx: u32 = function.params.len() as u32 
+        let base_temp_idx: u32 = function.params.len() as u32
             + function.locals.iter().map(|(count, _)| count).sum::<u32>();
         let temp_v128_local_idx = base_temp_idx;
         let temp_i32_local_idx = base_temp_idx + 1;
-        locals_list.push((1, EncoderValType::V128));  // temp v128
-        locals_list.push((1, EncoderValType::I32));   // temp i32 for addr in v128.store
-        
+        locals_list.push((1, EncoderValType::V128)); // temp v128
+        locals_list.push((1, EncoderValType::I32)); // temp i32 for addr in v128.store
+
         let mut f = wasm_encoder::Function::new(locals_list);
         let pop_debug = |func: &mut wasm_encoder::Function, num_pop: i32| {
             func.instruction(&I32Const(num_pop));
@@ -888,8 +896,8 @@ impl<'a> ValidModule<'a> {
                 f.instruction(&Call(InstrImports::SetMemoryF64 as u32));
             }
             SetMemoryV128 => {
-                f.instruction(&LocalSet(temp_v128_local)); 
-                f.instruction(&LocalTee(temp_i32_local));  
+                f.instruction(&LocalSet(temp_v128_local));
+                f.instruction(&LocalTee(temp_i32_local));
                 f.instruction(&LocalGet(temp_v128_local));
                 f.instruction(&wasm_encoder::Instruction::I64x2ExtractLane(1));
                 f.instruction(&LocalGet(temp_v128_local));
@@ -1115,7 +1123,9 @@ pub(crate) mod tests {
         // v128 const and drop
         assert!(is_well_formed_func("v128.const i64x2 0 0\ndrop"));
         assert!(is_well_formed_func("v128.const i32x4 1 2 3 4\ndrop"));
-        assert!(is_well_formed_func("v128.const f32x4 1.0 2.0 3.0 4.0\ndrop"));
+        assert!(is_well_formed_func(
+            "v128.const f32x4 1.0 2.0 3.0 4.0\ndrop"
+        ));
 
         // v128 local operations
         assert!(is_well_formed_func(
@@ -1260,20 +1270,20 @@ pub(crate) mod tests {
     fn test_memory_instrumented_binary() {
         // Test that instrumented binaries with memory operations would fail
         // without proper memory section support (this test documents the current limitation)
-        
+
         // Helper: parse WAT, validate, and check if instrumented binary is valid
         fn is_instrumented_binary_valid(wat_code: &str) -> bool {
             let _wasm_bin = match str_to_binary(wat_code.to_string()) {
                 Ok(bin) => bin,
                 Err(_) => return false,
             };
-            
+
             // Create a minimal RawModule for testing
             let _raw = RawModule {
                 functions: vec![],
                 memory_pages: None,
             };
-            
+
             // We can't easily test the full instrumentation pipeline here
             // because it requires the editor context.
             // This is more of a documentation test.
@@ -1315,7 +1325,10 @@ pub(crate) mod tests {
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
-            let mut ret = ValidModule { functions: vec![], memory_pages: None };
+            let mut ret = ValidModule {
+                functions: vec![],
+                memory_pages: None,
+            };
 
             for func in raw.functions {
                 let mut valid = ValidFunction {

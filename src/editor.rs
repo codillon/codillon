@@ -715,7 +715,10 @@ impl Editor {
             });
         }
 
-        Ok(RawModule { functions, memory_pages })
+        Ok(RawModule {
+            functions,
+            memory_pages,
+        })
     }
 
     fn execute(&self, binary: &[u8]) {
