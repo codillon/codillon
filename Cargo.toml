@@ -4,21 +4,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-wasm-tools = "1.244.0"
-wasmparser = { version = "0.244.0", features = ["atomic"] }
-wast = "244.0.0"
+wasm-tools = "1.245.0"
+wasmparser = { version = "0.245.0", features = ["try-op"] }
+wast = "245.0.0"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 console_error_panic_hook = "0.1.7"
-wasmprinter = "0.244.0"
-wat = "1.244.0"
-anyhow = "1.0.100"
-delegate = "0.13.4"
-js-sys = "0.3.81"
+wasmprinter = "0.245.0"
+wat = "1.245.0"
+anyhow = "1.0.101"
+delegate = "0.13.5"
+js-sys = "0.3.85"
 str_indices = "0.4.4"
-wasm-bindgen = "0.2.104"
-web-sys = { version = "0.3.81", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "SvgElement", "SvgLineElement", "SvgDefsElement", "SvgMarkerElement", "SvggElement", "SvgCircleElement", "SvgUseElement", "SvgPathElement", "HtmlInputElement", "Performance", "MouseEvent", "EventTarget", "Event", "UiEvent"] }
-wasm-bindgen-futures = "0.4.54"
-wasm-encoder = { version = "0.244.0", features = ["wasmparser"] }
+wasm-bindgen = "0.2.108"
+web-sys = { version = "0.3.85", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "SvgElement", "SvgLineElement", "SvgDefsElement", "SvgMarkerElement", "SvggElement", "SvgCircleElement", "SvgUseElement", "SvgPathElement", "HtmlInputElement", "Performance", "MouseEvent", "EventTarget", "Event", "UiEvent"] }
+wasm-bindgen-futures = "0.4.58"
+wasm-encoder = { version = "0.245.0", features = ["wasmparser"] }
 
 [patch.crates-io]
 wasm-tools = { git = "https://github.com/codillon/wasm-tools", branch = "v128constructible" }
