@@ -4,7 +4,7 @@ use wasm_encoder::{
     TypeSection,
     reencode::{Reencode, RoundtripReencoder},
 };
-// use wasm_tools::parse_binary_wasm;
+use wasm_tools::parse_binary_wasm;
 use wasmparser::{
     FuncValidator, HeapType, Operator, ValType, ValidPayload, Validator, WasmModuleResources,
 };
@@ -141,14 +141,8 @@ impl<'a> RawModule<'a> {
                 };
 
                 for op in operators {
-                    let mut validator_check = func_validator.clone();
-                    match validator_check.op(DUMMY_OFFSET, &op.op) {
-                        Ok(()) => {
-                            func_validator
-                                .op(DUMMY_OFFSET, &op.op)
-                                .expect("op is valid");
-                            valid_function.operators.push(op.into());
-                        }
+                    match func_validator.op(DUMMY_OFFSET, &op.op) {
+                        Ok(()) => valid_function.operators.push(op.into()),
                         Err(e) => {
                             editor.set_invalid(op.line_idx, Some(e.message().to_string()));
                             /* make a valid version of this operator */
@@ -724,16 +718,9 @@ pub struct TypesTable {
 pub fn str_to_binary(mut txt: String) -> Result<Vec<u8>> {
     txt.insert_str(0, "module ");
     let wasm_bin = parser::parse::<Module>(&ParseBuffer::new(&txt)?)?.encode()?;
-    // validate_simple(&wasm_bin)?; // make sure binary is well-formed
+    parse_binary_wasm(wasmparser::Parser::new(0), &wasm_bin)?; // make sure binary is well-formed
 
     Ok(wasm_bin)
-}
-
-#[cfg(test)]
-fn validate_simple(wasm_bin: &[u8]) -> Result<()> {
-    let mut validator = Validator::new();
-    validator.validate_all(wasm_bin)?;
-    Ok(())
 }
 
 // Find the line comment separator in these string slices.
@@ -766,39 +753,24 @@ pub(crate) mod tests {
     #[test]
     fn test_str_to_binary_for_one_function() {
         fn is_well_formed_func(s: &str) -> bool {
-            let res = str_to_binary(format!("(func {s})"));
-            if let Ok(bin) = &res {
-                if let Err(e) = validate_simple(bin) {
-                    println!("Validation error for '{s}': {e}");
-                    return false;
-                }
-                return true;
-            }
-            if let Err(e) = &res {
-                println!("Parse error for '{s}': {e}");
-            }
-            res.is_ok()
+            str_to_binary(format!("(func {s})")).is_ok()
         }
 
         //well-formed function
         assert!(is_well_formed_func("block\nend\n"));
-        assert!(is_well_formed_func(
-            "i32.const 1\ni32.const 2\ni32.add\ndrop"
-        ));
+        assert!(is_well_formed_func("i32.const 1\ni32.const 2\ni32.add"));
         assert!(is_well_formed_func("i64.const 42\ndrop"));
         //indentation
-        assert!(is_well_formed_func("block\n  i32.const 0\n  drop\nend"));
+        assert!(is_well_formed_func("block\n  i32.const 0\nend"));
         assert!(is_well_formed_func(
-            "i32.const 1\nif (result i32)\n  i32.const 42\nelse\n  i32.const 99\nend\ndrop"
+            "i32.const 1\nif\n  i32.const 42\nelse\n  i32.const 99\nend"
         ));
         //nested blocks
         assert!(is_well_formed_func(
-            "block\n  i32.const 1\n  block (param i32)\n    i32.const 2\n    i32.add\n    drop\n  end\nend"
+            "block\n  i32.const 1\n  block\n    i32.const 2\n    i32.add\n  end\nend"
         ));
         assert!(is_well_formed_func("loop\n  br 0\nend"));
-        assert!(is_well_formed_func(
-            "i32.const 10\ni32.const 10\ni32.eq\ndrop"
-        ));
+        assert!(is_well_formed_func("i32.const 10\ni32.const 10\ni32.eq"));
         //not well-formed function (assuming that each instruction is plain)
         //mismatched frame
         assert!(!is_well_formed_func("block\n"));
