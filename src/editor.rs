@@ -120,7 +120,7 @@ impl Editor {
             program_state: ProgramState::default(),
             function_locals: Vec::new(),
             globals: Vec::new(),
-            saved_states: vec![Some(ProgramState::default())],
+            saved_states: Vec::new(),
             function_ranges: Vec::new(),
         };
 
@@ -747,7 +747,7 @@ impl Editor {
                     .set_attribute("max", &(last_step() + 1).to_string());
                 let step = inner.program_state.step_number;
                 inner.program_state = ProgramState::default();
-                inner.saved_states = vec![Some(ProgramState::default())];
+                inner.saved_states = Vec::new();
                 step
             };
             editor_handle.build_program_state(0, step);
@@ -773,7 +773,8 @@ impl Editor {
         }
         for i in 0..lines.len() {
             lines[i].set_highlight(false);
-            if let Some(program_state) = &saved_states[i]
+            if let Some(cur_state) = saved_states.get(i)
+                && let Some(program_state) = &cur_state
                 && program_state.step_number <= step
             {
                 lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
@@ -880,6 +881,9 @@ impl Editor {
         inner.saved_states.resize_with(line_count, || None);
         if start == 0 {
             inner.program_state.globals_state = inner.globals.clone();
+            if let Some((first_start, _first_end)) = inner.function_ranges.first().cloned() {
+                inner.saved_states[first_start] = Some(inner.program_state.clone());
+            }
         }
         with_changes(|changes| {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
