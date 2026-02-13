@@ -429,11 +429,8 @@ impl SyntaxState {
                 SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction,
                 ModulePart::RParen,
             ) => SyntaxState::AfterModuleFieldRParen,
-            (SyntaxState::AfterModuleFieldRParen, ModulePart::LParen) => {
-                SyntaxState::AfterModuleFieldLParen
-            }
             (SyntaxState::AfterModuleFieldRParen, _) => {
-                return Err("text outside functions");
+                return Err("todo: text after end of module field");
             }
             _ => return Err("invalid field order"),
         };
@@ -506,7 +503,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.clear();
-                        state = Initial;
                     }
                 }
                 Err(e) => {
@@ -588,34 +584,17 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     }
 }
 
-pub fn find_function_ranges(code: &impl LineInfos) -> Option<Vec<(usize, usize)>> {
-    if code.len() == 0 {
-        return None;
-    }
-    let mut ranges = Vec::new();
+pub fn find_function_end(code: &impl LineInfos) -> Option<usize> {
     let mut state = SyntaxState::Initial;
-    let mut current_start: Option<usize> = None;
-
     for line_no in 0..code.len() {
-        let orig_state = state;
-        match state.transit_state(&code.info(line_no)) {
-            Ok(()) => {
-                if orig_state == SyntaxState::Initial && state != SyntaxState::Initial {
-                    current_start = Some(line_no);
-                }
-
-                if state == SyntaxState::AfterModuleFieldRParen {
-                    let start = current_start.take().unwrap_or(line_no);
-                    ranges.push((start, line_no));
-                    state = SyntaxState::Initial;
-                }
-            }
-            Err(_) => {
-                state = orig_state;
-            }
+        state
+            .transit_state(&code.info(line_no))
+            .expect("well-formed");
+        if state == SyntaxState::AfterModuleFieldRParen {
+            return Some(line_no);
         }
     }
-    Some(ranges)
+    None
 }
 
 pub fn find_frames(code: &mut impl FrameInfosMut) {
