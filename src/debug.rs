@@ -57,6 +57,12 @@ impl From<u128> for WebAssemblyTypes {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum DrawCommand {
+    Point { x: i32, y: i32 },
+    Line { x1: i32, y1: i32, x2: i32, y2: i32 },
+}
+
 pub struct Change {
     pub line_number: i32,
     pub stack_pushes: Vec<WebAssemblyTypes>,
@@ -64,6 +70,7 @@ pub struct Change {
     pub globals_change: Option<(u32, WebAssemblyTypes)>,
     pub memory_change: Option<(u32, WebAssemblyTypes)>,
     pub num_pops: u32,
+    pub draw_commands: Vec<DrawCommand>,
 }
 
 struct DebugState {
@@ -74,6 +81,7 @@ struct DebugState {
     globals_change: Option<(u32, WebAssemblyTypes)>,
     memory_change: Option<(u32, WebAssemblyTypes)>,
     num_pops: u32,
+    pending_draw_commands: Vec<DrawCommand>,
     // Chronological per-step changes
     changes: Vec<Change>,
 }
@@ -86,6 +94,7 @@ impl DebugState {
             globals_change: None,
             memory_change: None,
             num_pops: 0,
+            pending_draw_commands: Vec::new(),
             changes: Vec::new(),
         }
     }
@@ -114,6 +123,7 @@ pub fn make_imports() -> Result<Object, JsValue> {
                 log_1(&"debug: max step count exceeded".into());
                 return 0;
             }
+            let draw_commands = std::mem::take(&mut state.pending_draw_commands);
             let cur_change = Change {
                 line_number: line_num,
                 stack_pushes: state.stack_pushes.clone(),
@@ -121,6 +131,7 @@ pub fn make_imports() -> Result<Object, JsValue> {
                 globals_change: state.globals_change,
                 memory_change: state.memory_change,
                 num_pops: state.num_pops,
+                draw_commands,
             };
             state.changes.push(cur_change);
             state.stack_pushes.clear();
@@ -194,6 +205,15 @@ pub fn make_imports() -> Result<Object, JsValue> {
         &JsValue::from_str("codillon_debug"),
         &debug_numbers,
     )?;
+
+    let canvas_fns = Object::new();
+    create_closure_canvas_operations(&canvas_fns);
+    Reflect::set(
+        &imports,
+        &JsValue::from_str("codillon_canvas"),
+        &canvas_fns,
+    )?;
+
     Ok(imports)
 }
 
@@ -312,6 +332,28 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
         arr
     }) as Box<dyn Fn(i32, f64) -> js_sys::Array>);
     register_closure(debug_numbers, "set_memory_f64", set_memory_f64);
+}
+
+fn create_closure_canvas_operations(canvas_fns: &Object) {
+    let draw_point = Closure::wrap(Box::new(move |x: i32, y: i32| {
+        STATE.with(|cur_state| {
+            cur_state
+                .borrow_mut()
+                .pending_draw_commands
+                .push(DrawCommand::Point { x, y });
+        });
+    }) as Box<dyn Fn(i32, i32)>);
+    register_closure(canvas_fns, "draw_point", draw_point);
+
+    let draw_line = Closure::wrap(Box::new(move |x1: i32, y1: i32, x2: i32, y2: i32| {
+        STATE.with(|cur_state| {
+            cur_state
+                .borrow_mut()
+                .pending_draw_commands
+                .push(DrawCommand::Line { x1, y1, x2, y2 });
+        });
+    }) as Box<dyn Fn(i32, i32, i32, i32)>);
+    register_closure(canvas_fns, "draw_line", draw_line);
 }
 
 pub fn last_step() -> usize {

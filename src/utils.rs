@@ -58,7 +58,13 @@ enum InstrImports {
     PushF32,
     PushI64,
     PushF64,
+    DrawPoint,
+    DrawLine,
 }
+
+/// Number of debug-only imports (before canvas imports).
+const NUM_DEBUG_IMPORTS: usize = 18;
+
 impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
         ("step", 1),
@@ -79,6 +85,8 @@ impl InstrImports {
         ("push_f32", 2),
         ("push_i64", 3),
         ("push_f64", 4),
+        ("draw_point", 5),
+        ("draw_line", 13),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: (i32) -> ()
@@ -119,6 +127,11 @@ impl InstrImports {
         (&[EncoderValType::I32, EncoderValType::I64], &[]),
         // 12: (i32, f64) -> ()
         (&[EncoderValType::I32, EncoderValType::F64], &[]),
+        // 13: (i32, i32, i32, i32) -> ()
+        (
+            &[EncoderValType::I32, EncoderValType::I32, EncoderValType::I32, EncoderValType::I32],
+            &[],
+        ),
     ];
 }
 
@@ -147,12 +160,22 @@ pub struct ValidFunction<'a> {
     pub operators: Vec<Aligned<GeneralOperator<'a>>>,
 }
 
+#[derive(Clone, Debug)]
+pub enum CanvasKind {
+    DrawPoint,
+    DrawLine,
+}
+
 pub struct RawModule<'a> {
     pub functions: Vec<RawFunction<'a>>,
+    pub canvas_imports: Vec<(u32, CanvasKind)>,
+    pub num_user_func_imports: u32,
 }
 
 pub struct ValidModule<'a> {
     pub functions: Vec<ValidFunction<'a>>,
+    pub canvas_imports: Vec<(u32, CanvasKind)>,
+    pub num_user_func_imports: u32,
 }
 
 impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
@@ -182,6 +205,8 @@ impl<'a> RawModule<'a> {
 
         let mut ret = ValidModule {
             functions: Vec::with_capacity(self.functions.len()),
+            canvas_imports: self.canvas_imports,
+            num_user_func_imports: self.num_user_func_imports,
         };
 
         let mut raw_functions = self.functions.into_iter();
@@ -609,9 +634,14 @@ impl<'a> ValidModule<'a> {
     fn instr_imports(&self) -> wasm_encoder::ImportSection {
         // Encode the instrumentation functions as imports.
         let mut imports = wasm_encoder::ImportSection::new();
-        for (name, type_idx) in InstrImports::TYPE_INDICES.iter() {
+        for (i, (name, type_idx)) in InstrImports::TYPE_INDICES.iter().enumerate() {
+            let module = if i < NUM_DEBUG_IMPORTS {
+                "codillon_debug"
+            } else {
+                "codillon_canvas"
+            };
             imports.import(
-                "codillon_debug",
+                module,
                 name,
                 wasm_encoder::EntityType::Function(*type_idx),
             );
@@ -696,7 +726,16 @@ impl<'a> ValidModule<'a> {
                 pop_debug(&mut f, value_type.inputs.len() as i32);
             }
             if let CallFunc(function_idx) = operation_type {
-                f.instruction(&Call(function_idx + num_instr_imports));
+                if let Some((_, kind)) = self.canvas_imports.iter().find(|(idx, _)| *idx == function_idx) {
+                    let import_idx = match kind {
+                        CanvasKind::DrawPoint => InstrImports::DrawPoint as u32,
+                        CanvasKind::DrawLine => InstrImports::DrawLine as u32,
+                    };
+                    f.instruction(&Call(import_idx));
+                } else {
+                    let adjusted_idx = function_idx - self.num_user_func_imports + num_instr_imports;
+                    f.instruction(&Call(adjusted_idx));
+                }
             } else if matches!(operation_type, EndFunc) {
                 // Don't need to pop on returns
                 pop_debug(&mut f, 0);
@@ -975,7 +1014,11 @@ pub(crate) mod tests {
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
-            let mut ret = ValidModule { functions: vec![] };
+            let mut ret = ValidModule {
+                functions: vec![],
+                canvas_imports: raw.canvas_imports,
+                num_user_func_imports: raw.num_user_func_imports,
+            };
 
             for func in raw.functions {
                 let mut valid = ValidFunction {
@@ -1045,6 +1088,8 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            canvas_imports: vec![],
+            num_user_func_imports: 0,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1122,6 +1167,8 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            canvas_imports: vec![],
+            num_user_func_imports: 0,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1219,6 +1266,8 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            canvas_imports: vec![],
+            num_user_func_imports: 0,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1318,6 +1367,8 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            canvas_imports: vec![],
+            num_user_func_imports: 0,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],
@@ -1385,6 +1436,8 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            canvas_imports: vec![],
+            num_user_func_imports: 0,
             functions: vec![RawFunction {
                 params: vec![],
                 results: vec![],

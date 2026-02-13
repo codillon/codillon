@@ -1,7 +1,7 @@
 // The Codillon code editor
 
 use crate::{
-    debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
+    debug::{DrawCommand, WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
@@ -15,7 +15,7 @@ use crate::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         find_frames, find_function_ranges, fix_syntax,
     },
-    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, ValidModule, str_to_binary},
+    utils::{Aligned, CanvasKind, CodillonType, FmtError, RawFunction, RawModule, ValidModule, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -26,7 +26,7 @@ use std::{
 };
 use wasm_bindgen::{JsCast, JsValue};
 use wasmparser::{Parser, Payload};
-use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
+use web_sys::{HtmlButtonElement, HtmlCanvasElement, HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<
@@ -34,7 +34,13 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, ()),
+            (
+                ElementHandle<HtmlInputElement>,
+                (
+                    ElementHandle<HtmlButtonElement>,
+                    (ElementHandle<HtmlCanvasElement>, ()),
+                ),
+            ),
         ),
     ),
     HtmlDivElement,
@@ -100,6 +106,8 @@ struct _Editor {
     function_locals: Vec<Vec<WebAssemblyTypes>>,
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
+
+    canvas_visible: bool,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -118,7 +126,13 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), ()),
+                        (
+                            factory.input(),
+                            (
+                                factory.button(),
+                                (factory.canvas(), ()),
+                            ),
+                        ),
                     ),
                 ),
                 factory.div(),
@@ -131,6 +145,7 @@ impl Editor {
             function_locals: Vec::new(),
             saved_states: vec![Some(new_program_state())],
             function_ranges: Vec::new(),
+            canvas_visible: false,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -163,6 +178,41 @@ impl Editor {
             let slider = &mut binding.component.get_mut().1.1.0;
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
+        // Configure canvas toggle button
+        {
+            let mut binding = ret.0.borrow_mut();
+            let button = &mut binding.component.get_mut().1.1.1.0;
+            button.set_attribute("class", "canvas-toggle-btn");
+            button.set_text_content("Canvas");
+        }
+        {
+            let editor_ref = Rc::downgrade(&ret.0);
+            let mut binding = ret.0.borrow_mut();
+            let button = &mut binding.component.get_mut().1.1.1.0;
+            button.set_onclick(move |_event| {
+                if let Some(rc) = editor_ref.upgrade() {
+                    let mut inner = rc.borrow_mut();
+                    let visible = !inner.canvas_visible;
+                    inner.canvas_visible = visible;
+                    let canvas = &mut inner.component.get_mut().1.1.1.1.0;
+                    if visible {
+                        canvas.set_attribute("style", "display: block;");
+                    } else {
+                        canvas.set_attribute("style", "display: none;");
+                    }
+                }
+            });
+        }
+        // Configure canvas
+        {
+            let mut binding = ret.0.borrow_mut();
+            let canvas = &mut binding.component.get_mut().1.1.1.1.0;
+            canvas.set_attribute("class", "codillon-canvas");
+            canvas.set_attribute("width", "400");
+            canvas.set_attribute("height", "400");
+            canvas.set_attribute("style", "display: none;");
+        }
+
         ret.image_mut().set_attribute("class", "annotations");
 
         ret.push_line("(func");
@@ -642,6 +692,9 @@ impl Editor {
         let mut func_results: Vec<Vec<wasmparser::ValType>> = Vec::new();
         let mut func_locals: Vec<Vec<(u32, wasmparser::ValType)>> = Vec::new();
         let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
+        let mut func_type_indices: Vec<u32> = Vec::new();
+        let mut canvas_imports: Vec<(u32, CanvasKind)> = Vec::new();
+        let mut num_user_func_imports: u32 = 0;
 
         for payload in parser.parse_all(wasm_bin) {
             match payload? {
@@ -649,6 +702,26 @@ impl Editor {
                     for ft in reader.into_iter_err_on_gc_types().flatten() {
                         func_params.push(ft.params().to_vec());
                         func_results.push(ft.results().to_vec());
+                    }
+                }
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports() {
+                        let import = import?;
+                        if let wasmparser::TypeRef::Func(_) = import.ty {
+                            if import.module == "canvas" {
+                                match import.name {
+                                    "draw_point" => canvas_imports.push((num_user_func_imports, CanvasKind::DrawPoint)),
+                                    "draw_line" => canvas_imports.push((num_user_func_imports, CanvasKind::DrawLine)),
+                                    _ => {}
+                                }
+                            }
+                            num_user_func_imports += 1;
+                        }
+                    }
+                }
+                Payload::FunctionSection(reader) => {
+                    for type_idx in reader {
+                        func_type_indices.push(type_idx?);
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
@@ -698,15 +771,17 @@ impl Editor {
                 bail!("not enough instructions");
             }
             let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
+            // Look up the type index from the FunctionSection
+            let type_idx = func_type_indices.get(func_idx).copied().unwrap_or(func_idx as u32) as usize;
             functions.push(RawFunction {
                 locals,
-                params: func_params.get(func_idx).unwrap_or(&Vec::new()).clone(),
-                results: func_results.get(func_idx).unwrap_or(&Vec::new()).clone(),
+                params: func_params.get(type_idx).unwrap_or(&Vec::new()).clone(),
+                results: func_results.get(type_idx).unwrap_or(&Vec::new()).clone(),
                 operators: aligned_ops,
             });
         }
 
-        Ok(RawModule { functions })
+        Ok(RawModule { functions, canvas_imports, num_user_func_imports })
     }
 
     fn execute(&self, binary: &[u8]) {
@@ -748,6 +823,7 @@ impl Editor {
             };
             editor_handle.build_program_state(0, step);
             editor_handle.update_debug_panel(None);
+            editor_handle.redraw_canvas(step);
         });
     }
 
@@ -779,6 +855,49 @@ impl Editor {
         }
 
         lines[line_num].set_highlight(true);
+    }
+
+    fn redraw_canvas(&self, up_to_step: usize) {
+        {
+            let inner = self.0.borrow();
+            if !inner.canvas_visible {
+                return;
+            }
+        }
+
+        // Collect draw commands first (avoids borrow conflicts with thread-local STATE)
+        let commands: Vec<DrawCommand> = with_changes(|changes| {
+            changes
+                .take(up_to_step)
+                .flat_map(|change| change.draw_commands.iter().cloned())
+                .collect()
+        });
+
+        let inner = self.0.borrow();
+        inner.component.get().1.1.1.1.0.with_2d_context(|ctx, w, h| {
+            ctx.clear_rect(0.0, 0.0, w, h);
+            ctx.set_fill_style_str("white");
+            ctx.fill_rect(0.0, 0.0, w, h);
+
+            for cmd in &commands {
+                match cmd {
+                    DrawCommand::Point { x, y } => {
+                        ctx.begin_path();
+                        ctx.arc(*x as f64, *y as f64, 2.0, 0.0, std::f64::consts::TAU)
+                            .unwrap();
+                        ctx.set_fill_style_str("black");
+                        ctx.fill();
+                    }
+                    DrawCommand::Line { x1, y1, x2, y2 } => {
+                        ctx.begin_path();
+                        ctx.move_to(*x1 as f64, *y1 as f64);
+                        ctx.line_to(*x2 as f64, *y2 as f64);
+                        ctx.set_stroke_style_str("black");
+                        ctx.stroke();
+                    }
+                }
+            }
+        });
     }
 
     fn setup_slider(
@@ -820,6 +939,7 @@ impl Editor {
         // Reconstruct up to slider_step
         self.build_program_state(program_step, slider_step);
         self.update_debug_panel(None);
+        self.redraw_canvas(slider_step);
     }
 
     fn valtype_default_editor(ty: &wasmparser::ValType) -> WebAssemblyTypes {

@@ -350,6 +350,10 @@ impl<T: AnyElement> ElementHandle<T> {
         NodeListHandle(self.elem.element().child_nodes())
     }
 
+    pub fn set_text_content(&self, text: &str) {
+        self.elem.element().set_text_content(Some(text));
+    }
+
     pub fn scroll_into_view(&self) {
         let opts = web_sys::ScrollIntoViewOptions::new();
         opts.set_behavior(web_sys::ScrollBehavior::Smooth);
@@ -508,6 +512,50 @@ impl ElementFactory {
 
     pub fn input(&self) -> ElementHandle<web_sys::HtmlInputElement> {
         ElementHandle::new(self.create_element("input"))
+    }
+
+    pub fn canvas(&self) -> ElementHandle<web_sys::HtmlCanvasElement> {
+        ElementHandle::new(self.create_element("canvas"))
+    }
+
+    pub fn button(&self) -> ElementHandle<web_sys::HtmlButtonElement> {
+        ElementHandle::new(self.create_element("button"))
+    }
+}
+
+impl ElementHandle<web_sys::HtmlCanvasElement> {
+    pub fn with_2d_context<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&web_sys::CanvasRenderingContext2d, f64, f64) -> R,
+    {
+        let ctx = self
+            .elem
+            .0
+            .get_context("2d")
+            .unwrap()
+            .unwrap()
+            .dyn_into::<web_sys::CanvasRenderingContext2d>()
+            .unwrap();
+        let w = self.elem.0.width() as f64;
+        let h = self.elem.0.height() as f64;
+        f(&ctx, w, h)
+    }
+}
+
+impl ElementHandle<web_sys::HtmlButtonElement> {
+    pub fn set_onclick<F>(&mut self, handler: F)
+    where
+        F: 'static + FnMut(web_sys::Event),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::Event)>);
+        self.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onclick(Some(closure.as_ref().unchecked_ref()));
+            },
+            TOKEN,
+        );
+        closure.forget();
     }
 }
 

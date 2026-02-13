@@ -265,3 +265,26 @@ span.debug[data-debug]::after {
     cursor: pointer;
     box-shadow: none;
 }
+
+.canvas-toggle-btn {
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 12pt;
+    background-color: darkred;
+    color: white;
+    border: 2px solid white;
+    border-radius: 10px;
+    padding: 4px 12px;
+    cursor: pointer;
+    margin: 8px 0;
+}
+
+.canvas-toggle-btn:hover {
+    background-color: #8b0000cc;
+}
+
+.codillon-canvas {
+    border: 2px solid burlywood;
+    border-radius: 4px;
+    background-color: white;
+    margin: 8px 0;
+}
