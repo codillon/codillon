@@ -359,20 +359,28 @@ impl<T: AnyElement> ElementHandle<T> {
             .scroll_into_view_with_scroll_into_view_options(&opts);
     }
 
-    pub fn set_onclick<F>(&mut self, handler: F)
-    where
+    fn set_mouse_handler<F>(
+        &mut self,
+        handler: F,
+        setter: fn(&HtmlElement, Option<&::js_sys::Function>),
+    ) where
         T: AsRef<web_sys::HtmlElement>,
         F: 'static + FnMut(web_sys::MouseEvent),
     {
         let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
         self.with_element(
-            |elem| {
-                let html: &HtmlElement = elem.as_ref();
-                html.set_onclick(Some(closure.as_ref().unchecked_ref()));
-            },
+            |elem| setter(elem.as_ref(), Some(closure.as_ref().unchecked_ref())),
             TOKEN,
         );
         closure.forget();
+    }
+
+    pub fn set_onclick<F>(&mut self, handler: F)
+    where
+        T: AsRef<web_sys::HtmlElement>,
+        F: 'static + FnMut(web_sys::MouseEvent),
+    {
+        self.set_mouse_handler(handler, HtmlElement::set_onclick);
     }
 
     pub fn set_onmousedown<F>(&mut self, handler: F)
@@ -380,15 +388,7 @@ impl<T: AnyElement> ElementHandle<T> {
         T: AsRef<web_sys::HtmlElement>,
         F: 'static + FnMut(web_sys::MouseEvent),
     {
-        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
-        self.with_element(
-            |elem| {
-                let html: &HtmlElement = elem.as_ref();
-                html.set_onmousedown(Some(closure.as_ref().unchecked_ref()));
-            },
-            TOKEN,
-        );
-        closure.forget();
+        self.set_mouse_handler(handler, HtmlElement::set_onmousedown);
     }
 }
 
