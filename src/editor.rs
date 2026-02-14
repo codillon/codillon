@@ -480,6 +480,8 @@ impl Editor {
                 (line.instr().get().to_string(), pos.offset)
             };
 
+            let was_structured = self.line(line_idx).info().is_structured();
+
             // Find start of word
             let mut start = offset;
             while start > 0 {
@@ -499,6 +501,34 @@ impl Editor {
                 pos,
                 completion,
             )?;
+
+            // Auto-insert courtesy `end` for newly added block instructions
+            let is_structured = self.line(line_idx).info().is_structured();
+            if !was_structured && is_structured {
+                let is_if =
+                    self.line(line_idx).info().kind == LineKind::Instr(InstrKind::If);
+                let mut need_end = true;
+                for i in line_idx + 1..self.text().len() {
+                    if self.line(i).info().kind == LineKind::Instr(InstrKind::End)
+                        && !self.line(i).info().is_active()
+                    {
+                        need_end = false;
+                    }
+                    if is_if
+                        && self.line(i).info().kind == LineKind::Instr(InstrKind::Else)
+                        && !self.line(i).info().is_active()
+                    {
+                        need_end = false;
+                    }
+                }
+                if need_end {
+                    let matching_end =
+                        CodeLine::new("end", &self.0.borrow().factory);
+                    self.text_mut().insert(line_idx + 1, matching_end);
+                    self.line_mut(line_idx + 1).reveal();
+                }
+            }
+
             // Move cursor to end of inserted text
             self.line(line_idx).set_cursor_position(Position {
                 in_instr: true,
