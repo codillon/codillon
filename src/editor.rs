@@ -505,8 +505,7 @@ impl Editor {
             // Auto-insert courtesy `end` for newly added block instructions
             let is_structured = self.line(line_idx).info().is_structured();
             if !was_structured && is_structured {
-                let is_if =
-                    self.line(line_idx).info().kind == LineKind::Instr(InstrKind::If);
+                let is_if = self.line(line_idx).info().kind == LineKind::Instr(InstrKind::If);
                 let mut need_end = true;
                 for i in line_idx + 1..self.text().len() {
                     if self.line(i).info().kind == LineKind::Instr(InstrKind::End)
@@ -522,8 +521,7 @@ impl Editor {
                     }
                 }
                 if need_end {
-                    let matching_end =
-                        CodeLine::new("end", &self.0.borrow().factory);
+                    let matching_end = CodeLine::new("end", &self.0.borrow().factory);
                     self.text_mut().insert(line_idx + 1, matching_end);
                     self.line_mut(line_idx + 1).reveal();
                 }
