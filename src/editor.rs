@@ -66,7 +66,7 @@ struct Edit {
     time_ms: f64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ProgramState {
     pub step_number: usize,
     pub line_number: i32,
@@ -74,17 +74,6 @@ pub struct ProgramState {
     pub locals_state: Vec<WebAssemblyTypes>,
     pub globals_state: Vec<WebAssemblyTypes>,
     pub memory_state: Vec<WebAssemblyTypes>,
-}
-
-pub fn new_program_state() -> ProgramState {
-    ProgramState {
-        step_number: 0,
-        line_number: 0,
-        stack_state: Vec::new(),
-        locals_state: Vec::new(),
-        globals_state: Vec::new(),
-        memory_state: Vec::new(),
-    }
 }
 
 struct _Editor {
@@ -98,6 +87,7 @@ struct _Editor {
 
     program_state: ProgramState,
     function_locals: Vec<Vec<WebAssemblyTypes>>,
+    globals: Vec<WebAssemblyTypes>,
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
 }
@@ -127,9 +117,10 @@ impl Editor {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_time_ms: 0.0,
-            program_state: new_program_state(),
+            program_state: ProgramState::default(),
             function_locals: Vec::new(),
-            saved_states: vec![Some(new_program_state())],
+            globals: Vec::new(),
+            saved_states: Vec::new(),
             function_ranges: Vec::new(),
         };
 
@@ -625,6 +616,7 @@ impl Editor {
         }
 
         // instrumentation
+        self.initialize_globals(&validized);
         self.initialize_locals(&validized);
         self.execute(&validized.build_executable_binary(&types)?);
 
@@ -636,15 +628,27 @@ impl Editor {
 
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
     fn to_raw_module<'a>(&self, wasm_bin: &'a [u8]) -> Result<RawModule<'a>> {
+        use wasmparser::ValType;
         let parser = Parser::new(0);
         let mut functions: Vec<RawFunction> = Vec::new();
-        let mut func_params: Vec<Vec<wasmparser::ValType>> = Vec::new();
-        let mut func_results: Vec<Vec<wasmparser::ValType>> = Vec::new();
-        let mut func_locals: Vec<Vec<(u32, wasmparser::ValType)>> = Vec::new();
+        let mut func_params: Vec<Vec<ValType>> = Vec::new();
+        let mut func_results: Vec<Vec<ValType>> = Vec::new();
+        let mut func_locals: Vec<Vec<(u32, ValType)>> = Vec::new();
         let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
+        let mut globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
             match payload? {
+                Payload::GlobalSection(reader) => {
+                    for global in reader.into_iter_with_offsets().flatten() {
+                        globals.push((
+                            global.1.ty.content_type,
+                            global.1.ty.mutable,
+                            global.1.ty.shared,
+                            global.1.init_expr,
+                        ))
+                    }
+                }
                 Payload::TypeSection(reader) => {
                     for ft in reader.into_iter_err_on_gc_types().flatten() {
                         func_params.push(ft.params().to_vec());
@@ -652,7 +656,7 @@ impl Editor {
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
-                    let mut locals: Vec<(u32, wasmparser::ValType)> = Vec::new();
+                    let mut locals: Vec<(u32, ValType)> = Vec::new();
                     let local_reader = body.get_locals_reader()?;
                     for local in local_reader {
                         let entry = local?;
@@ -706,7 +710,7 @@ impl Editor {
             });
         }
 
-        Ok(RawModule { functions })
+        Ok(RawModule { globals, functions })
     }
 
     fn execute(&self, binary: &[u8]) {
@@ -742,8 +746,8 @@ impl Editor {
                     .0
                     .set_attribute("max", &(last_step() + 1).to_string());
                 let step = inner.program_state.step_number;
-                inner.program_state = new_program_state();
-                inner.saved_states = vec![Some(new_program_state())];
+                inner.program_state = ProgramState::default();
+                inner.saved_states = Vec::new();
                 step
             };
             editor_handle.build_program_state(0, step);
@@ -769,7 +773,8 @@ impl Editor {
         }
         for i in 0..lines.len() {
             lines[i].set_highlight(false);
-            if let Some(program_state) = &saved_states[i]
+            if let Some(cur_state) = saved_states.get(i)
+                && let Some(program_state) = &cur_state
                 && program_state.step_number <= step
             {
                 lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
@@ -813,7 +818,7 @@ impl Editor {
             }
             // For backwards steps, reset program state
             if slider_step < inner.program_state.step_number {
-                inner.program_state = new_program_state();
+                inner.program_state = ProgramState::default();
             }
             inner.program_state.step_number
         };
@@ -831,6 +836,25 @@ impl Editor {
             wasmparser::ValType::V128 => WebAssemblyTypes::V128(0u128),
             _ => panic!("unsupported valtype for locals"),
         }
+    }
+
+    fn initialize_globals(&self, validized: &ValidModule) {
+        use wasmparser::Operator::*;
+        let mut globals: Vec<WebAssemblyTypes> = Vec::with_capacity(validized.globals.len());
+        for (.., init_expr) in &validized.globals {
+            let mut init_reader = init_expr.get_operators_reader();
+            if let Ok(op) = init_reader.read() {
+                globals.push(match op {
+                    I32Const { value } => WebAssemblyTypes::I32(value),
+                    F32Const { value } => WebAssemblyTypes::F32(value.into()),
+                    I64Const { value } => WebAssemblyTypes::I64(value),
+                    F64Const { value } => WebAssemblyTypes::F64(value.into()),
+                    V128Const { value } => WebAssemblyTypes::V128(value.into()),
+                    _ => WebAssemblyTypes::I32(0),
+                });
+            }
+        }
+        self.0.borrow_mut().globals = globals;
     }
 
     fn initialize_locals(&self, validized: &ValidModule) {
@@ -855,6 +879,12 @@ impl Editor {
         let mut inner = self.0.borrow_mut();
         let line_count = inner.component.get().1.0.inner().len();
         inner.saved_states.resize_with(line_count, || None);
+        if start == 0 {
+            inner.program_state.globals_state = inner.globals.clone();
+            if let Some((first_start, _first_end)) = inner.function_ranges.first().cloned() {
+                inner.saved_states[first_start] = Some(inner.program_state.clone());
+            }
+        }
         with_changes(|changes| {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
                 inner.program_state.step_number = i + 1;
@@ -880,14 +910,8 @@ impl Editor {
                     }
                 }
                 inner.program_state.locals_state = inner.function_locals[func_idx].clone();
-                // Resizing won't be necessary when number of globals are known
                 if let Some((idx, val)) = &change.globals_change {
-                    let idx_usize = *idx as usize;
-                    let globals = &mut inner.program_state.globals_state;
-                    if globals.len() <= idx_usize {
-                        globals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
-                    }
-                    globals[idx_usize] = *val;
+                    inner.program_state.globals_state[*idx as usize] = *val;
                 }
                 if let Some((idx, val)) = &change.memory_change {
                     let idx_usize = *idx as usize;
