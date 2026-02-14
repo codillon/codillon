@@ -1473,4 +1473,29 @@ pub(crate) mod tests {
 
         Ok(())
     }
+    #[test]
+    fn test_parse_memory_section() -> Result<()> {
+        let module = "(module\n(memory i64 3 5 (pagesize 8))\n(func)\n)";
+        let wasm_bin = wat::parse_str(module).expect("failed to parse wat to binary wasm");
+        let mem_payload = wasmparser::Parser::new(0)
+            .parse_all(&wasm_bin)
+            .nth(3)
+            .expect("failed to get memory payload");
+        let mut mem_exists = false;
+        if let wasmparser::Payload::MemorySection(reader) = mem_payload? {
+            assert_eq!(
+                reader.into_iter().next().expect("failed to get memory")?,
+                wasmparser::MemoryType {
+                    memory64: true,
+                    shared: false,
+                    initial: 3,
+                    maximum: Some(5),
+                    page_size_log2: Some(3),
+                }
+            );
+            mem_exists = true;
+        }
+        assert!(mem_exists);
+        Ok(())
+    }
 }
