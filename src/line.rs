@@ -7,7 +7,9 @@ use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
     jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
-    syntax::{InstrKind, LineKind, ModulePart, SyntheticWasm, parse_line},
+    syntax::{
+        InstrKind, LineKind, LineSymbols, ModulePart, SyntheticWasm, parse_line, parse_line_symbols,
+    },
     utils::find_comment,
 };
 use anyhow::{Result, bail};
@@ -38,6 +40,7 @@ pub struct LineInfo {
     pub indent: Option<u16>,
     pub synthetic_before: SyntheticWasm,
     pub invalid: Option<String>,
+    pub symbols: LineSymbols,
 }
 
 impl LineInfo {
@@ -418,8 +421,9 @@ impl CodeLine {
         if ws_bytes != 0 {
             self.instr_mut().replace_range_bytes(0, ws_bytes, "")?;
         }
-        // Update kind, commentary, and active status
+        // Update kind, symbols, commentary, and active status
         self.info.kind = parse_line(self.instr().get());
+        self.info.symbols = parse_line_symbols(self.instr().get(), self.info.kind.clone());
         self.conform();
         Ok(ws_bytes)
     }
