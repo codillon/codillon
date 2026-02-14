@@ -636,9 +636,15 @@ impl Editor {
         let mut func_locals: Vec<Vec<(u32, ValType)>> = Vec::new();
         let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
         let mut globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)> = Vec::new();
+        let mut memory: Vec<wasmparser::MemoryType> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
             match payload? {
+                Payload::MemorySection(reader) => {
+                    for mem in reader.into_iter_with_offsets().flatten() {
+                        memory.push(mem.1);
+                    }
+                }
                 Payload::GlobalSection(reader) => {
                     for global in reader.into_iter_with_offsets().flatten() {
                         globals.push((
@@ -710,7 +716,11 @@ impl Editor {
             });
         }
 
-        Ok(RawModule { globals, functions })
+        Ok(RawModule {
+            globals,
+            memory,
+            functions,
+        })
     }
 
     fn execute(&self, binary: &[u8]) {
