@@ -165,6 +165,15 @@ impl Editor {
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
         ret.image_mut().set_attribute("class", "annotations");
+        {
+            let editor_ref = Rc::clone(&ret.0);
+            ret.autocomplete_mut()
+                .set_on_select(move |completion: String| {
+                    Editor(editor_ref.clone())
+                        .apply_autocomplete_completion(&completion)
+                        .expect("autocomplete click handler");
+                });
+        }
         ret.autocomplete_mut().hide();
 
         ret.push_line("(func");
@@ -460,6 +469,47 @@ impl Editor {
         Ok(())
     }
 
+    fn apply_autocomplete_completion(&mut self, completion: &str) -> Result<()> {
+        let selection = get_selection();
+        if let Ok((line_idx, pos)) = self.find_idx_and_utf16_pos(
+            selection.focus_node().context("focus")?,
+            selection.focus_offset(),
+        ) {
+            let (text, offset) = {
+                let line = self.line(line_idx);
+                (line.instr().get().to_string(), pos.offset)
+            };
+
+            // Find start of word
+            let mut start = offset;
+            while start > 0 {
+                let c = text.chars().nth(start - 1).unwrap_or(' ');
+                if !c.is_alphanumeric() && c != '.' && c != '_' && c != '$' {
+                    break;
+                }
+                start -= 1;
+            }
+
+            // Replace range from start to offset with completion
+            self.line_mut(line_idx).replace_range(
+                Position {
+                    in_instr: true,
+                    offset: start,
+                },
+                pos,
+                completion,
+            )?;
+            // Move cursor to end of inserted text
+            self.line(line_idx).set_cursor_position(Position {
+                in_instr: true,
+                offset: start + completion.chars().count(),
+            });
+            self.autocomplete_mut().hide();
+            self.on_change()?;
+        }
+        Ok(())
+    }
+
     // Keydown helpers. Firefox has trouble advancing to the next line if there is an ::after pseudo-element
     // later in the line. It also has trouble deleting if the cursor position is at the end of the surrounding
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
@@ -480,45 +530,8 @@ impl Editor {
                     let completion = self.autocomplete().get_selected();
                     if let Some(completion) = completion {
                         ev.prevent_default();
-                        // Insert completion
-                        let selection = get_selection();
-                        if let Ok((line_idx, pos)) = self.find_idx_and_utf16_pos(
-                            selection.focus_node().context("focus")?,
-                            selection.focus_offset(),
-                        ) {
-                            let (text, offset) = {
-                                let line = self.line(line_idx);
-                                (line.instr().get().to_string(), pos.offset)
-                            };
-
-                            // Find start of word
-                            let mut start = offset;
-                            while start > 0 {
-                                let c = text.chars().nth(start - 1).unwrap_or(' ');
-                                if !c.is_alphanumeric() && c != '.' && c != '_' && c != '$' {
-                                    break;
-                                }
-                                start -= 1;
-                            }
-
-                            // Replace range from start to offset with completion
-                            self.line_mut(line_idx).replace_range(
-                                Position {
-                                    in_instr: true,
-                                    offset: start,
-                                },
-                                pos,
-                                &completion,
-                            )?;
-                            // Move cursor to end of inserted text
-                            self.line(line_idx).set_cursor_position(Position {
-                                in_instr: true,
-                                offset: start + completion.chars().count(),
-                            });
-                            self.autocomplete_mut().hide();
-                            self.on_change()?; // Re-validate
-                            return Ok(());
-                        }
+                        self.apply_autocomplete_completion(&completion)?;
+                        return Ok(());
                     }
                     self.autocomplete_mut().hide();
                 }
