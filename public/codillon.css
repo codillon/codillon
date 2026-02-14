@@ -265,3 +265,38 @@ span.debug[data-debug]::after {
     cursor: pointer;
     box-shadow: none;
 }
+
+
+/* Autocomplete suggestion list */
+.autocomplete-list {
+    position: fixed;
+    bottom: 0px;
+    left: 0px;
+    right: 0px;
+    background: white;
+    border-top: 2px solid darkred;
+    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: row;
+    overflow-x: auto;
+    z-index: 1000;
+    font-family: 'MLMRoman12-Regular';
+    font-size: 20pt;
+    white-space: nowrap;
+}
+
+.suggestion-item {
+    padding: 8px 16px;
+    cursor: pointer;
+    border-right: 1px solid #f0f0f0;
+}
+
+.suggestion-item:hover,
+.suggestion-item.selected {
+    background-color: #fffff0;
+    color: darkred;
+}
+
+.suggestion-item:last-child {
+    border-right: none;
+}

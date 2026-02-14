@@ -1,6 +1,7 @@
 // The Codillon code editor
 
 use crate::{
+    autocomplete::Autocomplete,
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -34,7 +35,7 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, ()),
+            (ElementHandle<HtmlInputElement>, (Autocomplete, ())),
         ),
     ),
     HtmlDivElement,
@@ -108,7 +109,7 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), ()),
+                        ((factory.input()), (Autocomplete::new(factory.clone()), ())),
                     ),
                 ),
                 factory.div(),
@@ -155,6 +156,16 @@ impl Editor {
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
         ret.image_mut().set_attribute("class", "annotations");
+        {
+            let editor_ref = Rc::clone(&ret.0);
+            ret.autocomplete_mut()
+                .set_on_select(move |completion: String| {
+                    Editor(editor_ref.clone())
+                        .apply_autocomplete_completion(&completion)
+                        .expect("autocomplete click handler");
+                });
+        }
+        ret.autocomplete_mut().hide();
 
         ret.push_line("(func");
         ret.push_line("i32.const 5");
@@ -400,6 +411,121 @@ impl Editor {
             )),
         }?;
 
+        self.update_autocomplete()?;
+
+        Ok(())
+    }
+
+    fn update_autocomplete(&mut self) -> Result<()> {
+        let selection = get_selection();
+        if !selection.is_collapsed() {
+            self.autocomplete_mut().hide();
+            return Ok(());
+        }
+
+        let (line_idx, pos) = self
+            .find_idx_and_utf16_pos(
+                selection.focus_node().context("focus")?,
+                selection.focus_offset(),
+            )
+            .unwrap_or((0, Position::begin()));
+
+        // Only trigger if in instruction and we have a partial word
+        if !pos.in_instr {
+            self.autocomplete_mut().hide();
+            return Ok(());
+        }
+
+        let text = self.line(line_idx).instr().get().to_string();
+        let offset = pos.offset;
+
+        // Find word boundary before cursor
+        let mut start = offset;
+        while start > 0 {
+            let c = text.chars().nth(start - 1).unwrap_or(' ');
+            if !c.is_alphanumeric() && c != '.' && c != '_' && c != '$' {
+                break;
+            }
+            start -= 1;
+        }
+
+        let prefix = &text[start..offset];
+        if prefix.is_empty() {
+            self.autocomplete_mut().hide();
+        } else {
+            let factory = self.0.borrow().factory.clone();
+            self.autocomplete_mut().filter(prefix, &factory, 0.0, 0.0);
+        }
+
+        Ok(())
+    }
+
+    fn apply_autocomplete_completion(&mut self, completion: &str) -> Result<()> {
+        let selection = get_selection();
+        if let Ok((line_idx, pos)) = self.find_idx_and_utf16_pos(
+            selection.focus_node().context("focus")?,
+            selection.focus_offset(),
+        ) {
+            let (text, offset) = {
+                let line = self.line(line_idx);
+                (line.instr().get().to_string(), pos.offset)
+            };
+
+            let was_structured = self.line(line_idx).info().is_structured();
+
+            // Find start of word
+            let mut start = offset;
+            while start > 0 {
+                let c = text.chars().nth(start - 1).unwrap_or(' ');
+                if !c.is_alphanumeric() && c != '.' && c != '_' && c != '$' {
+                    break;
+                }
+                start -= 1;
+            }
+
+            // Replace range from start to offset with completion
+            self.line_mut(line_idx).replace_range(
+                Position {
+                    in_instr: true,
+                    offset: start,
+                },
+                pos,
+                completion,
+            )?;
+
+            // Auto-insert courtesy `end` for newly added block instructions
+            let is_structured = self.line(line_idx).info().is_structured();
+            if !was_structured && is_structured {
+                let is_if = self.line(line_idx).info().kind == LineKind::Instr(InstrKind::If);
+                let mut need_end = true;
+                for i in line_idx + 1..self.text().len() {
+                    if self.line(i).info().kind == LineKind::Instr(InstrKind::End)
+                        && !self.line(i).info().is_active()
+                    {
+                        need_end = false;
+                    }
+                    if is_if
+                        && self.line(i).info().kind == LineKind::Instr(InstrKind::Else)
+                        && !self.line(i).info().is_active()
+                    {
+                        need_end = false;
+                    }
+                }
+                if need_end {
+                    let matching_end = CodeLine::new("end", &self.0.borrow().factory);
+                    self.text_mut().insert(line_idx + 1, matching_end);
+                    self.line_mut(line_idx + 1).reveal();
+                }
+            }
+
+            // Move cursor to end of inserted text
+            self.line(line_idx).set_cursor_position(Position {
+                in_instr: true,
+                offset: start + completion.chars().count(),
+            });
+            self.autocomplete_mut().hide();
+            self.on_change()?;
+        }
         Ok(())
     }
 
@@ -407,6 +533,36 @@ impl Editor {
     // later in the line. It also has trouble deleting if the cursor position is at the end of the surrounding
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
     fn handle_keydown(&mut self, ev: web_sys::KeyboardEvent) -> Result<()> {
+        if self.autocomplete().is_visible() {
+            match ev.key().as_str() {
+                "ArrowUp" => {
+                    ev.prevent_default();
+                    self.autocomplete_mut().select_prev();
+                    return Ok(());
+                }
+                "ArrowDown" => {
+                    ev.prevent_default();
+                    self.autocomplete_mut().select_next();
+                    return Ok(());
+                }
+                "Enter" | "Tab" => {
+                    let completion = self.autocomplete().get_selected();
+                    if let Some(completion) = completion {
+                        ev.prevent_default();
+                        self.apply_autocomplete_completion(&completion)?;
+                        return Ok(());
+                    }
+                    self.autocomplete_mut().hide();
+                }
+                "Escape" => {
+                    ev.prevent_default();
+                    self.autocomplete_mut().hide();
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         match ev.key().as_str() {
             "ArrowRight" => {
                 let selection = get_selection();
@@ -510,6 +666,14 @@ impl Editor {
 
     fn textbox_mut(&self) -> RefMut<'_, ReactiveComponent<TextType>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
+    }
+
+    fn autocomplete(&self) -> Ref<'_, Autocomplete> {
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.1.0)
+    }
+
+    fn autocomplete_mut(&self) -> RefMut<'_, Autocomplete> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.1.0)
     }
 
     fn image_mut(&self) -> RefMut<'_, DomImage> {
