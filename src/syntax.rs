@@ -5,7 +5,7 @@ use std::ops::Deref;
 use wast::{
     Error,
     core::{
-        ElemPayload, Expression, FunctionType, 
+        ElemPayload, Expression, Func, FunctionType, 
         Export, Global, GlobalKind, HeapType, Imports, InlineExport, InlineImport,
         Instruction, Local, LocalParser, Memory,
         Table, TableKind, ValType,
@@ -318,6 +318,39 @@ impl From<Error> for LineSymbols {
     }
 }
 
+impl<'a> From<Expression<'a>> for LineSymbols {
+    fn from(expr: Expression) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        for instr in expr.instrs.iter() {
+            line_symbols.merge(instr.clone().into());
+        }
+
+        line_symbols
+    }
+}
+
+impl<'a> From<HeapType<'a>> for LineSymbols {
+    fn from(ht: HeapType) -> Self {
+        match ht {
+            HeapType::Concrete(Index::Id(id)) | HeapType::Exact(Index::Id(id)) => Self {
+                defines: Vec::new(),
+                consumes: vec![id.name().to_string()],
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<ValType<'a>> for LineSymbols {
+    fn from(vt: ValType) -> Self {
+        match vt {
+            ValType::Ref(rt) => rt.heap.into(),
+            _ => Self::default(),
+        }
+    }
+}
+
 impl From<Instruction<'_>> for LineSymbols {
     fn from(instr: Instruction<'_>) -> Self {
         // Defining keywords for instructions: block, loop, if
@@ -448,57 +481,9 @@ impl From<Instruction<'_>> for LineSymbols {
     }
 }
 
-impl<'a> From<Expression<'a>> for LineSymbols {
-    fn from(expr: Expression) -> Self {
-        let mut line_symbols = LineSymbols {
-            defines: Vec::new(),
-            consumes: Vec::new(),
-        };
-
-        for instr in expr.instrs.iter() {
-            line_symbols.merge(instr.clone().into());
-        }
-
-        line_symbols
-    }
-}
-
-impl<'a> From<HeapType<'a>> for LineSymbols {
-    fn from(ht: HeapType) -> Self {
-        match ht {
-            HeapType::Concrete(Index::Id(id)) | HeapType::Exact(Index::Id(id)) => Self {
-                defines: Vec::new(),
-                consumes: vec![id.name().to_string()],
-            },
-            _ => Self::default(),
-        }
-    }
-}
-
-impl<'a> From<ValType<'a>> for LineSymbols {
-    fn from(vt: ValType) -> Self {
-        match vt {
-            ValType::Ref(rt) => rt.heap.into(),
-            _ => Self::default(),
-        }
-    }
-}
-
-impl<'a> From<Id<'a>> for LineSymbols {
-    fn from(id: Id) -> Self {
-        Self {
-            defines: vec![id.name().to_string()],
-            consumes: Vec::new(),
-        }
-    }
-}
-
 impl<'a> From<FunctionType<'a>> for LineSymbols {
     fn from(ft: FunctionType) -> Self {
-        let mut line_symbols = LineSymbols {
-            defines: Vec::new(),
-            consumes: Vec::new(),
-        };
+        let mut line_symbols = LineSymbols::default();
 
         for (id, _, vt) in ft.params.iter() {
             if let Some(id) = id {
@@ -517,10 +502,7 @@ impl<'a> From<FunctionType<'a>> for LineSymbols {
 
 impl<'a> From<Local<'a>> for LineSymbols {
     fn from(local: Local) -> Self {
-        let mut line_symbols = LineSymbols {
-            defines: Vec::new(),
-            consumes: Vec::new(),
-        };
+        let mut line_symbols = LineSymbols::default();
 
         if let Some(id) = local.id {
             line_symbols.defines.push(id.name().to_string())
@@ -534,10 +516,7 @@ impl<'a> From<Local<'a>> for LineSymbols {
 
 impl<'a> From<Global<'a>> for LineSymbols {
     fn from(global: Global) -> Self {
-        let mut line_symbols = LineSymbols {
-            defines: Vec::new(),
-            consumes: Vec::new(),
-        };
+        let mut line_symbols = LineSymbols::default();
 
         if let Some(id) = global.id {
             line_symbols.defines.push(id.name().to_string())
@@ -556,10 +535,7 @@ impl<'a> From<Global<'a>> for LineSymbols {
 
 impl<'a> From<Table<'a>> for LineSymbols {
     fn from(table: Table) -> Self {
-        let mut line_symbols = LineSymbols {
-            defines: Vec::new(),
-            consumes: Vec::new(),
-        };
+        let mut line_symbols = LineSymbols::default();
 
         if let Some(id) = table.id {
             line_symbols.defines.push(id.name().to_string())
@@ -604,10 +580,7 @@ impl<'a> From<Table<'a>> for LineSymbols {
 
 impl<'a> From<Memory<'a>> for LineSymbols {
     fn from(memory: Memory) -> Self {
-        let mut line_symbols = LineSymbols {
-            defines: Vec::new(),
-            consumes: Vec::new(),
-        };
+        let mut line_symbols = LineSymbols::default();
 
         if let Some(id) = memory.id {
             line_symbols.defines.push(id.name().to_string())
@@ -1192,49 +1165,51 @@ pub fn parse_line(s: &str) -> LineKind {
     }
 }
 
+fn parse_into_symbols<'a, T: Parse<'a> + Into<LineSymbols>>(
+    buf: &'a ParseBuffer<'a>,
+) -> LineSymbols {
+    parser::parse::<T>(buf).map(Into::into).unwrap_or_default()
+}
+
 pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
-    let Some(buf) = ParseBuffer::new(s).ok() else {
+    let Ok(buf) = ParseBuffer::new(s) else {
         return LineSymbols::default();
     };
 
     match kind {
-        LineKind::Instr(_) => parser::parse::<Instruction>(&buf)
-            .map(Into::into)
-            .unwrap_or_default(),
-        LineKind::Other(module_parts) => {
-            let mut line_symbols = LineSymbols {
-                defines: Vec::new(),
-                consumes: Vec::new(),
-            };
-
-            for part in module_parts {
-                match part {
-                    ModulePart::Id => line_symbols.merge(
-                        parser::parse::<Instruction>(&buf)
-                            .map(Into::into)
-                            .unwrap_or_default(),
-                    ),
-                    ModulePart::Param | ModulePart::Result => {}
-                    ModulePart::Local => {}
-                    ModulePart::Global => line_symbols.merge(
-                        parser::parse::<Global>(&buf)
-                            .map(Into::into)
-                            .unwrap_or_default(),
-                    ),
-                    ModulePart::Table => line_symbols.merge(
-                        parser::parse::<Table>(&buf)
-                            .map(Into::into)
-                            .unwrap_or_default(),
-                    ),
-                    ModulePart::Memory => line_symbols.merge(
-                        parser::parse::<Memory>(&buf)
-                            .map(Into::into)
-                            .unwrap_or_default(),
-                    ),
-                    _ => {}
-                };
+        LineKind::Instr(_) => parse_into_symbols::<Instruction>(&buf),
+        LineKind::Other(module_parts) if !module_parts.is_empty() => {
+            // Line is non-function module part
+            match module_parts[0] {
+                ModulePart::Global => {
+                    return parse_into_symbols::<Global>(&buf);
+                }
+                ModulePart::Table => {
+                    return parse_into_symbols::<Table>(&buf);
+                }
+                ModulePart::Memory => {
+                    return parse_into_symbols::<Memory>(&buf);
+                }
+                _ => {}
             }
 
+            // Line is made up of function segments
+            let wrapped_s = match module_parts[0] {
+                ModulePart::FuncKeyword => format!("({s})"),
+                ModulePart::LParen => s.to_string(),
+                _ => format!("(func {s})"),
+            };
+            let Ok(wrapped_buf) = ParseBuffer::new(&wrapped_s) else {
+                return LineSymbols::default();
+            };
+            let Ok(func) = parser::parse::<Func>(&wrapped_buf) else {
+                return LineSymbols::default();
+            };
+
+            let mut line_symbols = LineSymbols::default();
+            func.id
+                .map(|id| line_symbols.defines.push(id.name().to_string()));
+            func.ty.inline.map(|ft| line_symbols.merge(ft.into()));
             line_symbols
         }
         _ => LineSymbols::default(),
