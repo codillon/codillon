@@ -1481,7 +1481,7 @@ pub(crate) mod tests {
             shared: false,
             initial: 3,
             maximum: Some(5),
-            page_size_log2: Some(3),
+            page_size_log2: Some(0),
         };
         let valid_module = ValidModule {
             memory: vec![test_mem],
