@@ -5,8 +5,10 @@ use std::ops::Deref;
 use wast::{
     Error,
     core::{
-        Export, Global, Imports, InlineExport, InlineImport, Instruction, LocalParser, Memory,
-        Table, ValType,
+        ElemPayload, Expression, FunctionType, 
+        Export, Global, GlobalKind, HeapType, Imports, InlineExport, InlineImport,
+        Instruction, Local, LocalParser, Memory,
+        Table, TableKind, ValType,
     },
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
@@ -123,12 +125,6 @@ pub enum LineKind {
     Malformed(String), // explanation
 }
 
-#[derive(Default, Clone)]
-pub struct LineSymbols {
-    defines: Vec<String>,  // symbol names
-    consumes: Vec<String>, // symbol names
-}
-
 pub trait LineInfos {
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
@@ -180,136 +176,6 @@ impl From<Instruction<'_>> for InstrKind {
             }
             _ => InstrKind::Other,
         }
-    }
-}
-
-impl From<Instruction<'_>> for LineSymbols {
-    fn from(instr: Instruction<'_>) -> Self {
-        // Defining keywords for instructions: block, loop, if
-        // Not all instructions are included for symbol collection.
-        // They may be added incrementally
-        let mut defines: Vec<String> = Vec::new();
-        let mut consumes: Vec<String> = Vec::new();
-
-        match instr {
-            // Variant(Box<BlockType<'a>>)
-            Instruction::Block(i) | Instruction::Loop(i) | Instruction::If(i) => {
-                if let Some(id) = i.label {
-                    defines.push(id.name().to_string());
-                }
-
-                // These instructions can involve (type $id), e.g. "block (type $x)"
-                if let Some(Index::Id(id)) = i.ty.index {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            // Variant(Index<'a>)
-            Instruction::Br(i)
-            | Instruction::BrIf(i)
-            | Instruction::Call(i)
-            | Instruction::ReturnCall(i)
-            | Instruction::CallRef(i)
-            | Instruction::ReturnCallRef(i)
-            | Instruction::LocalGet(i)
-            | Instruction::LocalSet(i)
-            | Instruction::LocalTee(i)
-            | Instruction::GlobalGet(i)
-            | Instruction::GlobalSet(i)
-            | Instruction::StructNew(i)
-            | Instruction::StructNewDefault(i)
-            | Instruction::ArrayNew(i)
-            | Instruction::ArrayNewDefault(i)
-            | Instruction::ArrayGet(i)
-            | Instruction::ArraySet(i) => {
-                if let Index::Id(id) = i {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            // Variant(Option<Id<'a>>)
-            Instruction::Else(i) | Instruction::End(i) => {
-                if let Some(id) = i {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            // Variant(TableArg<'a>)
-            Instruction::TableGet(i)
-            | Instruction::TableSet(i)
-            | Instruction::TableFill(i)
-            | Instruction::TableSize(i)
-            | Instruction::TableGrow(i) => {
-                if let Index::Id(id) = i.dst {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            // Variant(MemArg<'a>)
-            Instruction::I32Load(i)
-            | Instruction::I64Load(i)
-            | Instruction::F32Load(i)
-            | Instruction::F64Load(i)
-            | Instruction::I32Store(i)
-            | Instruction::I64Store(i)
-            | Instruction::F32Store(i)
-            | Instruction::F64Store(i) => {
-                if let Index::Id(id) = i.memory {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            // Variant(MemoryArg<'a>)
-            Instruction::MemorySize(i)
-            | Instruction::MemoryGrow(i)
-            | Instruction::MemoryFill(i)
-            | Instruction::MemoryDiscard(i) => {
-                if let Index::Id(id) = i.mem {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            // Special variants
-            Instruction::MemoryInit(i) => {
-                if let Index::Id(id) = i.data {
-                    consumes.push(id.name().to_string())
-                }
-                if let Index::Id(id) = i.mem {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            Instruction::MemoryCopy(i) => {
-                if let Index::Id(id) = i.dst {
-                    consumes.push(id.name().to_string())
-                }
-                if let Index::Id(id) = i.src {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            Instruction::TableInit(i) => {
-                if let Index::Id(id) = i.table {
-                    consumes.push(id.name().to_string())
-                }
-                if let Index::Id(id) = i.elem {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            Instruction::TableCopy(i) => {
-                if let Index::Id(id) = i.dst {
-                    consumes.push(id.name().to_string())
-                }
-                if let Index::Id(id) = i.src {
-                    consumes.push(id.name().to_string())
-                }
-            }
-
-            _ => {}
-        }
-
-        LineSymbols { defines, consumes }
     }
 }
 
@@ -430,6 +296,324 @@ impl<'a> Parse<'a> for LineKind {
         } else {
             Ok(LineKind::Instr(parser.parse::<Instruction>()?.into()))
         }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct LineSymbols {
+    defines: Vec<String>,  // symbol names
+    consumes: Vec<String>, // symbol names
+}
+
+impl LineSymbols {
+    fn merge(&mut self, other: LineSymbols) {
+        self.defines.extend(other.defines);
+        self.consumes.extend(other.consumes);
+    }
+}
+
+impl From<Error> for LineSymbols {
+    fn from(_: Error) -> Self {
+        Self::default()
+    }
+}
+
+impl From<Instruction<'_>> for LineSymbols {
+    fn from(instr: Instruction<'_>) -> Self {
+        // Defining keywords for instructions: block, loop, if
+        // Not all instructions are included for symbol collection.
+        // They may be added incrementally
+        let mut defines: Vec<String> = Vec::new();
+        let mut consumes: Vec<String> = Vec::new();
+
+        match instr {
+            // Variant(Box<BlockType<'a>>)
+            Instruction::Block(i) | Instruction::Loop(i) | Instruction::If(i) => {
+                if let Some(id) = i.label {
+                    defines.push(id.name().to_string());
+                }
+
+                // These instructions can involve (type $id), e.g. "block (type $x)"
+                if let Some(Index::Id(id)) = i.ty.index {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(Index<'a>)
+            Instruction::Br(i)
+            | Instruction::BrIf(i)
+            | Instruction::Call(i)
+            | Instruction::ReturnCall(i)
+            | Instruction::CallRef(i)
+            | Instruction::ReturnCallRef(i)
+            | Instruction::LocalGet(i)
+            | Instruction::LocalSet(i)
+            | Instruction::LocalTee(i)
+            | Instruction::GlobalGet(i)
+            | Instruction::GlobalSet(i)
+            | Instruction::StructNew(i)
+            | Instruction::StructNewDefault(i)
+            | Instruction::ArrayNew(i)
+            | Instruction::ArrayNewDefault(i)
+            | Instruction::ArrayGet(i)
+            | Instruction::ArraySet(i) => {
+                if let Index::Id(id) = i {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(Option<Id<'a>>)
+            Instruction::Else(i) | Instruction::End(i) => {
+                if let Some(id) = i {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(TableArg<'a>)
+            Instruction::TableGet(i)
+            | Instruction::TableSet(i)
+            | Instruction::TableFill(i)
+            | Instruction::TableSize(i)
+            | Instruction::TableGrow(i) => {
+                if let Index::Id(id) = i.dst {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(MemArg<'a>)
+            Instruction::I32Load(i)
+            | Instruction::I64Load(i)
+            | Instruction::F32Load(i)
+            | Instruction::F64Load(i)
+            | Instruction::I32Store(i)
+            | Instruction::I64Store(i)
+            | Instruction::F32Store(i)
+            | Instruction::F64Store(i) => {
+                if let Index::Id(id) = i.memory {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(MemoryArg<'a>)
+            Instruction::MemorySize(i)
+            | Instruction::MemoryGrow(i)
+            | Instruction::MemoryFill(i)
+            | Instruction::MemoryDiscard(i) => {
+                if let Index::Id(id) = i.mem {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Special variants
+            Instruction::MemoryInit(i) => {
+                if let Index::Id(id) = i.data {
+                    consumes.push(id.name().to_string());
+                }
+                if let Index::Id(id) = i.mem {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            Instruction::MemoryCopy(i) => {
+                if let Index::Id(id) = i.dst {
+                    consumes.push(id.name().to_string());
+                }
+                if let Index::Id(id) = i.src {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            Instruction::TableInit(i) => {
+                if let Index::Id(id) = i.table {
+                    consumes.push(id.name().to_string());
+                }
+                if let Index::Id(id) = i.elem {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            Instruction::TableCopy(i) => {
+                if let Index::Id(id) = i.dst {
+                    consumes.push(id.name().to_string());
+                }
+                if let Index::Id(id) = i.src {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            _ => {}
+        }
+
+        LineSymbols { defines, consumes }
+    }
+}
+
+impl<'a> From<Expression<'a>> for LineSymbols {
+    fn from(expr: Expression) -> Self {
+        let mut line_symbols = LineSymbols {
+            defines: Vec::new(),
+            consumes: Vec::new(),
+        };
+
+        for instr in expr.instrs.iter() {
+            line_symbols.merge(instr.clone().into());
+        }
+
+        line_symbols
+    }
+}
+
+impl<'a> From<HeapType<'a>> for LineSymbols {
+    fn from(ht: HeapType) -> Self {
+        match ht {
+            HeapType::Concrete(Index::Id(id)) | HeapType::Exact(Index::Id(id)) => Self {
+                defines: Vec::new(),
+                consumes: vec![id.name().to_string()],
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<ValType<'a>> for LineSymbols {
+    fn from(vt: ValType) -> Self {
+        match vt {
+            ValType::Ref(rt) => rt.heap.into(),
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<Id<'a>> for LineSymbols {
+    fn from(id: Id) -> Self {
+        Self {
+            defines: vec![id.name().to_string()],
+            consumes: Vec::new(),
+        }
+    }
+}
+
+impl<'a> From<FunctionType<'a>> for LineSymbols {
+    fn from(ft: FunctionType) -> Self {
+        let mut line_symbols = LineSymbols {
+            defines: Vec::new(),
+            consumes: Vec::new(),
+        };
+
+        for (id, _, vt) in ft.params.iter() {
+            if let Some(id) = id {
+                line_symbols.defines.push(id.name().to_string())
+            };
+            line_symbols.merge((*vt).into());
+        }
+
+        for vt in ft.results.iter() {
+            line_symbols.merge((*vt).into());
+        }
+
+        line_symbols
+    }
+}
+
+impl<'a> From<Local<'a>> for LineSymbols {
+    fn from(local: Local) -> Self {
+        let mut line_symbols = LineSymbols {
+            defines: Vec::new(),
+            consumes: Vec::new(),
+        };
+
+        if let Some(id) = local.id {
+            line_symbols.defines.push(id.name().to_string())
+        };
+
+        line_symbols.merge(local.ty.into());
+
+        line_symbols
+    }
+}
+
+impl<'a> From<Global<'a>> for LineSymbols {
+    fn from(global: Global) -> Self {
+        let mut line_symbols = LineSymbols {
+            defines: Vec::new(),
+            consumes: Vec::new(),
+        };
+
+        if let Some(id) = global.id {
+            line_symbols.defines.push(id.name().to_string())
+        };
+
+        match global.kind {
+            GlobalKind::Inline(expr) => {
+                line_symbols.merge(expr.into());
+            }
+            _ => {}
+        };
+
+        line_symbols
+    }
+}
+
+impl<'a> From<Table<'a>> for LineSymbols {
+    fn from(table: Table) -> Self {
+        let mut line_symbols = LineSymbols {
+            defines: Vec::new(),
+            consumes: Vec::new(),
+        };
+
+        if let Some(id) = table.id {
+            line_symbols.defines.push(id.name().to_string())
+        };
+
+        match table.kind {
+            TableKind::Import { ty, .. } => {
+                line_symbols.merge(ty.elem.heap.into());
+            }
+            TableKind::Normal { ty, init_expr } => {
+                line_symbols.merge(ty.elem.heap.into());
+                if let Some(expr) = init_expr {
+                    for instr in expr.instrs.iter() {
+                        line_symbols.merge(instr.clone().into());
+                    }
+                };
+            }
+            TableKind::Inline { elem, payload, .. } => {
+                line_symbols.merge(elem.heap.into());
+                match payload {
+                    ElemPayload::Indices(indices) => {
+                        line_symbols.consumes.extend(indices.iter().filter_map(
+                            |index| match index {
+                                Index::Id(id) => Some(id.name().to_string()),
+                                _ => None,
+                            },
+                        ));
+                    }
+                    ElemPayload::Exprs { ty, exprs } => {
+                        line_symbols.merge(ty.heap.into());
+                        for expr in exprs {
+                            line_symbols.merge(expr.into());
+                        }
+                    }
+                }
+            }
+        };
+
+        line_symbols
+    }
+}
+
+impl<'a> From<Memory<'a>> for LineSymbols {
+    fn from(memory: Memory) -> Self {
+        let mut line_symbols = LineSymbols {
+            defines: Vec::new(),
+            consumes: Vec::new(),
+        };
+
+        if let Some(id) = memory.id {
+            line_symbols.defines.push(id.name().to_string())
+        };
+
+        line_symbols
     }
 }
 
@@ -1014,10 +1198,44 @@ pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
     };
 
     match kind {
-        LineKind::Instr(_) => parser::parse::<Instruction>(&buf).unwrap().into(),
-        LineKind::Other(_) => {
-            // TODO
-            LineSymbols::default()
+        LineKind::Instr(_) => parser::parse::<Instruction>(&buf)
+            .map(Into::into)
+            .unwrap_or_default(),
+        LineKind::Other(module_parts) => {
+            let mut line_symbols = LineSymbols {
+                defines: Vec::new(),
+                consumes: Vec::new(),
+            };
+
+            for part in module_parts {
+                match part {
+                    ModulePart::Id => line_symbols.merge(
+                        parser::parse::<Instruction>(&buf)
+                            .map(Into::into)
+                            .unwrap_or_default(),
+                    ),
+                    ModulePart::Param | ModulePart::Result => {}
+                    ModulePart::Local => {}
+                    ModulePart::Global => line_symbols.merge(
+                        parser::parse::<Global>(&buf)
+                            .map(Into::into)
+                            .unwrap_or_default(),
+                    ),
+                    ModulePart::Table => line_symbols.merge(
+                        parser::parse::<Table>(&buf)
+                            .map(Into::into)
+                            .unwrap_or_default(),
+                    ),
+                    ModulePart::Memory => line_symbols.merge(
+                        parser::parse::<Memory>(&buf)
+                            .map(Into::into)
+                            .unwrap_or_default(),
+                    ),
+                    _ => {}
+                };
+            }
+
+            line_symbols
         }
         _ => LineSymbols::default(),
     }
