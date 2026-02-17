@@ -148,11 +148,13 @@ pub struct ValidFunction<'a> {
 }
 
 pub struct RawModule<'a> {
+    pub memory: Vec<wasmparser::MemoryType>,
     pub globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)>,
     pub functions: Vec<RawFunction<'a>>,
 }
 
 pub struct ValidModule<'a> {
+    pub memory: Vec<wasmparser::MemoryType>,
     pub globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)>,
     pub functions: Vec<ValidFunction<'a>>,
 }
@@ -183,6 +185,7 @@ impl<'a> RawModule<'a> {
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
 
         let mut ret = ValidModule {
+            memory: self.memory,
             globals: self.globals,
             functions: Vec::with_capacity(self.functions.len()),
         };
@@ -650,6 +653,27 @@ impl<'a> ValidModule<'a> {
         globals
     }
 
+    fn build_memory(&self) -> wasm_encoder::MemorySection {
+        let mut memory = wasm_encoder::MemorySection::new();
+        for &wasmparser::MemoryType {
+            memory64,
+            shared,
+            initial,
+            maximum,
+            page_size_log2,
+        } in &self.memory
+        {
+            memory.memory(wasm_encoder::MemoryType {
+                minimum: initial,
+                maximum,
+                shared,
+                memory64,
+                page_size_log2,
+            });
+        }
+        memory
+    }
+
     pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
         module.section(&self.instr_func_types());
@@ -662,6 +686,7 @@ impl<'a> ValidModule<'a> {
             functions.function((func_type_offset + i) as u32);
         }
         module.section(&functions);
+        module.section(&self.build_memory());
         module.section(&self.build_globals());
 
         // Encode the export section.
@@ -996,6 +1021,7 @@ pub(crate) mod tests {
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
             let mut ret = ValidModule {
+                memory: vec![],
                 globals: vec![],
                 functions: vec![],
             };
@@ -1068,6 +1094,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
@@ -1146,6 +1173,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
@@ -1244,6 +1272,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
@@ -1344,6 +1373,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
@@ -1412,6 +1442,7 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 params: vec![],
@@ -1440,6 +1471,36 @@ pub(crate) mod tests {
             output
         );
 
+        Ok(())
+    }
+    #[test]
+    fn test_parse_memory_section() -> Result<()> {
+        let mut mem_exists = false;
+        let test_mem = wasmparser::MemoryType {
+            memory64: true,
+            shared: false,
+            initial: 3,
+            maximum: Some(5),
+            page_size_log2: Some(0),
+        };
+        let valid_module = ValidModule {
+            memory: vec![test_mem],
+            globals: vec![],
+            functions: vec![],
+        };
+        let wasm_bin = valid_module.build_executable_binary(&TypesTable { functions: vec![] })?;
+        let mem_payload = wasmparser::Parser::new(0)
+            .parse_all(&wasm_bin)
+            .nth(4)
+            .expect("failed to get memory payload");
+        if let wasmparser::Payload::MemorySection(reader) = mem_payload? {
+            assert_eq!(
+                reader.into_iter().next().expect("failed to get memory")?,
+                test_mem
+            );
+            mem_exists = true;
+        }
+        assert!(mem_exists);
         Ok(())
     }
 }
