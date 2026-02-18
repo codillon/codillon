@@ -5,10 +5,11 @@ use std::ops::Deref;
 use wast::{
     Error,
     core::{
-        ElemPayload, Expression, Func, FunctionType, 
-        Export, Global, GlobalKind, HeapType, Imports, InlineExport, InlineImport,
-        Instruction, Local, LocalParser, Memory,
-        Table, TableKind, ValType,
+        ElemPayload, Expression, Func, FuncKind, FunctionType, 
+        Export, Global, GlobalKind, HeapType,
+        Imports, InlineExport, InlineImport, Instruction, Local, LocalParser, Memory, ModuleField,
+        Table, TableKind,
+        ValType,
     },
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
@@ -312,12 +313,6 @@ impl LineSymbols {
     }
 }
 
-impl From<Error> for LineSymbols {
-    fn from(_: Error) -> Self {
-        Self::default()
-    }
-}
-
 impl<'a> From<Expression<'a>> for LineSymbols {
     fn from(expr: Expression) -> Self {
         let mut line_symbols = LineSymbols::default();
@@ -522,11 +517,8 @@ impl<'a> From<Global<'a>> for LineSymbols {
             line_symbols.defines.push(id.name().to_string())
         };
 
-        match global.kind {
-            GlobalKind::Inline(expr) => {
-                line_symbols.merge(expr.into());
-            }
-            _ => {}
+        if let GlobalKind::Inline(expr) = global.kind {
+            line_symbols.merge(expr.into());
         };
 
         line_symbols
@@ -1165,40 +1157,44 @@ pub fn parse_line(s: &str) -> LineKind {
     }
 }
 
-fn parse_into_symbols<'a, T: Parse<'a> + Into<LineSymbols>>(
-    buf: &'a ParseBuffer<'a>,
-) -> LineSymbols {
-    parser::parse::<T>(buf).map(Into::into).unwrap_or_default()
-}
-
+// Assume kind correctly reflects the line's kind
 pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
-    let Ok(buf) = ParseBuffer::new(s) else {
-        return LineSymbols::default();
-    };
-
     match kind {
-        LineKind::Instr(_) => parse_into_symbols::<Instruction>(&buf),
-        LineKind::Other(module_parts) if !module_parts.is_empty() => {
+        LineKind::Instr(_) => {
+            let Ok(buf) = ParseBuffer::new(s) else {
+                return LineSymbols::default();
+            };
+            parser::parse::<Instruction>(&buf)
+                .map(Into::into)
+                .unwrap_or_default()
+        }
+        LineKind::Other(module_parts) if !module_parts.is_empty() && s.len() > 1 => {
             // Line is non-function module part
-            match module_parts[0] {
-                ModulePart::Global => {
-                    return parse_into_symbols::<Global>(&buf);
+            let Ok(buf) = ParseBuffer::new(&s[1..s.len() - 1]) else {
+                return LineSymbols::default();
+            };
+            if let Ok(field) = parser::parse::<ModuleField>(&buf) {
+                match field {
+                    ModuleField::Global(g) => return g.into(),
+                    ModuleField::Table(t) => return t.into(),
+                    ModuleField::Memory(m) => return m.into(),
+                    _ => {}
                 }
-                ModulePart::Table => {
-                    return parse_into_symbols::<Table>(&buf);
-                }
-                ModulePart::Memory => {
-                    return parse_into_symbols::<Memory>(&buf);
-                }
-                _ => {}
             }
 
             // Line is made up of function segments
-            let wrapped_s = match module_parts[0] {
-                ModulePart::FuncKeyword => format!("({s})"),
-                ModulePart::LParen => s.to_string(),
-                _ => format!("(func {s})"),
+            let mut wrapped_s = match module_parts[0] {
+                ModulePart::FuncKeyword => s.to_string(),
+                ModulePart::LParen => s[1..].to_string(),
+                _ => format!("func {s}"),
             };
+            if matches!(module_parts.last(), Some(ModulePart::RParen)) {
+                wrapped_s = wrapped_s
+                    .strip_suffix(')')
+                    .unwrap_or(&wrapped_s)
+                    .to_string();
+            }
+
             let Ok(wrapped_buf) = ParseBuffer::new(&wrapped_s) else {
                 return LineSymbols::default();
             };
@@ -1207,9 +1203,20 @@ pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
             };
 
             let mut line_symbols = LineSymbols::default();
-            func.id
-                .map(|id| line_symbols.defines.push(id.name().to_string()));
-            func.ty.inline.map(|ft| line_symbols.merge(ft.into()));
+            // Id
+            if let Some(id) = func.id {
+                line_symbols.defines.push(id.name().to_string())
+            }
+            // Param & Result
+            if let Some(ft) = func.ty.inline {
+                line_symbols.merge(ft.into())
+            }
+            // Local
+            if let FuncKind::Inline { locals, .. } = func.kind {
+                for local in locals {
+                    line_symbols.merge(local.into());
+                }
+            }
             line_symbols
         }
         _ => LineSymbols::default(),
@@ -1451,48 +1458,125 @@ mod tests {
 
     #[test]
     fn test_parse_line_symbols() -> Result<()> {
-        let mut symbols = parse_line_symbols("", LineKind::Empty);
+        let mut line = "";
+        let mut symbols = parse_line_symbols(line, LineKind::Empty);
         assert!(symbols.defines.is_empty());
         assert!(symbols.consumes.is_empty());
 
-        symbols = parse_line_symbols("block $label", LineKind::Instr(InstrKind::OtherStructured));
+        line = "block $label";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::OtherStructured));
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0], "label");
         assert!(symbols.consumes.is_empty());
 
-        symbols = parse_line_symbols(
-            "block $label (type $x) (param i32)",
-            LineKind::Instr(InstrKind::OtherStructured),
-        );
+        line = "block $label (type $x) (param i32)";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::OtherStructured));
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0], "label");
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0], "x");
 
-        symbols = parse_line_symbols(" br $label", LineKind::Instr(InstrKind::Other));
+        line = " br $label";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0], "label");
 
-        symbols = parse_line_symbols("br 1", LineKind::Instr(InstrKind::Other));
+        line = "br 1";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert!(symbols.consumes.is_empty());
 
-        symbols = parse_line_symbols("local.set $something", LineKind::Instr(InstrKind::Other));
+        line = "local.set $something";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0], "something");
 
-        symbols = parse_line_symbols("memory.copy $x $y", LineKind::Instr(InstrKind::Other));
+        line = "memory.copy $x $y";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 2);
         assert_eq!(symbols.consumes[0], "x");
         assert_eq!(symbols.consumes[1], "y");
 
-        symbols = parse_line_symbols("memory.copy 10 $y", LineKind::Instr(InstrKind::Other));
+        line = "memory.copy 10 $y";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0], "y");
+
+        line = "(global i32 (i32.const 0))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert!(symbols.defines.is_empty());
+        assert!(symbols.consumes.is_empty());
+
+        line = "(global $x i32 (i32.const 0))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "x");
+        assert!(symbols.consumes.is_empty());
+
+        line = "(global $x i32 (global.get $y))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "x");
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "y");
+
+        line = "(table $t 1 (ref $ft))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "t");
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "ft");
+
+        line = "(table funcref (elem $f1 $f2))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert!(symbols.defines.is_empty());
+        assert_eq!(symbols.consumes.len(), 2);
+        assert_eq!(symbols.consumes[0], "f1");
+        assert_eq!(symbols.consumes[1], "f2");
+
+        line = "(memory $mem 1 2)";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "mem");
+        assert!(symbols.consumes.is_empty());
+
+        line = "(memory $mem 1 2) (func)";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert!(symbols.defines.is_empty());
+        assert!(symbols.consumes.is_empty());
+
+        line = "(func $f (param $p i32) (result (ref $ft)) (local $l i64))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 3);
+        assert_eq!(symbols.defines[0], "f");
+        assert_eq!(symbols.defines[1], "p");
+        assert_eq!(symbols.defines[2], "l");
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "ft");
+
+        line = " func  (local $l1 i64) (local $l2 (ref $ft))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 2);
+        assert_eq!(symbols.defines[0], "l1");
+        assert_eq!(symbols.defines[1], "l2");
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "ft");
+
+        line = "  (export \"\") (param $x i32) (param $y i64))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 2);
+        assert_eq!(symbols.defines[0], "x");
+        assert_eq!(symbols.defines[1], "y");
+        assert!(symbols.consumes.is_empty());
+
+        line = "(import \"\" \"\") (local)";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert!(symbols.defines.is_empty());
+        assert!(symbols.consumes.is_empty());
 
         Ok(())
     }
