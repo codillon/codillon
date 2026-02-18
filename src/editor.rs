@@ -1,7 +1,7 @@
 // The Codillon code editor
 
 use crate::{
-    autocomplete::Autocomplete,
+    autocomplete::{completion_suffix, suggest_all},
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -35,7 +35,13 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, (Autocomplete, ())),
+            (
+                ElementHandle<HtmlInputElement>,
+                (
+                    ReactiveComponent<DomVec<ElementHandle<HtmlDivElement>, HtmlDivElement>>,
+                    (),
+                ),
+            ),
         ),
     ),
     HtmlDivElement,
@@ -67,7 +73,7 @@ struct Edit {
     time_ms: f64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ProgramState {
     pub step_number: usize,
     pub line_number: i32,
@@ -75,17 +81,6 @@ pub struct ProgramState {
     pub locals_state: Vec<WebAssemblyTypes>,
     pub globals_state: Vec<WebAssemblyTypes>,
     pub memory_state: Vec<WebAssemblyTypes>,
-}
-
-pub fn new_program_state() -> ProgramState {
-    ProgramState {
-        step_number: 0,
-        line_number: 0,
-        stack_state: Vec::new(),
-        locals_state: Vec::new(),
-        globals_state: Vec::new(),
-        memory_state: Vec::new(),
-    }
 }
 
 struct _Editor {
@@ -99,8 +94,12 @@ struct _Editor {
 
     program_state: ProgramState,
     function_locals: Vec<Vec<WebAssemblyTypes>>,
+    globals: Vec<WebAssemblyTypes>,
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
+
+    // Autocomplete: current matching instructions
+    suggestions: Vec<&'static str>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -119,7 +118,10 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), (Autocomplete::new(factory.clone()), ())),
+                        (
+                            factory.input(),
+                            (ReactiveComponent::new(DomVec::new(factory.div())), ()),
+                        ),
                     ),
                 ),
                 factory.div(),
@@ -128,13 +130,19 @@ impl Editor {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_time_ms: 0.0,
-            program_state: new_program_state(),
+            program_state: ProgramState::default(),
             function_locals: Vec::new(),
-            saved_states: vec![Some(new_program_state())],
+            globals: Vec::new(),
+            saved_states: Vec::new(),
             function_ranges: Vec::new(),
+            suggestions: Vec::new(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
+        {
+            let mut list = ret.suggestion_list_mut(); // now accessing ReactiveComponent<DomVec>
+            list.inner_mut().set_attribute("class", "suggestion-list");
+        }
         {
             let mut text = ret.textbox_mut();
             text.inner_mut().set_attribute("class", "textentry");
@@ -158,6 +166,11 @@ impl Editor {
                     .handle_keydown(ev)
                     .expect("keydown handler")
             });
+
+            let editor_ref = Rc::clone(&ret.0);
+            text.set_onmouseup(move |_| {
+                Editor(editor_ref.clone()).clear_suggestion();
+            });
         }
         {
             let mut binding = ret.0.borrow_mut();
@@ -165,16 +178,6 @@ impl Editor {
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
         ret.image_mut().set_attribute("class", "annotations");
-        {
-            let editor_ref = Rc::clone(&ret.0);
-            ret.autocomplete_mut()
-                .set_on_select(move |completion: String| {
-                    Editor(editor_ref.clone())
-                        .apply_autocomplete_completion(&completion)
-                        .expect("autocomplete click handler");
-                });
-        }
-        ret.autocomplete_mut().hide();
 
         ret.push_line("(func");
         ret.push_line("i32.const 5");
@@ -360,6 +363,8 @@ impl Editor {
                     },
                     time_ms,
                 );
+                // Recompute autocomplete hint after every successful edit
+                self.refresh_suggestion();
             }
             Err(e) => {
                 log_1(&format!("reverting after {e}").into());
@@ -420,121 +425,6 @@ impl Editor {
             )),
         }?;
 
-        self.update_autocomplete()?;
-
-        Ok(())
-    }
-
-    fn update_autocomplete(&mut self) -> Result<()> {
-        let selection = get_selection();
-        if !selection.is_collapsed() {
-            self.autocomplete_mut().hide();
-            return Ok(());
-        }
-
-        let (line_idx, pos) = self
-            .find_idx_and_utf16_pos(
-                selection.focus_node().context("focus")?,
-                selection.focus_offset(),
-            )
-            .unwrap_or((0, Position::begin()));
-
-        // Only trigger if in instruction and we have a partial word
-        if !pos.in_instr {
-            self.autocomplete_mut().hide();
-            return Ok(());
-        }
-
-        let text = self.line(line_idx).instr().get().to_string();
-        let offset = pos.offset;
-
-        // Find word boundary before cursor
-        let mut start = offset;
-        while start > 0 {
-            let c = text.chars().nth(start - 1).unwrap_or(' ');
-            if !c.is_alphanumeric() && c != '.' && c != '_' && c != '$' {
-                break;
-            }
-            start -= 1;
-        }
-
-        let prefix = &text[start..offset];
-        if prefix.is_empty() {
-            self.autocomplete_mut().hide();
-        } else {
-            let factory = self.0.borrow().factory.clone();
-            self.autocomplete_mut().filter(prefix, &factory, 0.0, 0.0);
-        }
-
-        Ok(())
-    }
-
-    fn apply_autocomplete_completion(&mut self, completion: &str) -> Result<()> {
-        let selection = get_selection();
-        if let Ok((line_idx, pos)) = self.find_idx_and_utf16_pos(
-            selection.focus_node().context("focus")?,
-            selection.focus_offset(),
-        ) {
-            let (text, offset) = {
-                let line = self.line(line_idx);
-                (line.instr().get().to_string(), pos.offset)
-            };
-
-            let was_structured = self.line(line_idx).info().is_structured();
-
-            // Find start of word
-            let mut start = offset;
-            while start > 0 {
-                let c = text.chars().nth(start - 1).unwrap_or(' ');
-                if !c.is_alphanumeric() && c != '.' && c != '_' && c != '$' {
-                    break;
-                }
-                start -= 1;
-            }
-
-            // Replace range from start to offset with completion
-            self.line_mut(line_idx).replace_range(
-                Position {
-                    in_instr: true,
-                    offset: start,
-                },
-                pos,
-                completion,
-            )?;
-
-            // Auto-insert courtesy `end` for newly added block instructions
-            let is_structured = self.line(line_idx).info().is_structured();
-            if !was_structured && is_structured {
-                let is_if = self.line(line_idx).info().kind == LineKind::Instr(InstrKind::If);
-                let mut need_end = true;
-                for i in line_idx + 1..self.text().len() {
-                    if self.line(i).info().kind == LineKind::Instr(InstrKind::End)
-                        && !self.line(i).info().is_active()
-                    {
-                        need_end = false;
-                    }
-                    if is_if
-                        && self.line(i).info().kind == LineKind::Instr(InstrKind::Else)
-                        && !self.line(i).info().is_active()
-                    {
-                        need_end = false;
-                    }
-                }
-                if need_end {
-                    let matching_end = CodeLine::new("end", &self.0.borrow().factory);
-                    self.text_mut().insert(line_idx + 1, matching_end);
-                    self.line_mut(line_idx + 1).reveal();
-                }
-            }
-
-            // Move cursor to end of inserted text
-            self.line(line_idx).set_cursor_position(Position {
-                in_instr: true,
-                offset: start + completion.chars().count(),
-            });
-            self.autocomplete_mut().hide();
-            self.on_change()?;
-        }
         Ok(())
     }
 
@@ -542,36 +432,6 @@ impl Editor {
     // later in the line. It also has trouble deleting if the cursor position is at the end of the surrounding
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
     fn handle_keydown(&mut self, ev: web_sys::KeyboardEvent) -> Result<()> {
-        if self.autocomplete().is_visible() {
-            match ev.key().as_str() {
-                "ArrowUp" => {
-                    ev.prevent_default();
-                    self.autocomplete_mut().select_prev();
-                    return Ok(());
-                }
-                "ArrowDown" => {
-                    ev.prevent_default();
-                    self.autocomplete_mut().select_next();
-                    return Ok(());
-                }
-                "Enter" | "Tab" => {
-                    let completion = self.autocomplete().get_selected();
-                    if let Some(completion) = completion {
-                        ev.prevent_default();
-                        self.apply_autocomplete_completion(&completion)?;
-                        return Ok(());
-                    }
-                    self.autocomplete_mut().hide();
-                }
-                "Escape" => {
-                    ev.prevent_default();
-                    self.autocomplete_mut().hide();
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-
         match ev.key().as_str() {
             "ArrowRight" => {
                 let selection = get_selection();
@@ -619,6 +479,29 @@ impl Editor {
                 }
             }
 
+            // Accept the current autocomplete suggestion
+            "Enter" | "Tab" => {
+                let suggestion = self.0.borrow().suggestions.first().copied();
+                if let Some(full_instr) = suggestion {
+                    ev.prevent_default();
+                    let sel = get_selection();
+                    #[allow(clippy::collapsible_if)]
+                    if sel.is_collapsed() {
+                        if let Ok((line_idx, pos)) = self.find_idx_and_utf16_pos(
+                            sel.focus_node().context("focus")?,
+                            sel.focus_offset(),
+                        ) {
+                            let full_line = self.line(line_idx).suffix(Position::begin())?;
+                            let typed = &full_line[..pos.offset.min(full_line.len())];
+                            let suffix = completion_suffix(full_instr, typed);
+                            let target_range = sel.to_static_range().context("static range")?;
+                            self.replace_range(target_range, suffix)?;
+                            // refresh_suggestion is called inside replace_range on success
+                        }
+                    }
+                }
+            }
+
             "z" | "Z" => {
                 if ev.ctrl_key() || ev.meta_key() {
                     ev.prevent_default();
@@ -633,8 +516,106 @@ impl Editor {
             _ => {}
         }
 
+        // Keep the hint bar in sync whenever the caret moves without editing
+        self.refresh_suggestion();
+
         Ok(())
     }
+
+    // ── Autocomplete ─────────────────────────────────────────────────────────
+
+    fn clear_suggestion(&mut self) {
+        self.0.borrow_mut().suggestions.clear();
+        self.textbox_mut().inner_mut().remove_attribute("data-hint");
+
+        let mut list = self.suggestion_list_mut();
+        list.inner_mut().truncate(0);
+        list.inner_mut().remove_attribute("class");
+        list.inner_mut().set_attribute("class", "suggestion-list");
+    }
+
+    /// Recompute the best-match suggestion from the text left of the caret,
+    /// store it on the editor, and push it to the `data-hint` attribute so
+    /// the CSS hint bar stays in sync.
+    fn refresh_suggestion(&mut self) {
+        let sel = get_selection();
+        let new_suggestions: Vec<&'static str> = (|| -> Option<Vec<&'static str>> {
+            if !sel.is_collapsed() {
+                return Some(Vec::new());
+            }
+            let (line_idx, pos) = self
+                .find_idx_and_utf16_pos(sel.focus_node()?, sel.focus_offset())
+                .ok()?;
+            let full_line = self.line(line_idx).suffix(Position::begin()).ok()?;
+            let typed = full_line[..pos.offset.min(full_line.len())].trim_start();
+            let all = suggest_all(typed);
+            Some(all.into_iter().take(8).collect())
+        })()
+        .unwrap_or_default();
+
+        self.0.borrow_mut().suggestions = new_suggestions;
+
+        let (suggestions_clone, top_match) = {
+            let state = self.0.borrow();
+            let suggestions = &state.suggestions;
+            (
+                suggestions.clone(),
+                suggestions.first().copied().unwrap_or(""),
+            )
+        };
+
+        // Update valid hint (ghost text for the top match)
+        if top_match.is_empty() {
+            self.textbox_mut().inner_mut().remove_attribute("data-hint");
+        } else {
+            self.textbox_mut()
+                .inner_mut()
+                .set_attribute("data-hint", top_match);
+        }
+
+        // Render the list using DomVec and data-text attribute
+        if suggestions_clone.is_empty() {
+            let mut list = self.suggestion_list_mut();
+            list.inner_mut().truncate(0);
+            list.inner_mut().set_attribute("class", "suggestion-list");
+        } else {
+            // Need factory for creating new items
+            let factory = self.0.borrow().factory.clone();
+
+            // Sync the DomVec length
+            let len = suggestions_clone.len();
+            {
+                let mut list = self.suggestion_list_mut();
+                list.inner_mut()
+                    .set_attribute("class", "suggestion-list visible");
+                let list_vec = list.inner_mut();
+                if list_vec.len() > len {
+                    list_vec.truncate(len);
+                }
+                while list_vec.len() < len {
+                    let mut div = factory.div();
+                    div.set_attribute("class", "suggestion-item");
+                    list_vec.push(div);
+                }
+            }
+
+            // Update content for all items (both kept and new)
+            let mut list = self.suggestion_list_mut();
+            let list_inner = list.inner_mut();
+
+            for (i, s) in suggestions_clone.iter().enumerate() {
+                let item = &mut list_inner[i];
+                item.set_attribute("data-text", s);
+                if i == 0 {
+                    item.set_attribute("class", "suggestion-item selected");
+                } else {
+                    item.set_attribute("class", "suggestion-item");
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Given a node and offset, find the line index and (UTF-16) position within that line.
     // There are several possibilities for the node (e.g. the div element, the span element,
@@ -677,11 +658,9 @@ impl Editor {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
     }
 
-    fn autocomplete(&self) -> Ref<'_, Autocomplete> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.1.0)
-    }
-
-    fn autocomplete_mut(&self) -> RefMut<'_, Autocomplete> {
+    fn suggestion_list_mut(
+        &self,
+    ) -> RefMut<'_, ReactiveComponent<DomVec<ElementHandle<HtmlDivElement>, HtmlDivElement>>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.1.0)
     }
 
@@ -789,6 +768,7 @@ impl Editor {
         }
 
         // instrumentation
+        self.initialize_globals(&validized);
         self.initialize_locals(&validized);
         self.execute(&validized.build_executable_binary(&types)?);
 
@@ -800,15 +780,33 @@ impl Editor {
 
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
     fn to_raw_module<'a>(&self, wasm_bin: &'a [u8]) -> Result<RawModule<'a>> {
+        use wasmparser::ValType;
         let parser = Parser::new(0);
         let mut functions: Vec<RawFunction> = Vec::new();
-        let mut func_params: Vec<Vec<wasmparser::ValType>> = Vec::new();
-        let mut func_results: Vec<Vec<wasmparser::ValType>> = Vec::new();
-        let mut func_locals: Vec<Vec<(u32, wasmparser::ValType)>> = Vec::new();
+        let mut func_params: Vec<Vec<ValType>> = Vec::new();
+        let mut func_results: Vec<Vec<ValType>> = Vec::new();
+        let mut func_locals: Vec<Vec<(u32, ValType)>> = Vec::new();
         let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
+        let mut globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)> = Vec::new();
+        let mut memory: Vec<wasmparser::MemoryType> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
             match payload? {
+                Payload::MemorySection(reader) => {
+                    for mem in reader.into_iter_with_offsets().flatten() {
+                        memory.push(mem.1);
+                    }
+                }
+                Payload::GlobalSection(reader) => {
+                    for global in reader.into_iter_with_offsets().flatten() {
+                        globals.push((
+                            global.1.ty.content_type,
+                            global.1.ty.mutable,
+                            global.1.ty.shared,
+                            global.1.init_expr,
+                        ))
+                    }
+                }
                 Payload::TypeSection(reader) => {
                     for ft in reader.into_iter_err_on_gc_types().flatten() {
                         func_params.push(ft.params().to_vec());
@@ -816,7 +814,7 @@ impl Editor {
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
-                    let mut locals: Vec<(u32, wasmparser::ValType)> = Vec::new();
+                    let mut locals: Vec<(u32, ValType)> = Vec::new();
                     let local_reader = body.get_locals_reader()?;
                     for local in local_reader {
                         let entry = local?;
@@ -870,7 +868,11 @@ impl Editor {
             });
         }
 
-        Ok(RawModule { functions })
+        Ok(RawModule {
+            globals,
+            memory,
+            functions,
+        })
     }
 
     fn execute(&self, binary: &[u8]) {
@@ -906,8 +908,8 @@ impl Editor {
                     .0
                     .set_attribute("max", &(last_step() + 1).to_string());
                 let step = inner.program_state.step_number;
-                inner.program_state = new_program_state();
-                inner.saved_states = vec![Some(new_program_state())];
+                inner.program_state = ProgramState::default();
+                inner.saved_states = Vec::new();
                 step
             };
             editor_handle.build_program_state(0, step);
@@ -933,7 +935,8 @@ impl Editor {
         }
         for i in 0..lines.len() {
             lines[i].set_highlight(false);
-            if let Some(program_state) = &saved_states[i]
+            if let Some(cur_state) = saved_states.get(i)
+                && let Some(program_state) = &cur_state
                 && program_state.step_number <= step
             {
                 lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
@@ -977,7 +980,7 @@ impl Editor {
             }
             // For backwards steps, reset program state
             if slider_step < inner.program_state.step_number {
-                inner.program_state = new_program_state();
+                inner.program_state = ProgramState::default();
             }
             inner.program_state.step_number
         };
@@ -995,6 +998,25 @@ impl Editor {
             wasmparser::ValType::V128 => WebAssemblyTypes::V128(0u128),
             _ => panic!("unsupported valtype for locals"),
         }
+    }
+
+    fn initialize_globals(&self, validized: &ValidModule) {
+        use wasmparser::Operator::*;
+        let mut globals: Vec<WebAssemblyTypes> = Vec::with_capacity(validized.globals.len());
+        for (.., init_expr) in &validized.globals {
+            let mut init_reader = init_expr.get_operators_reader();
+            if let Ok(op) = init_reader.read() {
+                globals.push(match op {
+                    I32Const { value } => WebAssemblyTypes::I32(value),
+                    F32Const { value } => WebAssemblyTypes::F32(value.into()),
+                    I64Const { value } => WebAssemblyTypes::I64(value),
+                    F64Const { value } => WebAssemblyTypes::F64(value.into()),
+                    V128Const { value } => WebAssemblyTypes::V128(value.into()),
+                    _ => WebAssemblyTypes::I32(0),
+                });
+            }
+        }
+        self.0.borrow_mut().globals = globals;
     }
 
     fn initialize_locals(&self, validized: &ValidModule) {
@@ -1019,6 +1041,12 @@ impl Editor {
         let mut inner = self.0.borrow_mut();
         let line_count = inner.component.get().1.0.inner().len();
         inner.saved_states.resize_with(line_count, || None);
+        if start == 0 {
+            inner.program_state.globals_state = inner.globals.clone();
+            if let Some((first_start, _first_end)) = inner.function_ranges.first().cloned() {
+                inner.saved_states[first_start] = Some(inner.program_state.clone());
+            }
+        }
         with_changes(|changes| {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
                 inner.program_state.step_number = i + 1;
@@ -1044,14 +1072,8 @@ impl Editor {
                     }
                 }
                 inner.program_state.locals_state = inner.function_locals[func_idx].clone();
-                // Resizing won't be necessary when number of globals are known
                 if let Some((idx, val)) = &change.globals_change {
-                    let idx_usize = *idx as usize;
-                    let globals = &mut inner.program_state.globals_state;
-                    if globals.len() <= idx_usize {
-                        globals.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
-                    }
-                    globals[idx_usize] = *val;
+                    inner.program_state.globals_state[*idx as usize] = *val;
                 }
                 if let Some((idx, val)) = &change.memory_change {
                     let idx_usize = *idx as usize;

@@ -266,37 +266,69 @@ span.debug[data-debug]::after {
     box-shadow: none;
 }
 
-
-/* Autocomplete suggestion list */
-.autocomplete-list {
+.textentry[data-hint]:not([data-hint=""])::after {
+    content: attr(data-hint);
     position: fixed;
-    bottom: 0px;
-    left: 0px;
-    right: 0px;
-    background: white;
-    border-top: 2px solid darkred;
-    box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.15);
+    bottom: 0; left: 0; right: 0;
+    padding: 4px 14px;
+    background: #e4e4e4;
+    color: #444;
+    font-family: monospace;
+    font-size: 1.1rem;
+    border-top: 1px solid #ccc;
+}
+
+.suggestion-list {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #fffff0; /* Match body background (Ivory) */
+    border-top: 2px solid burlywood; /* Match slider style */
+    height: 40px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    display: none;
+    white-space: nowrap;
+    z-index: 1000;
+    box-shadow: 0 -2px 10px rgba(139, 69, 19, 0.1); /* Subtle brown shadow */
+    
+    /* Flexbox for horizontal alignment */
+    display: none;
+}
+
+.suggestion-list.visible {
     display: flex;
     flex-direction: row;
-    overflow-x: auto;
-    z-index: 1000;
-    font-family: 'MLMRoman12-Regular';
-    font-size: 20pt;
-    white-space: nowrap;
+    align-items: center;
 }
 
 .suggestion-item {
-    padding: 8px 16px;
+    padding: 0 14px;
+    height: 100%;
+    display: flex;
+    align-items: center;
     cursor: pointer;
-    border-right: 1px solid #f0f0f0;
+    font-family: 'MLMSansDemiCond10-Regular', monospace;
+    font-size: 1.1rem;
+    color: #444;
+    border-right: 1px dotted burlywood; /* Subtle separator */
+    border-bottom: none;
+    flex: 0 0 auto;
+    transition: background-color 0.15s;
 }
 
-.suggestion-item:hover,
+.suggestion-item:hover {
+    background-color: linen; /* Match slider track */
+    color: black;
+}
+
 .suggestion-item.selected {
-    background-color: #fffff0;
-    color: darkred;
+    background-color: darkred; /* Match app accent */
+    color: white;
+    border-right-color: darkred;
 }
 
-.suggestion-item:last-child {
-    border-right: none;
+.suggestion-item::after {
+    content: attr(data-text);
 }

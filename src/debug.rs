@@ -198,35 +198,28 @@ pub fn make_imports() -> Result<Object, JsValue> {
 }
 
 fn create_closure_global_operations(debug_numbers: &Object) {
-    let set_global_i32 = Closure::wrap(Box::new(move |idx: i32, value: i32| {
+    let record_global_change = |idx: i32, value: WebAssemblyTypes| {
         STATE.with(|cur_state| {
-            cur_state.borrow_mut().globals_change =
-                Some((idx as u32, WebAssemblyTypes::I32(value)));
+            cur_state.borrow_mut().globals_change = Some((idx as u32, value));
         });
+    };
+    let set_global_i32 = Closure::wrap(Box::new(move |idx: i32, value: i32| {
+        record_global_change(idx, value.into());
     }) as Box<dyn Fn(i32, i32)>);
     register_closure(debug_numbers, "set_global_i32", set_global_i32);
 
     let set_global_f32 = Closure::wrap(Box::new(move |idx: i32, value: f32| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().globals_change =
-                Some((idx as u32, WebAssemblyTypes::F32(value)));
-        });
+        record_global_change(idx, value.into());
     }) as Box<dyn Fn(i32, f32)>);
     register_closure(debug_numbers, "set_global_f32", set_global_f32);
 
     let set_global_i64 = Closure::wrap(Box::new(move |idx: i32, value: i64| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().globals_change =
-                Some((idx as u32, WebAssemblyTypes::I64(value)));
-        });
+        record_global_change(idx, value.into());
     }) as Box<dyn Fn(i32, i64)>);
     register_closure(debug_numbers, "set_global_i64", set_global_i64);
 
     let set_global_f64 = Closure::wrap(Box::new(move |idx: i32, value: f64| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().globals_change =
-                Some((idx as u32, WebAssemblyTypes::F64(value)));
-        });
+        record_global_change(idx, value.into());
     }) as Box<dyn Fn(i32, f64)>);
     register_closure(debug_numbers, "set_global_f64", set_global_f64);
 }
