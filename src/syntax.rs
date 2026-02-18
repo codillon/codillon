@@ -4,10 +4,14 @@ use anyhow::Result;
 use std::ops::Deref;
 use wast::{
     Error,
-    core::{Global, InlineImport, Instruction, LocalParser, Memory, Table, ValType},
+    core::{
+        ElemPayload, Expression, Func, FuncKind, FunctionType, Global, GlobalKind, HeapType,
+        InlineImport, Instruction, Local, LocalParser, Memory, ModuleField, Table, TableKind,
+        ValType,
+    },
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
-    token::Id,
+    token::{Id, Index},
 };
 
 use crate::line::{Activity, LineInfo};
@@ -272,6 +276,288 @@ impl<'a> Parse<'a> for LineKind {
         } else {
             Ok(LineKind::Instr(parser.parse::<Instruction>()?.into()))
         }
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct LineSymbols {
+    defines: Vec<String>,  // symbol names
+    consumes: Vec<String>, // symbol names
+}
+
+impl LineSymbols {
+    fn merge(&mut self, other: LineSymbols) {
+        self.defines.extend(other.defines);
+        self.consumes.extend(other.consumes);
+    }
+}
+
+impl From<Instruction<'_>> for LineSymbols {
+    fn from(instr: Instruction<'_>) -> Self {
+        // Defining keywords for instructions: block, loop, if
+        // Not all instructions are included for symbol collection.
+        // They may be added incrementally
+        let mut defines: Vec<String> = Vec::new();
+        let mut consumes: Vec<String> = Vec::new();
+
+        match instr {
+            // Variant(Box<BlockType<'a>>)
+            Instruction::Block(i) | Instruction::Loop(i) | Instruction::If(i) => {
+                if let Some(id) = i.label {
+                    defines.push(id.name().to_string());
+                }
+
+                // These instructions can involve (type $id), e.g. "block (type $x)"
+                if let Some(Index::Id(id)) = i.ty.index {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(Index<'a>)
+            Instruction::Br(i)
+            | Instruction::BrIf(i)
+            | Instruction::Call(i)
+            | Instruction::ReturnCall(i)
+            | Instruction::CallRef(i)
+            | Instruction::ReturnCallRef(i)
+            | Instruction::LocalGet(i)
+            | Instruction::LocalSet(i)
+            | Instruction::LocalTee(i)
+            | Instruction::GlobalGet(i)
+            | Instruction::GlobalSet(i)
+            | Instruction::StructNew(i)
+            | Instruction::StructNewDefault(i)
+            | Instruction::ArrayNew(i)
+            | Instruction::ArrayNewDefault(i)
+            | Instruction::ArrayGet(i)
+            | Instruction::ArraySet(i) => {
+                if let Index::Id(id) = i {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(Option<Id<'a>>)
+            Instruction::Else(i) | Instruction::End(i) => {
+                if let Some(id) = i {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(TableArg<'a>)
+            Instruction::TableGet(i)
+            | Instruction::TableSet(i)
+            | Instruction::TableFill(i)
+            | Instruction::TableSize(i)
+            | Instruction::TableGrow(i) => {
+                if let Index::Id(id) = i.dst {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(MemArg<'a>)
+            Instruction::I32Load(i)
+            | Instruction::I64Load(i)
+            | Instruction::F32Load(i)
+            | Instruction::F64Load(i)
+            | Instruction::I32Store(i)
+            | Instruction::I64Store(i)
+            | Instruction::F32Store(i)
+            | Instruction::F64Store(i) => {
+                if let Index::Id(id) = i.memory {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Variant(MemoryArg<'a>)
+            Instruction::MemorySize(i)
+            | Instruction::MemoryGrow(i)
+            | Instruction::MemoryFill(i)
+            | Instruction::MemoryDiscard(i) => {
+                if let Index::Id(id) = i.mem {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            // Special variants
+            Instruction::MemoryInit(i) => {
+                if let Index::Id(id) = i.data {
+                    consumes.push(id.name().to_string());
+                }
+                if let Index::Id(id) = i.mem {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            Instruction::MemoryCopy(i) => {
+                if let Index::Id(id) = i.dst {
+                    consumes.push(id.name().to_string());
+                }
+                if let Index::Id(id) = i.src {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            Instruction::TableInit(i) => {
+                if let Index::Id(id) = i.table {
+                    consumes.push(id.name().to_string());
+                }
+                if let Index::Id(id) = i.elem {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            Instruction::TableCopy(i) => {
+                if let Index::Id(id) = i.dst {
+                    consumes.push(id.name().to_string());
+                }
+                if let Index::Id(id) = i.src {
+                    consumes.push(id.name().to_string());
+                }
+            }
+
+            _ => {}
+        }
+
+        LineSymbols { defines, consumes }
+    }
+}
+
+impl<'a> From<Expression<'a>> for LineSymbols {
+    fn from(expr: Expression) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        for instr in expr.instrs.iter() {
+            line_symbols.merge(instr.clone().into());
+        }
+
+        line_symbols
+    }
+}
+
+impl<'a> From<HeapType<'a>> for LineSymbols {
+    fn from(ht: HeapType) -> Self {
+        match ht {
+            HeapType::Concrete(Index::Id(id)) | HeapType::Exact(Index::Id(id)) => Self {
+                defines: Vec::new(),
+                consumes: vec![id.name().to_string()],
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<ValType<'a>> for LineSymbols {
+    fn from(vt: ValType) -> Self {
+        match vt {
+            ValType::Ref(rt) => rt.heap.into(),
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<FunctionType<'a>> for LineSymbols {
+    fn from(ft: FunctionType) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        for (id, _, vt) in ft.params.iter() {
+            if let Some(id) = id {
+                line_symbols.defines.push(id.name().to_string())
+            };
+            line_symbols.merge((*vt).into());
+        }
+
+        for vt in ft.results.iter() {
+            line_symbols.merge((*vt).into());
+        }
+
+        line_symbols
+    }
+}
+
+impl<'a> From<Local<'a>> for LineSymbols {
+    fn from(local: Local) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        if let Some(id) = local.id {
+            line_symbols.defines.push(id.name().to_string())
+        };
+
+        line_symbols.merge(local.ty.into());
+
+        line_symbols
+    }
+}
+
+impl<'a> From<Global<'a>> for LineSymbols {
+    fn from(global: Global) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        if let Some(id) = global.id {
+            line_symbols.defines.push(id.name().to_string())
+        };
+
+        if let GlobalKind::Inline(expr) = global.kind {
+            line_symbols.merge(expr.into());
+        };
+
+        line_symbols
+    }
+}
+
+impl<'a> From<Table<'a>> for LineSymbols {
+    fn from(table: Table) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        if let Some(id) = table.id {
+            line_symbols.defines.push(id.name().to_string())
+        };
+
+        match table.kind {
+            TableKind::Import { ty, .. } => {
+                line_symbols.merge(ty.elem.heap.into());
+            }
+            TableKind::Normal { ty, init_expr } => {
+                line_symbols.merge(ty.elem.heap.into());
+                if let Some(expr) = init_expr {
+                    for instr in expr.instrs.iter() {
+                        line_symbols.merge(instr.clone().into());
+                    }
+                };
+            }
+            TableKind::Inline { elem, payload, .. } => {
+                line_symbols.merge(elem.heap.into());
+                match payload {
+                    ElemPayload::Indices(indices) => {
+                        line_symbols.consumes.extend(indices.iter().filter_map(
+                            |index| match index {
+                                Index::Id(id) => Some(id.name().to_string()),
+                                _ => None,
+                            },
+                        ));
+                    }
+                    ElemPayload::Exprs { ty, exprs } => {
+                        line_symbols.merge(ty.heap.into());
+                        for expr in exprs {
+                            line_symbols.merge(expr.into());
+                        }
+                    }
+                }
+            }
+        };
+
+        line_symbols
+    }
+}
+
+impl<'a> From<Memory<'a>> for LineSymbols {
+    fn from(memory: Memory) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        if let Some(id) = memory.id {
+            line_symbols.defines.push(id.name().to_string())
+        };
+
+        line_symbols
     }
 }
 
@@ -775,6 +1061,72 @@ pub fn parse_line(s: &str) -> LineKind {
     }
 }
 
+// Assume kind correctly reflects the line's kind
+pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
+    match kind {
+        LineKind::Instr(_) => {
+            let Ok(buf) = ParseBuffer::new(s) else {
+                return LineSymbols::default();
+            };
+            parser::parse::<Instruction>(&buf)
+                .map(Into::into)
+                .unwrap_or_default()
+        }
+        LineKind::Other(module_parts) if !module_parts.is_empty() && s.len() > 1 => {
+            // Line is non-function module part
+            let Ok(buf) = ParseBuffer::new(&s[1..s.len() - 1]) else {
+                return LineSymbols::default();
+            };
+            if let Ok(field) = parser::parse::<ModuleField>(&buf) {
+                match field {
+                    ModuleField::Global(g) => return g.into(),
+                    ModuleField::Table(t) => return t.into(),
+                    ModuleField::Memory(m) => return m.into(),
+                    _ => {}
+                }
+            }
+
+            // Line is made up of function segments
+            let mut wrapped_s = match module_parts[0] {
+                ModulePart::FuncKeyword => s.to_string(),
+                ModulePart::LParen => s[1..].to_string(),
+                _ => format!("func {s}"),
+            };
+            if matches!(module_parts.last(), Some(ModulePart::RParen)) {
+                wrapped_s = wrapped_s
+                    .strip_suffix(')')
+                    .unwrap_or(&wrapped_s)
+                    .to_string();
+            }
+
+            let Ok(wrapped_buf) = ParseBuffer::new(&wrapped_s) else {
+                return LineSymbols::default();
+            };
+            let Ok(func) = parser::parse::<Func>(&wrapped_buf) else {
+                return LineSymbols::default();
+            };
+
+            let mut line_symbols = LineSymbols::default();
+            // Id
+            if let Some(id) = func.id {
+                line_symbols.defines.push(id.name().to_string())
+            }
+            // Param & Result
+            if let Some(ft) = func.ty.inline {
+                line_symbols.merge(ft.into())
+            }
+            // Local
+            if let FuncKind::Inline { locals, .. } = func.kind {
+                for local in locals {
+                    line_symbols.merge(local.into());
+                }
+            }
+            line_symbols
+        }
+        _ => LineSymbols::default(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -983,6 +1335,131 @@ mod tests {
         );
 
         assert!(parse::<LineKind>(&ParseBuffer::new(") func i32.const 7")?).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_line_symbols() -> Result<()> {
+        let mut line = "";
+        let mut symbols = parse_line_symbols(line, LineKind::Empty);
+        assert!(symbols.defines.is_empty());
+        assert!(symbols.consumes.is_empty());
+
+        line = "block $label";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::OtherStructured));
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "label");
+        assert!(symbols.consumes.is_empty());
+
+        line = "block $label (type $x) (param i32)";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::OtherStructured));
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "label");
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "x");
+
+        line = " br $label";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        assert!(symbols.defines.is_empty());
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "label");
+
+        line = "br 1";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        assert!(symbols.defines.is_empty());
+        assert!(symbols.consumes.is_empty());
+
+        line = "local.set $something";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        assert!(symbols.defines.is_empty());
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "something");
+
+        line = "memory.copy $x $y";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        assert!(symbols.defines.is_empty());
+        assert_eq!(symbols.consumes.len(), 2);
+        assert_eq!(symbols.consumes[0], "x");
+        assert_eq!(symbols.consumes[1], "y");
+
+        line = "memory.copy 10 $y";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        assert!(symbols.defines.is_empty());
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "y");
+
+        line = "(global i32 (i32.const 0))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert!(symbols.defines.is_empty());
+        assert!(symbols.consumes.is_empty());
+
+        line = "(global $x i32 (i32.const 0))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "x");
+        assert!(symbols.consumes.is_empty());
+
+        line = "(global $x i32 (global.get $y))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "x");
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "y");
+
+        line = "(table $t 1 (ref $ft))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "t");
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "ft");
+
+        line = "(table funcref (elem $f1 $f2))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert!(symbols.defines.is_empty());
+        assert_eq!(symbols.consumes.len(), 2);
+        assert_eq!(symbols.consumes[0], "f1");
+        assert_eq!(symbols.consumes[1], "f2");
+
+        line = "(memory $mem 1 2)";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0], "mem");
+        assert!(symbols.consumes.is_empty());
+
+        line = "(memory $mem 1 2) (func)";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert!(symbols.defines.is_empty());
+        assert!(symbols.consumes.is_empty());
+
+        line = "(func $f (param $p i32) (result (ref $ft)) (local $l i64))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 3);
+        assert_eq!(symbols.defines[0], "f");
+        assert_eq!(symbols.defines[1], "p");
+        assert_eq!(symbols.defines[2], "l");
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "ft");
+
+        line = " func  (local $l1 i64) (local $l2 (ref $ft))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 2);
+        assert_eq!(symbols.defines[0], "l1");
+        assert_eq!(symbols.defines[1], "l2");
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0], "ft");
+
+        line = "  (export \"\") (param $x i32) (param $y i64))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 2);
+        assert_eq!(symbols.defines[0], "x");
+        assert_eq!(symbols.defines[1], "y");
+        assert!(symbols.consumes.is_empty());
+
+        line = "(import \"\" \"\") (local)";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert!(symbols.defines.is_empty());
+        assert!(symbols.consumes.is_empty());
 
         Ok(())
     }
