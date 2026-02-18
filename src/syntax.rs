@@ -313,39 +313,6 @@ impl LineSymbols {
     }
 }
 
-impl<'a> From<Expression<'a>> for LineSymbols {
-    fn from(expr: Expression) -> Self {
-        let mut line_symbols = LineSymbols::default();
-
-        for instr in expr.instrs.iter() {
-            line_symbols.merge(instr.clone().into());
-        }
-
-        line_symbols
-    }
-}
-
-impl<'a> From<HeapType<'a>> for LineSymbols {
-    fn from(ht: HeapType) -> Self {
-        match ht {
-            HeapType::Concrete(Index::Id(id)) | HeapType::Exact(Index::Id(id)) => Self {
-                defines: Vec::new(),
-                consumes: vec![id.name().to_string()],
-            },
-            _ => Self::default(),
-        }
-    }
-}
-
-impl<'a> From<ValType<'a>> for LineSymbols {
-    fn from(vt: ValType) -> Self {
-        match vt {
-            ValType::Ref(rt) => rt.heap.into(),
-            _ => Self::default(),
-        }
-    }
-}
-
 impl From<Instruction<'_>> for LineSymbols {
     fn from(instr: Instruction<'_>) -> Self {
         // Defining keywords for instructions: block, loop, if
@@ -473,6 +440,39 @@ impl From<Instruction<'_>> for LineSymbols {
         }
 
         LineSymbols { defines, consumes }
+    }
+}
+
+impl<'a> From<Expression<'a>> for LineSymbols {
+    fn from(expr: Expression) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        for instr in expr.instrs.iter() {
+            line_symbols.merge(instr.clone().into());
+        }
+
+        line_symbols
+    }
+}
+
+impl<'a> From<HeapType<'a>> for LineSymbols {
+    fn from(ht: HeapType) -> Self {
+        match ht {
+            HeapType::Concrete(Index::Id(id)) | HeapType::Exact(Index::Id(id)) => Self {
+                defines: Vec::new(),
+                consumes: vec![id.name().to_string()],
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<ValType<'a>> for LineSymbols {
+    fn from(vt: ValType) -> Self {
+        match vt {
+            ValType::Ref(rt) => rt.heap.into(),
+            _ => Self::default(),
+        }
     }
 }
 
@@ -797,15 +797,9 @@ impl SyntaxState {
     }
 }
 
-// struct SymbolicRef {
-//     name: String,
-//     frame_level: usize, // starts from 0
-// }
-
 /// Fix frames (and missing function beginning and end) by deactivating
 /// unmatched ends, appending ends as necessary to close open
 /// frames, prepending "(" and "func" and appending ")" as necessary, etc.
-/// Also fix unmatched symbolic references by invalidating the line.
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     use crate::line::Activity::*;
     use SyntaxState::*;
