@@ -117,14 +117,12 @@ impl TextHandle {
 pub struct Handlers {
     beforeinput: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
     keydown: Option<Closure<dyn Fn(web_sys::KeyboardEvent)>>,
-    mouseup: Option<Closure<dyn Fn(web_sys::MouseEvent)>>,
 }
 
 impl Handlers {
     pub fn audit(&self, elem: &impl AsRef<HtmlElement>) {
         audit_handler(&self.beforeinput, elem.as_ref().onbeforeinput());
         audit_handler(&self.keydown, elem.as_ref().onkeydown());
-        audit_handler(&self.mouseup, elem.as_ref().onmouseup());
 
         fn audit_handler<EventType>(
             expected: &Option<Closure<dyn Fn(EventType)>>,
@@ -208,7 +206,6 @@ where
 pub trait ControlHandlers {
     fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
     fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F);
-    fn set_onmouseup<F: Fn(web_sys::MouseEvent) + 'static>(&mut self, handler: F);
 }
 
 impl<T: ElementComponent> ControlHandlers for ReactiveComponent<T>
@@ -240,23 +237,6 @@ where
                 html.set_onkeydown(Some(
                     self.handlers
                         .keydown
-                        .as_ref()
-                        .unwrap()
-                        .as_ref()
-                        .unchecked_ref(),
-                ))
-            },
-            TOKEN,
-        );
-    }
-    fn set_onmouseup<F: Fn(web_sys::MouseEvent) + 'static>(&mut self, handler: F) {
-        self.handlers.mouseup = Some(Closure::new(handler));
-        self.component.with_element(
-            |elem| {
-                let html: &HtmlElement = elem.as_ref();
-                html.set_onmouseup(Some(
-                    self.handlers
-                        .mouseup
                         .as_ref()
                         .unwrap()
                         .as_ref()
@@ -377,6 +357,12 @@ impl<T: AnyElement> ElementHandle<T> {
         self.elem
             .element()
             .scroll_into_view_with_scroll_into_view_options(&opts);
+    }
+
+    pub fn as_node_ref(&self) -> NodeRef {
+        let t: &T = &self.elem;
+        let node: &web_sys::Node = t.as_ref();
+        node.clone().into()
     }
 }
 
@@ -749,14 +735,15 @@ impl SelectionHandle {
     }
 
     pub fn to_static_range(&self) -> Result<StaticRangeHandle> {
-        if self.0.range_count() == 0 {
-            bail!("no range count");
+        if self.0.range_count() > 0 {
+            Ok(StaticRangeHandle(
+                self.0
+                    .get_range_at(0)
+                    .map_err(|e| anyhow::anyhow!("{:?}", e))?,
+            ))
+        } else {
+            bail!("no range")
         }
-        let range = self
-            .0
-            .get_range_at(0)
-            .map_err(|e| anyhow::anyhow!("get_range_at(0) failed: {:?}", e))?;
-        Ok(StaticRangeHandle(range))
     }
 }
 

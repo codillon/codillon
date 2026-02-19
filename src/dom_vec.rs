@@ -1,6 +1,6 @@
 // A Codillon DOM "vector": a variable-length collection of Components of the same type
 
-use crate::jet::{AccessToken, AnyElement, Component, ElementHandle, WithElement};
+use crate::jet::{AccessToken, AnyElement, Component, ElementHandle, NodeRef, WithElement};
 use delegate::delegate;
 
 pub struct DomVec<Child: Component, Element: AnyElement> {
@@ -60,6 +60,10 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
     pub fn get_attribute(&self, name: &str) -> Option<&String>;
     pub fn scroll_into_view(&self);
     }
+    }
+
+    pub fn as_node_ref(&self) -> NodeRef {
+        self.elem.as_node_ref()
     }
 }
 

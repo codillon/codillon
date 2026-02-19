@@ -256,6 +256,70 @@ span.debug[data-debug]::after {
     box-shadow: none;
 }
 
+.autocomplete-hint-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 36px;
+    background: linear-gradient(to bottom, #fffff8, #fffff0);
+    border-top: 1px solid burlywood;
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    padding: 0 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    align-items: center;
+    z-index: 100;
+    scroll-behavior: smooth;
+}
+
+.autocomplete-hint-bar::-webkit-scrollbar {
+    height: 4px;
+}
+
+.autocomplete-hint-bar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.autocomplete-hint-bar::-webkit-scrollbar-thumb {
+    background: burlywood;
+    border-radius: 2px;
+}
+
+.autocomplete-item {
+    flex-shrink: 0;
+    padding: 4px 12px;
+    background: white;
+    border: 1px solid burlywood;
+    border-radius: 3px;
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 14pt;
+    color: darkred;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+
+.autocomplete-item:hover {
+    background: linen;
+    border-color: darkred;
+    transform: translateY(-1px);
+}
+
+.autocomplete-item:active {
+    transform: translateY(0);
+}
+
+.autocomplete-item:first-child {
+    border-color: darkred;
+    border-width: 2px;
+    font-weight: bold;
+}
+
+
 .step-slider::-moz-range-thumb {
     width: var(--slider-thumb-size);
     height: var(--slider-thumb-size);
@@ -264,71 +328,4 @@ span.debug[data-debug]::after {
     border: var(--slider-thumb-border);
     cursor: pointer;
     box-shadow: none;
-}
-
-.textentry[data-hint]:not([data-hint=""])::after {
-    content: attr(data-hint);
-    position: fixed;
-    bottom: 0; left: 0; right: 0;
-    padding: 4px 14px;
-    background: #e4e4e4;
-    color: #444;
-    font-family: monospace;
-    font-size: 1.1rem;
-    border-top: 1px solid #ccc;
-}
-
-.suggestion-list {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    background: #fffff0; /* Match body background (Ivory) */
-    border-top: 2px solid burlywood; /* Match slider style */
-    height: 40px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    display: none;
-    white-space: nowrap;
-    z-index: 1000;
-    box-shadow: 0 -2px 10px rgba(139, 69, 19, 0.1); /* Subtle brown shadow */
-    
-    /* Flexbox for horizontal alignment */
-    display: none;
-}
-
-.suggestion-list.visible {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-}
-
-.suggestion-item {
-    padding: 0 14px;
-    height: 100%;
-    display: flex;
-    align-items: center;
-    cursor: pointer;
-    font-family: 'MLMSansDemiCond10-Regular', monospace;
-    font-size: 1.1rem;
-    color: #444;
-    border-right: 1px dotted burlywood; /* Subtle separator */
-    border-bottom: none;
-    flex: 0 0 auto;
-    transition: background-color 0.15s;
-}
-
-.suggestion-item:hover {
-    background-color: linen; /* Match slider track */
-    color: black;
-}
-
-.suggestion-item.selected {
-    background-color: darkred; /* Match app accent */
-    color: white;
-    border-right-color: darkred;
-}
-
-.suggestion-item::after {
-    content: attr(data-text);
 }

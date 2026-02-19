@@ -1,7 +1,7 @@
 // The Codillon code editor
 
 use crate::{
-    autocomplete::{completion_suffix, suggest_all},
+    autocomplete::{completion_suffix, suggest},
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -35,13 +35,7 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (
-                ElementHandle<HtmlInputElement>,
-                (
-                    ReactiveComponent<DomVec<ElementHandle<HtmlDivElement>, HtmlDivElement>>,
-                    (),
-                ),
-            ),
+            (ElementHandle<HtmlInputElement>, ()),
         ),
     ),
     HtmlDivElement,
@@ -97,9 +91,8 @@ struct _Editor {
     globals: Vec<WebAssemblyTypes>,
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
-
-    // Autocomplete: current matching instructions
     suggestions: Vec<&'static str>,
+    hint_bar: Option<web_sys::HtmlDivElement>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -118,10 +111,7 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        (
-                            factory.input(),
-                            (ReactiveComponent::new(DomVec::new(factory.div())), ()),
-                        ),
+                        ((factory.input()), ()),
                     ),
                 ),
                 factory.div(),
@@ -136,13 +126,10 @@ impl Editor {
             saved_states: Vec::new(),
             function_ranges: Vec::new(),
             suggestions: Vec::new(),
+            hint_bar: None,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
-        {
-            let mut list = ret.suggestion_list_mut(); // now accessing ReactiveComponent<DomVec>
-            list.inner_mut().set_attribute("class", "suggestion-list");
-        }
         {
             let mut text = ret.textbox_mut();
             text.inner_mut().set_attribute("class", "textentry");
@@ -166,11 +153,6 @@ impl Editor {
                     .handle_keydown(ev)
                     .expect("keydown handler")
             });
-
-            let editor_ref = Rc::clone(&ret.0);
-            text.set_onmouseup(move |_| {
-                Editor(editor_ref.clone()).clear_suggestion();
-            });
         }
         {
             let mut binding = ret.0.borrow_mut();
@@ -178,6 +160,8 @@ impl Editor {
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
         ret.image_mut().set_attribute("class", "annotations");
+        ret.image_mut().set_attribute("class", "annotations");
+        ret.setup_hint_bar();
 
         ret.push_line("(func");
         ret.push_line("i32.const 5");
@@ -363,7 +347,6 @@ impl Editor {
                     },
                     time_ms,
                 );
-                // Recompute autocomplete hint after every successful edit
                 self.refresh_suggestion();
             }
             Err(e) => {
@@ -479,29 +462,6 @@ impl Editor {
                 }
             }
 
-            // Accept the current autocomplete suggestion
-            "Enter" | "Tab" => {
-                let suggestion = self.0.borrow().suggestions.first().copied();
-                if let Some(full_instr) = suggestion {
-                    ev.prevent_default();
-                    let sel = get_selection();
-                    #[allow(clippy::collapsible_if)]
-                    if sel.is_collapsed() {
-                        if let Ok((line_idx, pos)) = self.find_idx_and_utf16_pos(
-                            sel.focus_node().context("focus")?,
-                            sel.focus_offset(),
-                        ) {
-                            let full_line = self.line(line_idx).suffix(Position::begin())?;
-                            let typed = &full_line[..pos.offset.min(full_line.len())];
-                            let suffix = completion_suffix(full_instr, typed);
-                            let target_range = sel.to_static_range().context("static range")?;
-                            self.replace_range(target_range, suffix)?;
-                            // refresh_suggestion is called inside replace_range on success
-                        }
-                    }
-                }
-            }
-
             "z" | "Z" => {
                 if ev.ctrl_key() || ev.meta_key() {
                     ev.prevent_default();
@@ -513,109 +473,21 @@ impl Editor {
                 }
             }
 
+            "Tab" | "Enter" => {
+                let first = self.0.borrow().suggestions.first().copied();
+                if let Some(s) = first {
+                    ev.prevent_default();
+                    self.accept_suggestion(s).ok();
+                }
+            }
+
             _ => {}
         }
 
-        // Keep the hint bar in sync whenever the caret moves without editing
         self.refresh_suggestion();
 
         Ok(())
     }
-
-    // ── Autocomplete ─────────────────────────────────────────────────────────
-
-    fn clear_suggestion(&mut self) {
-        self.0.borrow_mut().suggestions.clear();
-        self.textbox_mut().inner_mut().remove_attribute("data-hint");
-
-        let mut list = self.suggestion_list_mut();
-        list.inner_mut().truncate(0);
-        list.inner_mut().remove_attribute("class");
-        list.inner_mut().set_attribute("class", "suggestion-list");
-    }
-
-    /// Recompute the best-match suggestion from the text left of the caret,
-    /// store it on the editor, and push it to the `data-hint` attribute so
-    /// the CSS hint bar stays in sync.
-    fn refresh_suggestion(&mut self) {
-        let sel = get_selection();
-        let new_suggestions: Vec<&'static str> = (|| -> Option<Vec<&'static str>> {
-            if !sel.is_collapsed() {
-                return Some(Vec::new());
-            }
-            let (line_idx, pos) = self
-                .find_idx_and_utf16_pos(sel.focus_node()?, sel.focus_offset())
-                .ok()?;
-            let full_line = self.line(line_idx).suffix(Position::begin()).ok()?;
-            let typed = full_line[..pos.offset.min(full_line.len())].trim_start();
-            let all = suggest_all(typed);
-            Some(all.into_iter().take(8).collect())
-        })()
-        .unwrap_or_default();
-
-        self.0.borrow_mut().suggestions = new_suggestions;
-
-        let (suggestions_clone, top_match) = {
-            let state = self.0.borrow();
-            let suggestions = &state.suggestions;
-            (
-                suggestions.clone(),
-                suggestions.first().copied().unwrap_or(""),
-            )
-        };
-
-        // Update valid hint (ghost text for the top match)
-        if top_match.is_empty() {
-            self.textbox_mut().inner_mut().remove_attribute("data-hint");
-        } else {
-            self.textbox_mut()
-                .inner_mut()
-                .set_attribute("data-hint", top_match);
-        }
-
-        // Render the list using DomVec and data-text attribute
-        if suggestions_clone.is_empty() {
-            let mut list = self.suggestion_list_mut();
-            list.inner_mut().truncate(0);
-            list.inner_mut().set_attribute("class", "suggestion-list");
-        } else {
-            // Need factory for creating new items
-            let factory = self.0.borrow().factory.clone();
-
-            // Sync the DomVec length
-            let len = suggestions_clone.len();
-            {
-                let mut list = self.suggestion_list_mut();
-                list.inner_mut()
-                    .set_attribute("class", "suggestion-list visible");
-                let list_vec = list.inner_mut();
-                if list_vec.len() > len {
-                    list_vec.truncate(len);
-                }
-                while list_vec.len() < len {
-                    let mut div = factory.div();
-                    div.set_attribute("class", "suggestion-item");
-                    list_vec.push(div);
-                }
-            }
-
-            // Update content for all items (both kept and new)
-            let mut list = self.suggestion_list_mut();
-            let list_inner = list.inner_mut();
-
-            for (i, s) in suggestions_clone.iter().enumerate() {
-                let item = &mut list_inner[i];
-                item.set_attribute("data-text", s);
-                if i == 0 {
-                    item.set_attribute("class", "suggestion-item selected");
-                } else {
-                    item.set_attribute("class", "suggestion-item");
-                }
-            }
-        }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
 
     // Given a node and offset, find the line index and (UTF-16) position within that line.
     // There are several possibilities for the node (e.g. the div element, the span element,
@@ -656,12 +528,6 @@ impl Editor {
 
     fn textbox_mut(&self) -> RefMut<'_, ReactiveComponent<TextType>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
-    }
-
-    fn suggestion_list_mut(
-        &self,
-    ) -> RefMut<'_, ReactiveComponent<DomVec<ElementHandle<HtmlDivElement>, HtmlDivElement>>> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.1.0)
     }
 
     fn image_mut(&self) -> RefMut<'_, DomImage> {
@@ -1200,6 +1066,126 @@ impl Editor {
             inner.last_time_ms = 0.0;
         }
         Ok(())
+    }
+
+    fn setup_hint_bar(&mut self) {
+        use wasm_bindgen::JsCast;
+        let doc = web_sys::window().unwrap().document().unwrap();
+        let bar = doc
+            .create_element("div")
+            .unwrap()
+            .dyn_into::<web_sys::HtmlDivElement>()
+            .unwrap();
+        bar.set_class_name("autocomplete-hint-bar");
+        bar.set_attribute("style", "display:none").ok();
+
+        let editor = Rc::clone(&self.0);
+        let bar_clone = bar.clone();
+        let capture_click =
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::Event| {
+                if let Some(target) = ev.target() {
+                    let t: Option<web_sys::Node> = target.dyn_into::<web_sys::Node>().ok();
+                    let b: web_sys::Node = bar_clone.clone().into();
+                    if t.is_none_or(|n| !b.contains(Some(&n))) {
+                        Editor(editor.clone()).dismiss_suggestions();
+                    }
+                }
+            }) as Box<dyn FnMut(_)>);
+        doc.add_event_listener_with_callback("click", capture_click.as_ref().unchecked_ref())
+            .ok();
+        capture_click.forget();
+
+        self.0.borrow_mut().hint_bar = Some(bar);
+    }
+
+    fn accept_suggestion(&mut self, suggestion: &'static str) -> Result<()> {
+        let sel = get_selection();
+        if !sel.is_collapsed() {
+            return Ok(());
+        }
+
+        if let Ok((line_idx, pos)) =
+            self.find_idx_and_utf16_pos(sel.focus_node().context("focus")?, sel.focus_offset())
+        {
+            let line = self.line(line_idx).suffix(Position::begin())?;
+            let typed = &line[..pos.offset.min(line.len())].trim_start();
+            let suffix = completion_suffix(suggestion, typed);
+            let range = sel.to_static_range().context("range")?;
+            self.replace_range(range, suffix)?;
+            self.dismiss_suggestions();
+        }
+        Ok(())
+    }
+
+    fn dismiss_suggestions(&mut self) {
+        self.0.borrow_mut().suggestions.clear();
+        if let Some(bar) = &self.0.borrow().hint_bar {
+            bar.set_attribute("style", "display:none").ok();
+            bar.set_inner_html("");
+        }
+    }
+
+    fn refresh_suggestion(&mut self) {
+        use wasm_bindgen::JsCast;
+        let sel = get_selection();
+        let new_sugg: Vec<&'static str> = if sel.is_collapsed() {
+            self.find_idx_and_utf16_pos(
+                sel.focus_node().unwrap_or(self.text().as_node_ref()),
+                sel.focus_offset(),
+            )
+            .ok()
+            .and_then(|(idx, pos)| {
+                let line = self.line(idx).suffix(Position::begin()).ok()?;
+                let typed = line[..pos.offset.min(line.len())].trim_start();
+                Some(suggest(typed, 10))
+            })
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        self.0.borrow_mut().suggestions = new_sugg.clone();
+
+        if let Some(bar) = &self.0.borrow().hint_bar {
+            if new_sugg.is_empty() {
+                bar.set_attribute("style", "display:none").ok();
+                bar.set_inner_html("");
+            } else {
+                bar.set_attribute("style", "display:flex").ok();
+                bar.set_inner_html("");
+                let doc = web_sys::window().unwrap().document().unwrap();
+                let editor = Rc::clone(&self.0);
+                for &s in &new_sugg {
+                    let item = doc.create_element("div").unwrap();
+                    item.set_class_name("autocomplete-item");
+                    item.set_text_content(Some(s));
+                    let ed = Rc::clone(&editor);
+                    let c =
+                        wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::Event| {
+                            ev.stop_propagation();
+                            Editor(ed.clone()).accept_suggestion(s).ok();
+                        })
+                            as Box<dyn FnMut(_)>);
+                    item.add_event_listener_with_callback("click", c.as_ref().unchecked_ref())
+                        .ok();
+                    c.forget();
+                    bar.append_child(&item).ok();
+                }
+            }
+        }
+    }
+
+    pub fn attach_hint_bar(&self) {
+        if let Some(bar) = &self.0.borrow().hint_bar {
+            web_sys::window()
+                .unwrap()
+                .document()
+                .unwrap()
+                .body()
+                .unwrap()
+                .append_child(bar)
+                .ok();
+        }
     }
 }
 
