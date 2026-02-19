@@ -41,6 +41,11 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         self.elem.attach_node(self.contents.last().unwrap());
     }
 
+    pub fn clear(&mut self) {
+        self.contents.clear();
+        self.elem.clear_children();
+    }
+
     delegate! {
     to self.contents {
         pub fn truncate(&mut self, len: usize);

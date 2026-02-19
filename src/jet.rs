@@ -324,6 +324,10 @@ impl<T: AnyElement> ElementHandle<T> {
         )
     }
 
+    pub fn clear_children(&self) {
+        self.elem.element().set_text_content(Some(""));
+    }
+
     pub fn attach_nodes(&self, children: ArrayHandle) {
         self.elem.element().replace_children_with_node(&children.0);
     }
@@ -526,6 +530,26 @@ impl ElementHandle<web_sys::HtmlInputElement> {
         self.with_element(
             |elem| {
                 elem.set_oninput(Some(closure.as_ref().unchecked_ref()));
+            },
+            TOKEN,
+        );
+        closure.forget();
+    }
+}
+
+impl<T: AnyElement> ElementHandle<T>
+where
+    T: AsRef<web_sys::HtmlElement>,
+{
+    pub fn set_onmousedown<F>(&mut self, handler: F)
+    where
+        F: 'static + FnMut(web_sys::MouseEvent),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
+        self.with_element(
+            |elem| {
+                let html: &web_sys::HtmlElement = elem.as_ref();
+                html.set_onmousedown(Some(closure.as_ref().unchecked_ref()));
             },
             TOKEN,
         );

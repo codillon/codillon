@@ -91,7 +91,7 @@ struct _Editor {
     globals: Vec<WebAssemblyTypes>,
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
-    suggestions: Vec<&'static str>,
+    suggestions: Vec<String>,
     hint_bar: Option<web_sys::HtmlDivElement>,
 }
 
@@ -474,10 +474,10 @@ impl Editor {
             }
 
             "Tab" | "Enter" => {
-                let first = self.0.borrow().suggestions.first().copied();
+                let first = self.0.borrow().suggestions.first().cloned();
                 if let Some(s) = first {
                     ev.prevent_default();
-                    self.accept_suggestion(s).ok();
+                    self.accept_suggestion(&s).ok();
                 }
             }
 
@@ -1098,7 +1098,7 @@ impl Editor {
         self.0.borrow_mut().hint_bar = Some(bar);
     }
 
-    fn accept_suggestion(&mut self, suggestion: &'static str) -> Result<()> {
+    fn accept_suggestion(&mut self, suggestion: &str) -> Result<()> {
         let sel = get_selection();
         if !sel.is_collapsed() {
             return Ok(());
@@ -1128,7 +1128,7 @@ impl Editor {
     fn refresh_suggestion(&mut self) {
         use wasm_bindgen::JsCast;
         let sel = get_selection();
-        let new_sugg: Vec<&'static str> = if sel.is_collapsed() {
+        let new_sugg: Vec<String> = if sel.is_collapsed() {
             self.find_idx_and_utf16_pos(
                 sel.focus_node().unwrap_or(self.text().as_node_ref()),
                 sel.focus_offset(),
@@ -1155,7 +1155,8 @@ impl Editor {
                 bar.set_inner_html("");
                 let doc = web_sys::window().unwrap().document().unwrap();
                 let editor = Rc::clone(&self.0);
-                for &s in &new_sugg {
+                for s in &new_sugg {
+                    let s_clone = s.clone();
                     let item = doc.create_element("div").unwrap();
                     item.set_class_name("autocomplete-item");
                     item.set_text_content(Some(s));
@@ -1163,7 +1164,7 @@ impl Editor {
                     let c =
                         wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::Event| {
                             ev.stop_propagation();
-                            Editor(ed.clone()).accept_suggestion(s).ok();
+                            Editor(ed.clone()).accept_suggestion(&s_clone).ok();
                         })
                             as Box<dyn FnMut(_)>);
                     item.add_event_listener_with_callback("click", c.as_ref().unchecked_ref())
