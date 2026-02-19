@@ -1,6 +1,7 @@
 // The Codillon code editor
 
 use crate::{
+    autocomplete::{completion_suffix, suggest},
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -90,6 +91,8 @@ struct _Editor {
     globals: Vec<WebAssemblyTypes>,
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
+    suggestions: Vec<String>,
+    hint_bar: Option<web_sys::HtmlDivElement>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -122,6 +125,8 @@ impl Editor {
             globals: Vec::new(),
             saved_states: Vec::new(),
             function_ranges: Vec::new(),
+            suggestions: Vec::new(),
+            hint_bar: None,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -155,6 +160,8 @@ impl Editor {
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
         ret.image_mut().set_attribute("class", "annotations");
+        ret.image_mut().set_attribute("class", "annotations");
+        ret.setup_hint_bar();
 
         ret.push_line("(func");
         ret.push_line("i32.const 5");
@@ -340,6 +347,7 @@ impl Editor {
                     },
                     time_ms,
                 );
+                self.refresh_suggestion();
             }
             Err(e) => {
                 log_1(&format!("reverting after {e}").into());
@@ -465,8 +473,18 @@ impl Editor {
                 }
             }
 
+            "Tab" | "Enter" => {
+                let first = self.0.borrow().suggestions.first().cloned();
+                if let Some(s) = first {
+                    ev.prevent_default();
+                    self.accept_suggestion(&s).ok();
+                }
+            }
+
             _ => {}
         }
+
+        self.refresh_suggestion();
 
         Ok(())
     }
@@ -1048,6 +1066,127 @@ impl Editor {
             inner.last_time_ms = 0.0;
         }
         Ok(())
+    }
+
+    fn setup_hint_bar(&mut self) {
+        use wasm_bindgen::JsCast;
+        let doc = web_sys::window().unwrap().document().unwrap();
+        let bar = doc
+            .create_element("div")
+            .unwrap()
+            .dyn_into::<web_sys::HtmlDivElement>()
+            .unwrap();
+        bar.set_class_name("autocomplete-hint-bar");
+        bar.set_attribute("style", "display:none").ok();
+
+        let editor = Rc::clone(&self.0);
+        let bar_clone = bar.clone();
+        let capture_click =
+            wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::Event| {
+                if let Some(target) = ev.target() {
+                    let t: Option<web_sys::Node> = target.dyn_into::<web_sys::Node>().ok();
+                    let b: web_sys::Node = bar_clone.clone().into();
+                    if t.is_none_or(|n| !b.contains(Some(&n))) {
+                        Editor(editor.clone()).dismiss_suggestions();
+                    }
+                }
+            }) as Box<dyn FnMut(_)>);
+        doc.add_event_listener_with_callback("click", capture_click.as_ref().unchecked_ref())
+            .ok();
+        capture_click.forget();
+
+        self.0.borrow_mut().hint_bar = Some(bar);
+    }
+
+    fn accept_suggestion(&mut self, suggestion: &str) -> Result<()> {
+        let sel = get_selection();
+        if !sel.is_collapsed() {
+            return Ok(());
+        }
+
+        if let Ok((line_idx, pos)) =
+            self.find_idx_and_utf16_pos(sel.focus_node().context("focus")?, sel.focus_offset())
+        {
+            let line = self.line(line_idx).suffix(Position::begin())?;
+            let typed = &line[..pos.offset.min(line.len())].trim_start();
+            let suffix = completion_suffix(suggestion, typed);
+            let range = sel.to_static_range().context("range")?;
+            self.replace_range(range, suffix)?;
+            self.dismiss_suggestions();
+        }
+        Ok(())
+    }
+
+    fn dismiss_suggestions(&mut self) {
+        self.0.borrow_mut().suggestions.clear();
+        if let Some(bar) = &self.0.borrow().hint_bar {
+            bar.set_attribute("style", "display:none").ok();
+            bar.set_inner_html("");
+        }
+    }
+
+    fn refresh_suggestion(&mut self) {
+        use wasm_bindgen::JsCast;
+        let sel = get_selection();
+        let new_sugg: Vec<String> = if sel.is_collapsed() {
+            self.find_idx_and_utf16_pos(
+                sel.focus_node().unwrap_or(self.text().as_node_ref()),
+                sel.focus_offset(),
+            )
+            .ok()
+            .and_then(|(idx, pos)| {
+                let line = self.line(idx).suffix(Position::begin()).ok()?;
+                let typed = line[..pos.offset.min(line.len())].trim_start();
+                Some(suggest(typed, 10))
+            })
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        self.0.borrow_mut().suggestions = new_sugg.clone();
+
+        if let Some(bar) = &self.0.borrow().hint_bar {
+            if new_sugg.is_empty() {
+                bar.set_attribute("style", "display:none").ok();
+                bar.set_inner_html("");
+            } else {
+                bar.set_attribute("style", "display:flex").ok();
+                bar.set_inner_html("");
+                let doc = web_sys::window().unwrap().document().unwrap();
+                let editor = Rc::clone(&self.0);
+                for s in &new_sugg {
+                    let s_clone = s.clone();
+                    let item = doc.create_element("div").unwrap();
+                    item.set_class_name("autocomplete-item");
+                    item.set_text_content(Some(s));
+                    let ed = Rc::clone(&editor);
+                    let c =
+                        wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::Event| {
+                            ev.stop_propagation();
+                            Editor(ed.clone()).accept_suggestion(&s_clone).ok();
+                        })
+                            as Box<dyn FnMut(_)>);
+                    item.add_event_listener_with_callback("click", c.as_ref().unchecked_ref())
+                        .ok();
+                    c.forget();
+                    bar.append_child(&item).ok();
+                }
+            }
+        }
+    }
+
+    pub fn attach_hint_bar(&self) {
+        if let Some(bar) = &self.0.borrow().hint_bar {
+            web_sys::window()
+                .unwrap()
+                .document()
+                .unwrap()
+                .body()
+                .unwrap()
+                .append_child(bar)
+                .ok();
+        }
     }
 }
 

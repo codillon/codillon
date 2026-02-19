@@ -80,6 +80,15 @@ impl<Child: Structure, Element: AnyElement> DomStruct<Child, Element> {
     }
 }
 
+impl<Child: Structure, Element: AnyElement> DomStruct<Child, Element>
+where
+    Element: AsRef<web_sys::HtmlElement>,
+{
+    pub fn set_onmousedown<F: 'static + FnMut(web_sys::MouseEvent)>(&mut self, handler: F) {
+        self.elem.set_onmousedown(handler);
+    }
+}
+
 // To audit, audit the parent element itself, then audit the structure members.
 impl<Child: Structure, Element: AnyElement> Component for DomStruct<Child, Element> {
     fn audit(&self) {
