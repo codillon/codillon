@@ -25,7 +25,6 @@ use std::{
     rc::{Rc, Weak},
 };
 use wasm_bindgen::{JsCast, JsValue};
-use wasmparser::{Parser, Payload};
 use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
@@ -625,18 +624,34 @@ impl Editor {
 
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
     fn to_raw_module<'a>(&self, wasm_bin: &'a [u8]) -> Result<RawModule<'a>> {
-        use wasmparser::ValType;
+        use wasmparser::*;
         let parser = Parser::new(0);
         let mut functions: Vec<RawFunction> = Vec::new();
-        let mut func_params: Vec<Vec<ValType>> = Vec::new();
-        let mut func_results: Vec<Vec<ValType>> = Vec::new();
+        let mut types: Vec<FuncType> = Vec::new();
+        let mut func_type_indices: Vec<usize> = Vec::new();
+        let mut imports: Vec<Import> = Vec::new();
+        let mut memory: Vec<MemoryType> = Vec::new();
+        let mut globals: Vec<Global> = Vec::new();
         let mut func_locals: Vec<Vec<(u32, ValType)>> = Vec::new();
-        let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
-        let mut globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)> = Vec::new();
-        let mut memory: Vec<wasmparser::MemoryType> = Vec::new();
+        let mut func_ops: Vec<Vec<Operator<'a>>> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
             match payload? {
+                Payload::TypeSection(reader) => {
+                    for ft in reader.into_iter_err_on_gc_types().flatten() {
+                        types.push(ft);
+                    }
+                }
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports().flatten() {
+                        imports.push(import);
+                    }
+                }
+                Payload::FunctionSection(reader) => {
+                    for func_type_idx in reader.into_iter().flatten() {
+                        func_type_indices.push(func_type_idx as usize);
+                    }
+                }
                 Payload::MemorySection(reader) => {
                     for mem in reader.into_iter_with_offsets().flatten() {
                         memory.push(mem.1);
@@ -644,18 +659,7 @@ impl Editor {
                 }
                 Payload::GlobalSection(reader) => {
                     for global in reader.into_iter_with_offsets().flatten() {
-                        globals.push((
-                            global.1.ty.content_type,
-                            global.1.ty.mutable,
-                            global.1.ty.shared,
-                            global.1.init_expr,
-                        ))
-                    }
-                }
-                Payload::TypeSection(reader) => {
-                    for ft in reader.into_iter_err_on_gc_types().flatten() {
-                        func_params.push(ft.params().to_vec());
-                        func_results.push(ft.results().to_vec());
+                        globals.push(global.1);
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
@@ -701,21 +705,19 @@ impl Editor {
                     bail!("not enough operators");
                 }
             }
-            if ops_iter.next().is_some() {
-                bail!("not enough instructions");
-            }
             let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
             functions.push(RawFunction {
+                type_idx: func_type_indices[func_idx],
                 locals,
-                params: func_params.get(func_idx).unwrap_or(&Vec::new()).clone(),
-                results: func_results.get(func_idx).unwrap_or(&Vec::new()).clone(),
                 operators: aligned_ops,
             });
         }
 
         Ok(RawModule {
-            globals,
+            types,
+            imports,
             memory,
+            globals,
             functions,
         })
     }
@@ -848,8 +850,8 @@ impl Editor {
     fn initialize_globals(&self, validized: &ValidModule) {
         use wasmparser::Operator::*;
         let mut globals: Vec<WebAssemblyTypes> = Vec::with_capacity(validized.globals.len());
-        for (.., init_expr) in &validized.globals {
-            let mut init_reader = init_expr.get_operators_reader();
+        for global in &validized.globals {
+            let mut init_reader = global.init_expr.get_operators_reader();
             if let Ok(op) = init_reader.read() {
                 globals.push(match op {
                     I32Const { value } => WebAssemblyTypes::I32(value),
@@ -867,9 +869,10 @@ impl Editor {
     fn initialize_locals(&self, validized: &ValidModule) {
         let mut function_locals: Vec<Vec<WebAssemblyTypes>> =
             Vec::with_capacity(validized.functions.len());
-        for func in &validized.functions {
-            let mut locals: Vec<WebAssemblyTypes> = Vec::with_capacity(func.params.len());
-            for param in &func.params {
+        for (func_idx, func) in validized.functions.iter().enumerate() {
+            let mut locals: Vec<WebAssemblyTypes> =
+                Vec::with_capacity(validized.get_func_type(func_idx).params().len());
+            for param in validized.get_func_type(func_idx).params() {
                 locals.push(Self::valtype_default_editor(param));
             }
             for (count, local_type) in &func.locals {
