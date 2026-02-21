@@ -537,7 +537,17 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         // Process the line and transition the syntax state
         {
             let orig_state = state;
-            let res = state.transit_state(&lines.info(line_no), |_| {});
+            let mut hit_initial = false;
+            let mut syntax_after_internal_initial_state = false; // see Fix #4.5 below.
+            let res = state.transit_state(&lines.info(line_no), |new_state| {
+                if hit_initial {
+                    syntax_after_internal_initial_state = true;
+                }
+
+                if *new_state == Initial {
+                    hit_initial = true;
+                }
+            });
             match res {
                 Ok(()) => {
                     if state == Initial {
@@ -550,6 +560,18 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.clear();
+                    }
+                    if syntax_after_internal_initial_state {
+                        // Fix #4.5: Codiillon only wants one field per line. If this line reached the initial
+                        // state and then had more syntax afterward, disable it, revert state, and skip to next.
+                        // This rules out lines like "(memory 0) (func)" or "(func) (func)".
+
+                        lines.set_active_status(
+                            line_no,
+                            Inactive("fields must be on separate lines"),
+                        );
+                        state = orig_state;
+                        continue;
                     }
                 }
                 Err(e) => {
