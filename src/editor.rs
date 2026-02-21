@@ -25,7 +25,7 @@ use std::{
     rc::{Rc, Weak},
 };
 use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
+use web_sys::{HtmlCanvasElement, HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<
@@ -33,7 +33,10 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, ()),
+            (
+                ElementHandle<HtmlInputElement>,
+                (ElementHandle<HtmlCanvasElement>, ()),
+            ),
         ),
     ),
     HtmlDivElement,
@@ -107,7 +110,7 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), ()),
+                        ((factory.input()), ((factory.canvas()), ())),
                     ),
                 ),
                 factory.div(),
@@ -152,6 +155,8 @@ impl Editor {
             let mut binding = ret.0.borrow_mut();
             let slider = &mut binding.component.get_mut().1.1.0;
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
+            let canvas = &mut binding.component.get_mut().1.1.1.0;
+            ret.setup_canvas(canvas);
         }
         ret.image_mut().set_attribute("class", "annotations");
 
@@ -695,6 +700,27 @@ impl Editor {
         lines[line_num].set_highlight(true);
     }
 
+    fn setup_canvas(&self, canvas: &mut ElementHandle<HtmlCanvasElement>) {
+        canvas.set_attribute("class", "graph-canvas");
+        canvas.set_size_pixels(500, 500);
+        canvas.clear_canvas();
+    }
+
+    fn draw_point(&self, x: f64, y: f64, canvas: &ElementHandle<HtmlCanvasElement>) {
+        canvas.with_2d_context_and_size(|context, width, height| {
+            let w = width as f64 / 2.0;
+            let h = height as f64 / 2.0;
+
+            // map to pixel space. y is inverted because (0, 0) is top left corner of HTML canvas
+            let px = w + x * w;
+            let py = h - y * h;
+
+            context.begin_path();
+            let _ = context.arc(px, py, 3.0, 0.0, std::f64::consts::PI * 2.0);
+            context.fill();
+        });
+    }
+
     fn setup_slider(
         &self,
         editor: Weak<RefCell<_Editor>>,
@@ -794,6 +820,8 @@ impl Editor {
             if let Some((first_start, _first_end)) = inner.function_ranges.first().cloned() {
                 inner.saved_states[first_start] = Some(inner.program_state.clone());
             }
+            let canvas = &inner.component.get_mut().1.1.1.0;
+            canvas.clear_canvas();
         }
         with_changes(|changes| {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
@@ -832,6 +860,10 @@ impl Editor {
                     memory[idx_usize] = *val;
                 }
                 inner.saved_states[change.line_number as usize] = Some(inner.program_state.clone());
+                if let Some((x, y)) = &change.point {
+                    let canvas = &inner.component.get_mut().1.1.1.0;
+                    self.draw_point(*x, *y, canvas);
+                }
             }
         });
     }
