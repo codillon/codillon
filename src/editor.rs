@@ -549,11 +549,8 @@ impl Editor {
         find_frames(self);
 
         // Get function ranges
-        self.0.borrow_mut().function_ranges = match find_function_ranges(self) {
-            None => return Ok(()),
-            Some(range) if range.is_empty() => return Ok(()),
-            Some(ranges) => ranges,
-        };
+        self.0.borrow_mut().function_ranges = find_function_ranges(self);
+
         let wasm_bin = str_to_binary(
             self.buffer_as_text()
                 .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),

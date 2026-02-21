@@ -330,7 +330,6 @@ enum SyntaxState {
     AfterModuleFieldLParen,
     AfterFuncHeader(FuncHeader),
     AfterInstruction,
-    AfterModuleFieldRParen,
 }
 
 #[derive(Default, Copy, Clone, PartialEq, Debug)]
@@ -396,7 +395,11 @@ impl FuncHeader {
 }
 
 impl SyntaxState {
-    fn transit_state(&mut self, info: &LineInfo) -> Result<(), &'static str> {
+    fn transit_state(
+        &mut self,
+        info: &LineInfo,
+        mut callback: impl FnMut(&SyntaxState),
+    ) -> Result<(), &'static str> {
         if matches!(info.active, Activity::Inactive(_)) {
             return Ok(());
         }
@@ -404,25 +407,33 @@ impl SyntaxState {
         if info.synthetic_before.module_syntax_first {
             for part in &info.synthetic_before.module_field_syntax {
                 self.transit_state_from_module_part(*part)?;
+                callback(self);
             }
             if info.synthetic_before.end_opcodes > 0 {
                 self.transit_state_from_instruction()?;
+                callback(self);
             }
         } else {
             if info.synthetic_before.end_opcodes > 0 {
                 self.transit_state_from_instruction()?;
+                callback(self);
             }
             for part in &info.synthetic_before.module_field_syntax {
                 self.transit_state_from_module_part(*part)?;
+                callback(self);
             }
         }
 
         match &info.kind {
             LineKind::Empty | LineKind::Malformed(_) => {}
-            LineKind::Instr(_) => self.transit_state_from_instruction()?,
+            LineKind::Instr(_) => {
+                self.transit_state_from_instruction()?;
+                callback(self);
+            }
             LineKind::Other(parts) => {
                 for part in parts {
                     self.transit_state_from_module_part(*part)?;
+                    callback(self);
                 }
             }
         }
@@ -467,13 +478,7 @@ impl SyntaxState {
             (
                 SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction,
                 ModulePart::RParen,
-            ) => SyntaxState::AfterModuleFieldRParen,
-            (SyntaxState::AfterModuleFieldRParen, ModulePart::LParen) => {
-                SyntaxState::AfterModuleFieldLParen
-            }
-            (SyntaxState::AfterModuleFieldRParen, _) => {
-                return Err("text outside functions");
-            }
+            ) => SyntaxState::Initial,
             _ => return Err("invalid field order"),
         };
         Ok(())
@@ -532,10 +537,20 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         // Process the line and transition the syntax state
         {
             let orig_state = state;
-            let res = state.transit_state(&lines.info(line_no));
+            let mut hit_initial = false;
+            let mut syntax_after_internal_initial_state = false; // see Fix #4.5 below.
+            let res = state.transit_state(&lines.info(line_no), |new_state| {
+                if hit_initial {
+                    syntax_after_internal_initial_state = true;
+                }
+
+                if *new_state == Initial {
+                    hit_initial = true;
+                }
+            });
             match res {
                 Ok(()) => {
-                    if state == AfterModuleFieldRParen {
+                    if state == Initial {
                         // Fix #4: at end of function body, synthetically close all open frames
                         lines.set_synthetic_before(
                             line_no,
@@ -545,7 +560,18 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.clear();
-                        state = Initial;
+                    }
+                    if syntax_after_internal_initial_state {
+                        // Fix #4.5: Codiillon only wants one field per line. If this line reached the initial
+                        // state and then had more syntax afterward, disable it, revert state, and skip to next.
+                        // This rules out lines like "(memory 0) (func)" or "(func) (func)".
+
+                        lines.set_active_status(
+                            line_no,
+                            Inactive("fields must be on separate lines"),
+                        );
+                        state = orig_state;
+                        continue;
                     }
                 }
                 Err(e) => {
@@ -593,20 +619,27 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     }
 
     match state {
-        // Fix #7: if only contents are a "(", deactivate everything
+        // Fix #7: if ending with "(" state, close with "func)"
         AfterModuleFieldLParen => {
             assert!(frame_stack.is_empty());
 
-            for line_no in 0..lines.len() {
-                let line_kind = lines.info(line_no).kind.stripped_clone();
-                match line_kind {
-                    LineKind::Instr(_) | LineKind::Other(_) => {
-                        lines.set_active_status(line_no, Inactive(""))
-                    }
-                    LineKind::Empty | LineKind::Malformed(_) => {}
-                }
+            // Make sure there is an empty line that can become a synthetic "func)"
+            if !matches!(lines.info(lines.len() - 1).kind, LineKind::Empty) {
+                lines.push();
             }
+
+            lines.set_active_status(lines.len() - 1, Active);
+
+            lines.set_synthetic_before(
+                lines.len() - 1,
+                SyntheticWasm {
+                    module_syntax_first: false,
+                    end_opcodes: 0,
+                    module_field_syntax: vec![ModulePart::FuncKeyword, ModulePart::RParen],
+                },
+            );
         }
+
         // Fix #8: if function wasn't ended, close outstanding frames, then close the function
         AfterFuncHeader(_) | AfterInstruction => {
             // Make sure there is an empty line that can become a synthetic ")"
@@ -627,34 +660,35 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     }
 }
 
-pub fn find_function_ranges(code: &impl LineInfos) -> Option<Vec<(usize, usize)>> {
-    if code.len() == 0 {
-        return None;
-    }
+pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut state = SyntaxState::Initial;
     let mut current_start: Option<usize> = None;
 
     for line_no in 0..code.len() {
-        let orig_state = state;
-        match state.transit_state(&code.info(line_no)) {
-            Ok(()) => {
-                if orig_state == SyntaxState::Initial && state != SyntaxState::Initial {
-                    current_start = Some(line_no);
+        let mut prev_state = state;
+        let on_transition = |new_state: &SyntaxState| {
+            match (prev_state, new_state) {
+                (SyntaxState::AfterFuncHeader(_), SyntaxState::AfterInstruction) => {
+                    current_start = Some(line_no)
                 }
 
-                if state == SyntaxState::AfterModuleFieldRParen {
-                    let start = current_start.take().unwrap_or(line_no);
-                    ranges.push((start, line_no));
-                    state = SyntaxState::Initial;
-                }
+                (
+                    SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction,
+                    SyntaxState::Initial,
+                ) => ranges.push((current_start.take().unwrap_or(line_no), line_no)),
+
+                _ => (),
             }
-            Err(_) => {
-                state = orig_state;
-            }
-        }
+
+            prev_state = *new_state;
+        };
+
+        state
+            .transit_state(&code.info(line_no), on_transition)
+            .expect("well-formed");
     }
-    Some(ranges)
+    ranges
 }
 
 pub fn find_frames(code: &mut impl FrameInfosMut) {
