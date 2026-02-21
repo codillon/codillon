@@ -509,6 +509,10 @@ impl ElementFactory {
     pub fn input(&self) -> ElementHandle<web_sys::HtmlInputElement> {
         ElementHandle::new(self.create_element("input"))
     }
+
+    pub fn canvas(&self) -> ElementHandle<web_sys::HtmlCanvasElement> {
+        ElementHandle::new(self.create_element("canvas"))
+    }
 }
 
 impl ElementHandle<web_sys::HtmlInputElement> {
@@ -524,6 +528,36 @@ impl ElementHandle<web_sys::HtmlInputElement> {
             TOKEN,
         );
         closure.forget();
+    }
+}
+
+impl ElementHandle<web_sys::HtmlCanvasElement> {
+    pub fn set_size_pixels(&mut self, width: u32, height: u32) {
+        self.set_attribute("width", &width.to_string());
+        self.set_attribute("height", &height.to_string());
+    }
+    pub fn with_2d_context_and_size<R>(
+        &self,
+        mut function: impl FnMut(&web_sys::CanvasRenderingContext2d, u32, u32) -> R,
+    ) {
+        self.with_element(
+            |canvas| {
+                let width = canvas.width();
+                let height = canvas.height();
+                // get_context returns Result<Option<JsValue>, JsValue>
+                if let Ok(Some(contex_val)) = canvas.get_context("2d")
+                    && let Ok(context) = contex_val.dyn_into::<web_sys::CanvasRenderingContext2d>()
+                {
+                    function(&context, width, height);
+                }
+            },
+            TOKEN,
+        );
+    }
+    pub fn clear_canvas(&self) {
+        self.with_2d_context_and_size(|context, width, height| {
+            context.clear_rect(0.0, 0.0, width as f64, height as f64);
+        });
     }
 }
 

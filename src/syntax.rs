@@ -642,10 +642,15 @@ pub fn find_function_ranges(code: &impl LineInfos) -> Option<Vec<(usize, usize)>
                 if orig_state == SyntaxState::Initial && state != SyntaxState::Initial {
                     current_start = Some(line_no);
                 }
-
+                if let LineKind::Other(parts) = &code.info(line_no).kind
+                    && parts.iter().any(|p| matches!(p, ModulePart::Import))
+                {
+                    current_start = None;
+                }
                 if state == SyntaxState::AfterModuleFieldRParen {
-                    let start = current_start.take().unwrap_or(line_no);
-                    ranges.push((start, line_no));
+                    if let Some(start) = current_start.take() {
+                        ranges.push((start, line_no));
+                    }
                     state = SyntaxState::Initial;
                 }
             }
