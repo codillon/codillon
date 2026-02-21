@@ -597,20 +597,27 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     }
 
     match state {
-        // Fix #7: if only contents are a "(", deactivate everything
+        // Fix #7: if ending with "(" state, close with "func)"
         AfterModuleFieldLParen => {
             assert!(frame_stack.is_empty());
 
-            for line_no in 0..lines.len() {
-                let line_kind = lines.info(line_no).kind.stripped_clone();
-                match line_kind {
-                    LineKind::Instr(_) | LineKind::Other(_) => {
-                        lines.set_active_status(line_no, Inactive(""))
-                    }
-                    LineKind::Empty | LineKind::Malformed(_) => {}
-                }
+            // Make sure there is an empty line that can become a synthetic "func)"
+            if !matches!(lines.info(lines.len() - 1).kind, LineKind::Empty) {
+                lines.push();
             }
+
+            lines.set_active_status(lines.len() - 1, Active);
+
+            lines.set_synthetic_before(
+                lines.len() - 1,
+                SyntheticWasm {
+                    module_syntax_first: false,
+                    end_opcodes: 0,
+                    module_field_syntax: vec![ModulePart::FuncKeyword, ModulePart::RParen],
+                },
+            );
         }
+
         // Fix #8: if function wasn't ended, close outstanding frames, then close the function
         AfterFuncHeader(_) | AfterInstruction => {
             // Make sure there is an empty line that can become a synthetic ")"
