@@ -25,8 +25,7 @@ use std::{
     rc::{Rc, Weak},
 };
 use wasm_bindgen::{JsCast, JsValue};
-use wasmparser::{Parser, Payload};
-use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
+use web_sys::{HtmlCanvasElement, HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<
@@ -34,7 +33,10 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, ()),
+            (
+                ElementHandle<HtmlInputElement>,
+                (ElementHandle<HtmlCanvasElement>, ()),
+            ),
         ),
     ),
     HtmlDivElement,
@@ -108,7 +110,7 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), ()),
+                        ((factory.input()), ((factory.canvas()), ())),
                     ),
                 ),
                 factory.div(),
@@ -153,6 +155,8 @@ impl Editor {
             let mut binding = ret.0.borrow_mut();
             let slider = &mut binding.component.get_mut().1.1.0;
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
+            let canvas = &mut binding.component.get_mut().1.1.1.0;
+            ret.setup_canvas(canvas);
         }
         ret.image_mut().set_attribute("class", "annotations");
 
@@ -628,18 +632,34 @@ impl Editor {
 
     /// note that the FuncEnd will also get a line in the Instruction Table for a given function
     fn to_raw_module<'a>(&self, wasm_bin: &'a [u8]) -> Result<RawModule<'a>> {
-        use wasmparser::ValType;
+        use wasmparser::*;
         let parser = Parser::new(0);
         let mut functions: Vec<RawFunction> = Vec::new();
-        let mut func_params: Vec<Vec<ValType>> = Vec::new();
-        let mut func_results: Vec<Vec<ValType>> = Vec::new();
+        let mut types: Vec<FuncType> = Vec::new();
+        let mut func_type_indices: Vec<usize> = Vec::new();
+        let mut imports: Vec<Import> = Vec::new();
+        let mut memory: Vec<MemoryType> = Vec::new();
+        let mut globals: Vec<Global> = Vec::new();
         let mut func_locals: Vec<Vec<(u32, ValType)>> = Vec::new();
-        let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
-        let mut globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)> = Vec::new();
-        let mut memory: Vec<wasmparser::MemoryType> = Vec::new();
+        let mut func_ops: Vec<Vec<Operator<'a>>> = Vec::new();
 
         for payload in parser.parse_all(wasm_bin) {
             match payload? {
+                Payload::TypeSection(reader) => {
+                    for ft in reader.into_iter_err_on_gc_types().flatten() {
+                        types.push(ft);
+                    }
+                }
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports().flatten() {
+                        imports.push(import);
+                    }
+                }
+                Payload::FunctionSection(reader) => {
+                    for func_type_idx in reader.into_iter().flatten() {
+                        func_type_indices.push(func_type_idx as usize);
+                    }
+                }
                 Payload::MemorySection(reader) => {
                     for mem in reader.into_iter_with_offsets().flatten() {
                         memory.push(mem.1);
@@ -647,18 +667,7 @@ impl Editor {
                 }
                 Payload::GlobalSection(reader) => {
                     for global in reader.into_iter_with_offsets().flatten() {
-                        globals.push((
-                            global.1.ty.content_type,
-                            global.1.ty.mutable,
-                            global.1.ty.shared,
-                            global.1.init_expr,
-                        ))
-                    }
-                }
-                Payload::TypeSection(reader) => {
-                    for ft in reader.into_iter_err_on_gc_types().flatten() {
-                        func_params.push(ft.params().to_vec());
-                        func_results.push(ft.results().to_vec());
+                        globals.push(global.1);
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
@@ -704,21 +713,19 @@ impl Editor {
                     bail!("not enough operators");
                 }
             }
-            if ops_iter.next().is_some() {
-                bail!("not enough instructions");
-            }
             let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
             functions.push(RawFunction {
+                type_idx: func_type_indices[func_idx],
                 locals,
-                params: func_params.get(func_idx).unwrap_or(&Vec::new()).clone(),
-                results: func_results.get(func_idx).unwrap_or(&Vec::new()).clone(),
                 operators: aligned_ops,
             });
         }
 
         Ok(RawModule {
-            globals,
+            types,
+            imports,
             memory,
+            globals,
             functions,
         })
     }
@@ -796,6 +803,27 @@ impl Editor {
         lines[line_num].set_highlight(true);
     }
 
+    fn setup_canvas(&self, canvas: &mut ElementHandle<HtmlCanvasElement>) {
+        canvas.set_attribute("class", "graph-canvas");
+        canvas.set_size_pixels(500, 500);
+        canvas.clear_canvas();
+    }
+
+    fn draw_point(&self, x: f64, y: f64, canvas: &ElementHandle<HtmlCanvasElement>) {
+        canvas.with_2d_context_and_size(|context, width, height| {
+            let w = width as f64 / 2.0;
+            let h = height as f64 / 2.0;
+
+            // map to pixel space. y is inverted because (0, 0) is top left corner of HTML canvas
+            let px = w + x * w;
+            let py = h - y * h;
+
+            context.begin_path();
+            let _ = context.arc(px, py, 3.0, 0.0, std::f64::consts::PI * 2.0);
+            context.fill();
+        });
+    }
+
     fn setup_slider(
         &self,
         editor: Weak<RefCell<_Editor>>,
@@ -851,8 +879,8 @@ impl Editor {
     fn initialize_globals(&self, validized: &ValidModule) {
         use wasmparser::Operator::*;
         let mut globals: Vec<WebAssemblyTypes> = Vec::with_capacity(validized.globals.len());
-        for (.., init_expr) in &validized.globals {
-            let mut init_reader = init_expr.get_operators_reader();
+        for global in &validized.globals {
+            let mut init_reader = global.init_expr.get_operators_reader();
             if let Ok(op) = init_reader.read() {
                 globals.push(match op {
                     I32Const { value } => WebAssemblyTypes::I32(value),
@@ -870,9 +898,10 @@ impl Editor {
     fn initialize_locals(&self, validized: &ValidModule) {
         let mut function_locals: Vec<Vec<WebAssemblyTypes>> =
             Vec::with_capacity(validized.functions.len());
-        for func in &validized.functions {
-            let mut locals: Vec<WebAssemblyTypes> = Vec::with_capacity(func.params.len());
-            for param in &func.params {
+        for (func_idx, func) in validized.functions.iter().enumerate() {
+            let mut locals: Vec<WebAssemblyTypes> =
+                Vec::with_capacity(validized.get_func_type(func_idx).params().len());
+            for param in validized.get_func_type(func_idx).params() {
                 locals.push(Self::valtype_default_editor(param));
             }
             for (count, local_type) in &func.locals {
@@ -894,6 +923,8 @@ impl Editor {
             if let Some((first_start, _first_end)) = inner.function_ranges.first().cloned() {
                 inner.saved_states[first_start] = Some(inner.program_state.clone());
             }
+            let canvas = &inner.component.get_mut().1.1.1.0;
+            canvas.clear_canvas();
         }
         with_changes(|changes| {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
@@ -932,6 +963,10 @@ impl Editor {
                     memory[idx_usize] = *val;
                 }
                 inner.saved_states[change.line_number as usize] = Some(inner.program_state.clone());
+                if let Some((x, y)) = &change.point {
+                    let canvas = &inner.component.get_mut().1.1.1.0;
+                    self.draw_point(*x, *y, canvas);
+                }
             }
         });
     }

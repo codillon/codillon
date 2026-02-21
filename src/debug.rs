@@ -63,6 +63,7 @@ pub struct Change {
     pub locals_change: Option<Vec<(usize, WebAssemblyTypes)>>,
     pub globals_change: Option<(u32, WebAssemblyTypes)>,
     pub memory_change: Option<(u32, WebAssemblyTypes)>,
+    pub point: Option<(f64, f64)>,
     pub num_pops: u32,
 }
 
@@ -74,6 +75,7 @@ struct DebugState {
     globals_change: Option<(u32, WebAssemblyTypes)>,
     memory_change: Option<(u32, WebAssemblyTypes)>,
     num_pops: u32,
+    point: Option<(f64, f64)>,
     // Chronological per-step changes
     changes: Vec<Change>,
 }
@@ -85,6 +87,7 @@ impl DebugState {
             locals_change: None,
             globals_change: None,
             memory_change: None,
+            point: None,
             num_pops: 0,
             changes: Vec::new(),
         }
@@ -120,6 +123,7 @@ pub fn make_imports() -> Result<Object, JsValue> {
                 locals_change: state.locals_change.clone(),
                 globals_change: state.globals_change,
                 memory_change: state.memory_change,
+                point: state.point,
                 num_pops: state.num_pops,
             };
             state.changes.push(cur_change);
@@ -127,6 +131,7 @@ pub fn make_imports() -> Result<Object, JsValue> {
             state.locals_change = None;
             state.globals_change = None;
             state.memory_change = None;
+            state.point = None;
             state.num_pops = 0;
             1
         })
@@ -194,7 +199,19 @@ pub fn make_imports() -> Result<Object, JsValue> {
         &JsValue::from_str("codillon_debug"),
         &debug_numbers,
     )?;
+    create_closure_helpers(&imports);
     Ok(imports)
+}
+
+fn create_closure_helpers(import_root: &Object) {
+    let draw_point = Closure::wrap(Box::new(move |x: f64, y: f64| {
+        STATE.with(|cur_state| {
+            cur_state.borrow_mut().point = Some((x, y));
+        });
+    }) as Box<dyn Fn(f64, f64)>);
+    let helpers = Object::new();
+    register_closure(&helpers, "draw_point", draw_point);
+    Reflect::set(import_root, &JsValue::from_str("helpers"), &helpers).ok();
 }
 
 fn create_closure_global_operations(debug_numbers: &Object) {

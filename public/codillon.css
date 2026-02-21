@@ -265,3 +265,11 @@ span.debug[data-debug]::after {
     cursor: pointer;
     box-shadow: none;
 }
+
+.graph-canvas {
+    background-color: #fff;
+    display: block; 
+    border: 1px solid darkred;
+    margin-left: auto;
+    margin-right: auto;
+}
