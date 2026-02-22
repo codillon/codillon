@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use wasm_encoder::{
     CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
     TypeSection, ValType as EncoderValType,
@@ -13,7 +13,7 @@ use wast::{
     parser::{self, ParseBuffer},
 };
 
-use crate::syntax::LineInfosMut;
+use crate::syntax::{LineInfos, LineInfosMut};
 use EncoderInstruction::*;
 use InstrumentationFuncs::*;
 
@@ -177,6 +177,107 @@ impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
 const DUMMY_OFFSET: usize = 1; // no need to track offsets, but validator has safety checks against 0
 
 impl<'a> RawModule<'a> {
+    pub fn new(
+        editor: &impl LineInfos,
+        wasm_bin: &'a [u8],
+        function_ranges: &[(usize, usize)],
+    ) -> Result<Self> {
+        use wasmparser::*;
+        let parser = Parser::new(0);
+        let mut functions: Vec<RawFunction> = Vec::new();
+        let mut types: Vec<FuncType> = Vec::new();
+        let mut func_type_indices: Vec<usize> = Vec::new();
+        let mut imports: Vec<Import> = Vec::new();
+        let mut memory: Vec<MemoryType> = Vec::new();
+        let mut globals: Vec<Global> = Vec::new();
+        let mut func_locals: Vec<Vec<(u32, ValType)>> = Vec::new();
+        let mut func_ops: Vec<Vec<Operator<'a>>> = Vec::new();
+
+        for payload in parser.parse_all(wasm_bin) {
+            match payload? {
+                Payload::TypeSection(reader) => {
+                    for ft in reader.into_iter_err_on_gc_types().flatten() {
+                        types.push(ft);
+                    }
+                }
+                Payload::ImportSection(reader) => {
+                    for import in reader.into_imports().flatten() {
+                        imports.push(import);
+                    }
+                }
+                Payload::FunctionSection(reader) => {
+                    for func_type_idx in reader.into_iter().flatten() {
+                        func_type_indices.push(func_type_idx as usize);
+                    }
+                }
+                Payload::MemorySection(reader) => {
+                    for mem in reader.into_iter_with_offsets().flatten() {
+                        memory.push(mem.1);
+                    }
+                }
+                Payload::GlobalSection(reader) => {
+                    for global in reader.into_iter_with_offsets().flatten() {
+                        globals.push(global.1);
+                    }
+                }
+                Payload::CodeSectionEntry(body) => {
+                    let mut locals: Vec<(u32, ValType)> = Vec::new();
+                    let local_reader = body.get_locals_reader()?;
+                    for local in local_reader {
+                        locals.push(local?);
+                    }
+                    func_locals.push(locals);
+                    let mut ops = Vec::new();
+                    for op in body.get_operators_reader()?.into_iter() {
+                        ops.push(op?);
+                    }
+                    //include the function's end opcode
+                    func_ops.push(ops);
+                }
+                _ => {}
+            }
+        }
+        for (func_idx, (func_start, func_end)) in function_ranges.iter().enumerate() {
+            //match each operator with its idx in the editor
+            let mut aligned_ops = Vec::new();
+            let mut ops_iter = func_ops[func_idx].clone().into_iter();
+            for line_idx in *func_start..=*func_end {
+                for _ in 0..editor.info(line_idx).num_ops() {
+                    let op = ops_iter.next().context("not enough operators")?;
+                    aligned_ops.push(Aligned { op, line_idx });
+                }
+            }
+            match ops_iter.next() {
+                Some(end @ wasmparser::Operator::End) => {
+                    aligned_ops.push(Aligned {
+                        op: end,
+                        line_idx: *func_end,
+                    });
+                }
+                Some(_) => {
+                    bail!("not enough instructions");
+                }
+                None => {
+                    bail!("not enough operators");
+                }
+            }
+            let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
+            functions.push(RawFunction {
+                type_idx: func_type_indices[func_idx],
+                locals,
+                operators: aligned_ops,
+            });
+        }
+
+        Ok(RawModule {
+            types,
+            imports,
+            memory,
+            globals,
+            functions,
+        })
+    }
+
     pub fn fix_validity(
         self,
         wasm_bin: &'a [u8],
@@ -1563,6 +1664,399 @@ pub(crate) mod tests {
             mem_exists = true;
         }
         assert!(mem_exists);
+        Ok(())
+    }
+
+    use crate::line::{Activity, LineInfo};
+    use crate::syntax::{SyntheticWasm, find_function_ranges, fix_syntax, parse_line};
+
+    #[derive(Default)]
+    struct FakeTextLine {
+        instr_text: String,
+        info: LineInfo,
+    }
+
+    #[derive(Default)]
+    struct FakeTextBuffer {
+        lines: Vec<FakeTextLine>,
+    }
+
+    impl FakeTextLine {
+        fn new(s: &str) -> Self {
+            Self {
+                instr_text: String::from(s),
+                info: LineInfo {
+                    kind: parse_line(&s),
+                    ..Default::default()
+                },
+            }
+        }
+    }
+
+    impl FakeTextBuffer {
+        fn push_line(&mut self, string: &str) {
+            self.lines.push(FakeTextLine::new(string))
+        }
+    }
+
+    impl LineInfos for FakeTextBuffer {
+        fn is_empty(&self) -> bool {
+            self.lines.is_empty()
+        }
+
+        fn len(&self) -> usize {
+            self.lines.len()
+        }
+
+        #[allow(refining_impl_trait)]
+        fn info(&self, index: usize) -> &LineInfo {
+            &self.lines[index].info
+        }
+    }
+
+    impl LineInfosMut for FakeTextBuffer {
+        fn set_active_status(&mut self, index: usize, new_val: Activity) {
+            self.lines[index].info.active = new_val
+        }
+
+        fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm) {
+            self.lines[index].info.synthetic_before = synth
+        }
+
+        fn push(&mut self) {
+            self.push_line("")
+        }
+
+        fn set_invalid(&mut self, index: usize, reason: Option<String>) {
+            self.lines[index].info.invalid = reason
+        }
+    }
+
+    fn test_editor_flow(editor: &mut FakeTextBuffer) -> Result<String> {
+        fix_syntax(editor);
+
+        let function_ranges = find_function_ranges(editor);
+
+        // build text of module
+        let mut well_formed_str = String::new();
+        for line in editor.lines.iter() {
+            for str_idx in 0..line.info.num_well_formed_strs() {
+                well_formed_str.push_str(line.info.well_formed_str(str_idx, &line.instr_text));
+                if str_idx + 1 != line.info.num_well_formed_strs() {
+                    well_formed_str.push(' ');
+                }
+            }
+            well_formed_str.push('\n');
+        }
+
+        let wasm_bin = str_to_binary(well_formed_str)?;
+
+        let raw_module = RawModule::new(editor, &wasm_bin, &function_ranges)?;
+        let validized = raw_module.fix_validity(&wasm_bin, editor)?;
+        let types = validized.to_types_table(&wasm_bin)?;
+        let runnable = validized.build_executable_binary(&types)?;
+        let wat = wasmprinter::print_bytes(&runnable)?;
+
+        Ok(wat)
+    }
+
+    const EXPECTED_FIELDS: &str = r#"  (type (;0;) (func (param i32)))
+  (type (;1;) (func (param i32) (result i32)))
+  (type (;2;) (func (param f32) (result f32)))
+  (type (;3;) (func (param i64) (result i64)))
+  (type (;4;) (func (param f64) (result f64)))
+  (type (;5;) (func (param i32 i32)))
+  (type (;6;) (func (param i32 i32) (result i32 i32)))
+  (type (;7;) (func (param i32 f32) (result i32 f32)))
+  (type (;8;) (func (param i32 i64) (result i32 i64)))
+  (type (;9;) (func (param i32 f64) (result i32 f64)))
+  (type (;10;) (func (param i32 f32)))
+  (type (;11;) (func (param i32 i64)))
+  (type (;12;) (func (param i32 f64)))
+  (type (;13;) (func))
+  (import "codillon_debug" "step" (func (;0;) (type 1)))
+  (import "codillon_debug" "pop_i" (func (;1;) (type 0)))
+  (import "codillon_debug" "set_local_i32" (func (;2;) (type 5)))
+  (import "codillon_debug" "set_local_f32" (func (;3;) (type 10)))
+  (import "codillon_debug" "set_local_i64" (func (;4;) (type 11)))
+  (import "codillon_debug" "set_local_f64" (func (;5;) (type 12)))
+  (import "codillon_debug" "set_global_i32" (func (;6;) (type 5)))
+  (import "codillon_debug" "set_global_f32" (func (;7;) (type 10)))
+  (import "codillon_debug" "set_global_i64" (func (;8;) (type 11)))
+  (import "codillon_debug" "set_global_f64" (func (;9;) (type 12)))
+  (import "codillon_debug" "set_memory_i32" (func (;10;) (type 6)))
+  (import "codillon_debug" "set_memory_f32" (func (;11;) (type 7)))
+  (import "codillon_debug" "set_memory_i64" (func (;12;) (type 8)))
+  (import "codillon_debug" "set_memory_f64" (func (;13;) (type 9)))
+  (import "codillon_debug" "push_i32" (func (;14;) (type 1)))
+  (import "codillon_debug" "push_f32" (func (;15;) (type 2)))
+  (import "codillon_debug" "push_i64" (func (;16;) (type 3)))
+  (import "codillon_debug" "push_f64" (func (;17;) (type 4)))
+  (export "main" (func 18))
+"#;
+
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_fixes() -> Result<()> {
+        // empty function
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func)");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    i32.const 0
+    call 1
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // syntax error (synthesizes closing paren)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    i32.const 0
+    call 1
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // syntax error (synthesizes closing "func)")
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    i32.const 0
+    call 1
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // syntax error (missing (func) field but has instructions)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("i64.const 17");
+            editor.push_line("drop");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    i64.const 17
+    call 16
+    i32.const 0
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 1
+    call 1
+    drop
+    i32.const 1
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 0
+    call 1
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // well-formed block
+        const JUST_BLOCK_END: &str = r#"    block ;; label = @1
+      i32.const 1
+      call 0
+      i32.eqz
+      if ;; label = @2
+        unreachable
+      end
+      i32.const 0
+      call 1
+    end
+    i32.const 0
+    call 1
+  )
+)
+"#;
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("block");
+            editor.push_line("end");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + "  (func (;18;) (type 13)\n"
+                + JUST_BLOCK_END;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // syntax error (missing `end`) -- should be same as the well-formed block
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("block");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + "  (func (;18;) (type 13)\n"
+                + JUST_BLOCK_END;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // validation error (missing operand)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("i32.const 137");
+            editor.push_line("i32.add");
+            editor.push_line("drop");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    i32.const 137
+    call 14
+    i32.const 1
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    unreachable
+    drop
+    i32.const 0
+    i32.const 0
+    i32.const 2
+    call 1
+    i32.add
+    call 14
+    i32.const 2
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 1
+    call 1
+    drop
+    i32.const 3
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 0
+    call 1
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // syntax error (func has inline import but also instructions -- will deactivate the instructions)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("(import \"hello\" \"goodbye\")");
+            editor.push_line("i32.const 7");
+            editor.push_line("i32.const 8");
+            editor.push_line("i32.const 9");
+            editor.push_line(")");
+            editor.push_line("(func)");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (import "hello" "goodbye" (func (;18;) (type 13)))
+  (export "main" (func 19))
+  (func (;19;) (type 13)
+    i32.const 0
+    call 1
+  )
+)
+"#;
+            let expected = expected.replace("  (export \"main\" (func 18))\n", "");
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // validation error (impossible branch -- will be disabled)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("br 144");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    nop
+    i32.const 1
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 0
+    call 1
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // validation error (bad memory reference -- will be disabled)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 0)");
+            editor.push_line("(func");
+            editor.push_line("i32.load 144");
+            editor.push_line("drop");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    nop
+    i32.const 2
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    unreachable
+    i32.const 0
+    drop
+    i32.const 3
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 0
+    call 1
+  )
+)
+"#;
+            let expected = expected.replace(
+                "  (export \"main\" (func 18))",
+                "  (memory (;0;) 0)\n  (export \"main\" (func 18))",
+            );
+
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
         Ok(())
     }
 }

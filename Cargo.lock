@@ -244,6 +244,7 @@ dependencies = [
  "delegate",
  "getrandom 0.3.4",
  "js-sys",
+ "pretty_assertions",
  "str_indices",
  "wasm-bindgen",
  "wasm-bindgen-futures",
