@@ -134,28 +134,30 @@ pub struct Aligned<T> {
 }
 
 pub struct RawFunction<'a> {
-    pub params: Vec<ValType>,
-    pub results: Vec<ValType>,
+    pub type_idx: usize,
     pub locals: Vec<(u32, ValType)>,
     pub operators: Vec<Aligned<Operator<'a>>>,
 }
 
 pub struct ValidFunction<'a> {
-    pub params: Vec<ValType>,
-    pub results: Vec<ValType>,
+    pub type_idx: usize,
     pub locals: Vec<(u32, ValType)>,
     pub operators: Vec<Aligned<GeneralOperator<'a>>>,
 }
 
 pub struct RawModule<'a> {
+    pub types: Vec<wasmparser::FuncType>,
+    pub imports: Vec<wasmparser::Import<'a>>,
     pub memory: Vec<wasmparser::MemoryType>,
-    pub globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)>,
+    pub globals: Vec<wasmparser::Global<'a>>,
     pub functions: Vec<RawFunction<'a>>,
 }
 
 pub struct ValidModule<'a> {
+    pub types: Vec<wasmparser::FuncType>,
+    pub imports: Vec<wasmparser::Import<'a>>,
     pub memory: Vec<wasmparser::MemoryType>,
-    pub globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)>,
+    pub globals: Vec<wasmparser::Global<'a>>,
     pub functions: Vec<ValidFunction<'a>>,
 }
 
@@ -185,6 +187,8 @@ impl<'a> RawModule<'a> {
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
 
         let mut ret = ValidModule {
+            types: self.types,
+            imports: self.imports,
             memory: self.memory,
             globals: self.globals,
             functions: Vec::with_capacity(self.functions.len()),
@@ -195,8 +199,7 @@ impl<'a> RawModule<'a> {
         for payload in parser.parse_all(wasm_bin) {
             if let ValidPayload::Func(func, body) = validator.payload(&payload?)? {
                 let RawFunction {
-                    params,
-                    results,
+                    type_idx,
                     locals,
                     operators,
                 } = raw_functions.next().expect("one function");
@@ -211,8 +214,7 @@ impl<'a> RawModule<'a> {
                 }
 
                 let mut valid_function = ValidFunction {
-                    params,
-                    results,
+                    type_idx,
                     locals,
                     operators: Vec::with_capacity(operators.len()),
                 };
@@ -595,14 +597,14 @@ impl<'a> ValidModule<'a> {
                 .ty()
                 .function(params_slice.to_vec(), results_slice.to_vec());
         }
-        for func in &self.functions {
+        for ty in &self.types {
             types.ty().function(
-                func.params
+                ty.params()
                     .iter()
                     .map(parser_to_encoder)
                     .collect::<Vec<_>>()
                     .clone(),
-                func.results
+                ty.results()
                     .iter()
                     .map(parser_to_encoder)
                     .collect::<Vec<_>>()
@@ -612,24 +614,73 @@ impl<'a> ValidModule<'a> {
         types
     }
 
-    fn instr_imports(&self) -> wasm_encoder::ImportSection {
+    fn instr_imports(&self) -> (wasm_encoder::ImportSection, u32) {
+        use wasm_encoder::EntityType;
+        use wasmparser::*;
+        use web_sys::console::log_1;
         // Encode the instrumentation functions as imports.
         let mut imports = wasm_encoder::ImportSection::new();
         for (name, type_idx) in InstrImports::TYPE_INDICES.iter() {
-            imports.import(
-                "codillon_debug",
-                name,
-                wasm_encoder::EntityType::Function(*type_idx),
-            );
+            imports.import("codillon_debug", name, EntityType::Function(*type_idx));
         }
-        imports
+        let mut num_imports = InstrImports::TYPE_INDICES.len() as u32;
+        for Import { name, module, ty } in &self.imports {
+            match *ty {
+                TypeRef::Func(type_idx) | TypeRef::FuncExact(type_idx) => {
+                    imports.import(
+                        module,
+                        name,
+                        EntityType::Function(type_idx + InstrImports::FUNC_SIGS.len() as u32),
+                    );
+                    num_imports += 1;
+                }
+                TypeRef::Memory(MemoryType {
+                    initial,
+                    memory64,
+                    shared,
+                    maximum,
+                    page_size_log2,
+                }) => {
+                    imports.import(
+                        module,
+                        name,
+                        EntityType::Memory(wasm_encoder::MemoryType {
+                            minimum: initial,
+                            maximum,
+                            memory64,
+                            shared,
+                            page_size_log2,
+                        }),
+                    );
+                }
+                TypeRef::Global(GlobalType {
+                    content_type,
+                    mutable,
+                    shared,
+                }) => {
+                    imports.import(
+                        module,
+                        name,
+                        EntityType::Global(wasm_encoder::GlobalType {
+                            val_type: parser_to_encoder(&content_type),
+                            shared,
+                            mutable,
+                        }),
+                    );
+                }
+                _ => {
+                    log_1(&format!("unsupported import {name} from module {module}").into());
+                }
+            };
+        }
+        (imports, num_imports)
     }
 
     fn build_globals(&self) -> wasm_encoder::GlobalSection {
         use wasm_encoder::ConstExpr;
         use wasmparser::Operator::*;
         let mut globals = GlobalSection::new();
-        for (global_type, mutable, shared, init_expr) in &self.globals {
+        for wasmparser::Global { ty, init_expr } in &self.globals {
             let mut init_reader = init_expr.get_operators_reader();
             if let Ok(op) = init_reader.read() {
                 let initial_expression = match op {
@@ -642,9 +693,9 @@ impl<'a> ValidModule<'a> {
                 };
                 globals.global(
                     wasm_encoder::GlobalType {
-                        val_type: parser_to_encoder(global_type),
-                        mutable: *mutable,
-                        shared: *shared,
+                        val_type: parser_to_encoder(&ty.content_type),
+                        mutable: ty.mutable,
+                        shared: ty.shared,
                     },
                     &initial_expression,
                 );
@@ -677,13 +728,14 @@ impl<'a> ValidModule<'a> {
     pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
         module.section(&self.instr_func_types());
-        module.section(&self.instr_imports());
+        let (imports, num_imports) = self.instr_imports();
+        module.section(&imports);
 
         // Encode the function section.
         let mut functions = FunctionSection::new();
         let func_type_offset = InstrImports::FUNC_SIGS.len();
-        for i in 0..self.functions.len() {
-            functions.function((func_type_offset + i) as u32);
+        for func in &self.functions {
+            functions.function((func.type_idx + func_type_offset) as u32);
         }
         module.section(&functions);
         module.section(&self.build_memory());
@@ -691,8 +743,7 @@ impl<'a> ValidModule<'a> {
 
         // Encode the export section.
         let mut exports = ExportSection::new();
-        let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
-        exports.export("main", wasm_encoder::ExportKind::Func, num_instr_imports);
+        exports.export("main", wasm_encoder::ExportKind::Func, num_imports);
         module.section(&exports);
 
         // Encode the code section.
@@ -749,7 +800,6 @@ impl<'a> ValidModule<'a> {
             } else {
                 // Instrumentation that needs to occur before execution
                 Self::instrument_memory_ops(&mut f, &operation_type);
-                Self::instrument_global_ops(&mut f, &operation_type);
                 f.instruction(&instruction);
                 // Instrumentation that needs to occur after execution
                 Self::instrument_local_ops(&mut f, &operation_type);
@@ -777,7 +827,7 @@ impl<'a> ValidModule<'a> {
     }
 
     fn record_params(&self, func_idx: usize, f: &mut wasm_encoder::Function) {
-        for (param_idx, param) in self.functions[func_idx].params.iter().enumerate() {
+        for (param_idx, param) in self.get_func_type(func_idx).params().iter().enumerate() {
             f.instruction(&I32Const(param_idx as i32));
             f.instruction(&LocalGet(param_idx as u32));
             match param {
@@ -819,25 +869,25 @@ impl<'a> ValidModule<'a> {
         }
     }
     fn instrument_local_ops(f: &mut wasm_encoder::Function, operation_type: &InstrumentationFuncs) {
-        match operation_type {
+        match *operation_type {
             SetLocalI32(local_index) => {
-                f.instruction(&I32Const(*local_index as i32));
-                f.instruction(&LocalGet(*local_index));
+                f.instruction(&I32Const(local_index as i32));
+                f.instruction(&LocalGet(local_index));
                 f.instruction(&Call(InstrImports::SetLocalI32 as u32));
             }
             SetLocalF32(local_index) => {
-                f.instruction(&I32Const(*local_index as i32));
-                f.instruction(&LocalGet(*local_index));
+                f.instruction(&I32Const(local_index as i32));
+                f.instruction(&LocalGet(local_index));
                 f.instruction(&Call(InstrImports::SetLocalF32 as u32));
             }
             SetLocalI64(local_index) => {
-                f.instruction(&I32Const(*local_index as i32));
-                f.instruction(&LocalGet(*local_index));
+                f.instruction(&I32Const(local_index as i32));
+                f.instruction(&LocalGet(local_index));
                 f.instruction(&Call(InstrImports::SetLocalI64 as u32));
             }
             SetLocalF64(local_index) => {
-                f.instruction(&I32Const(*local_index as i32));
-                f.instruction(&LocalGet(*local_index));
+                f.instruction(&I32Const(local_index as i32));
+                f.instruction(&LocalGet(local_index));
                 f.instruction(&Call(InstrImports::SetLocalF64 as u32));
             }
             _ => {}
@@ -847,25 +897,25 @@ impl<'a> ValidModule<'a> {
         f: &mut wasm_encoder::Function,
         operation_type: &InstrumentationFuncs,
     ) {
-        match operation_type {
+        match *operation_type {
             SetGlobalI32(global_index) => {
-                f.instruction(&I32Const(*global_index as i32));
-                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&I32Const(global_index as i32));
+                f.instruction(&GlobalGet(global_index));
                 f.instruction(&Call(InstrImports::SetGlobalI32 as u32));
             }
             SetGlobalF32(global_index) => {
-                f.instruction(&I32Const(*global_index as i32));
-                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&I32Const(global_index as i32));
+                f.instruction(&GlobalGet(global_index));
                 f.instruction(&Call(InstrImports::SetGlobalF32 as u32));
             }
             SetGlobalI64(global_index) => {
-                f.instruction(&I32Const(*global_index as i32));
-                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&I32Const(global_index as i32));
+                f.instruction(&GlobalGet(global_index));
                 f.instruction(&Call(InstrImports::SetGlobalI64 as u32));
             }
             SetGlobalF64(global_index) => {
-                f.instruction(&I32Const(*global_index as i32));
-                f.instruction(&GlobalGet(*global_index));
+                f.instruction(&I32Const(global_index as i32));
+                f.instruction(&GlobalGet(global_index));
                 f.instruction(&Call(InstrImports::SetGlobalF64 as u32));
             }
             _ => {}
@@ -887,6 +937,10 @@ impl<'a> ValidModule<'a> {
             }
             _ => {}
         }
+    }
+
+    pub fn get_func_type(&self, func_idx: usize) -> &wasmparser::FuncType {
+        &self.types[self.functions[func_idx].type_idx]
     }
 }
 
@@ -1021,6 +1075,8 @@ pub(crate) mod tests {
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
             let mut ret = ValidModule {
+                types: vec![],
+                imports: vec![],
                 memory: vec![],
                 globals: vec![],
                 functions: vec![],
@@ -1028,8 +1084,7 @@ pub(crate) mod tests {
 
             for func in raw.functions {
                 let mut valid = ValidFunction {
-                    params: Vec::new(),
-                    results: Vec::new(),
+                    type_idx: 0,
                     locals: func.locals,
                     operators: vec![],
                 };
@@ -1094,11 +1149,12 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            types: vec![],
+            imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
-                params: vec![],
-                results: vec![],
+                type_idx: 0,
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
@@ -1173,11 +1229,12 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            types: vec![],
+            imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
-                params: vec![],
-                results: vec![],
+                type_idx: 0,
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
@@ -1272,11 +1329,12 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            types: vec![],
+            imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
-                params: vec![],
-                results: vec![],
+                type_idx: 0,
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
@@ -1373,11 +1431,12 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            types: vec![],
+            imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
-                params: vec![],
-                results: vec![],
+                type_idx: 0,
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
@@ -1442,11 +1501,12 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
+            types: vec![],
+            imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
-                params: vec![],
-                results: vec![],
+                type_idx: 0,
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
@@ -1484,6 +1544,8 @@ pub(crate) mod tests {
             page_size_log2: Some(0),
         };
         let valid_module = ValidModule {
+            types: vec![],
+            imports: vec![],
             memory: vec![test_mem],
             globals: vec![],
             functions: vec![],

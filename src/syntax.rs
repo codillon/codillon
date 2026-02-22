@@ -661,22 +661,26 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 }
 
 pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
+    use SyntaxState::*;
     let mut ranges = Vec::new();
-    let mut state = SyntaxState::Initial;
+    let mut state = Initial;
     let mut current_start: Option<usize> = None;
 
     for line_no in 0..code.len() {
         let mut prev_state = state;
         let on_transition = |new_state: &SyntaxState| {
             match (prev_state, new_state) {
-                (SyntaxState::AfterFuncHeader(_), SyntaxState::AfterInstruction) => {
-                    current_start = Some(line_no)
-                }
+                (_, AfterFuncHeader(_)) => current_start = Some(line_no),
 
                 (
-                    SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction,
-                    SyntaxState::Initial,
-                ) => ranges.push((current_start.take().unwrap_or(line_no), line_no)),
+                    AfterInstruction
+                    | AfterFuncHeader(FuncHeader {
+                        is_import: false, ..
+                    }),
+                    Initial,
+                ) => ranges.push((current_start.unwrap(), line_no)),
+
+                (_, Initial) => current_start = None,
 
                 _ => (),
             }
