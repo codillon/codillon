@@ -98,6 +98,27 @@ impl LineInfo {
 
         (initial, rest)
     }
+
+    // Number of opcodes (synthetic and user-entered) in the line
+    pub fn num_ops(&self) -> usize {
+        self.synthetic_before.num_ops() + self.is_instr() as usize
+    }
+
+    // Number of well-formed strings (synthetic and user-entered) in the line
+    pub fn num_well_formed_strs(&self) -> usize {
+        self.synthetic_before.num_strs() + self.is_well_formed() as usize
+    }
+
+    // Return well-formed (non-comment) Wasm string #n (both instructions and module-scope syntax)
+    pub fn well_formed_str<'a>(&'a self, idx: usize, instr_text: &'a str) -> &'a str {
+        if idx < self.synthetic_before.num_strs() {
+            self.synthetic_before.str(idx)
+        } else if self.is_well_formed() && idx == self.synthetic_before.num_strs() {
+            instr_text
+        } else {
+            panic!("index out of range");
+        }
+    }
 }
 
 enum AnimationState {
@@ -184,24 +205,8 @@ impl CodeLine {
         &mut self.contents.get_mut().1.0.get_mut().0
     }
 
-    pub fn num_well_formed_strs(&self) -> usize {
-        self.info.synthetic_before.num_strs() + self.info.is_well_formed() as usize
-    }
-
-    // Return well-formed (non-comment) Wasm string #n (both instructions and module-scope syntax)
     pub fn well_formed_str(&self, idx: usize) -> &str {
-        if idx < self.info.synthetic_before.num_strs() {
-            self.info.synthetic_before.str(idx)
-        } else if self.info.is_well_formed() && idx == self.info.synthetic_before.num_strs() {
-            self.instr().get()
-        } else {
-            panic!("index out of range");
-        }
-    }
-
-    // Number of opcodes (synthetic and user-entered) in the line
-    pub fn num_ops(&self) -> usize {
-        self.info.synthetic_before.num_ops() + self.info.is_instr() as usize
+        self.info.well_formed_str(idx, self.instr().get())
     }
 
     pub fn end_position(&self) -> Position {

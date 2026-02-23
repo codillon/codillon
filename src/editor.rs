@@ -15,7 +15,7 @@ use crate::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         find_frames, find_function_ranges, fix_syntax,
     },
-    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, ValidModule, str_to_binary},
+    utils::{CodillonType, FmtError, RawModule, ValidModule, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -716,7 +716,7 @@ impl Editor {
                 .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
         )?;
 
-        let raw_module = self.to_raw_module(&wasm_bin)?;
+        let raw_module = RawModule::new(self, &wasm_bin, &self.0.borrow().function_ranges)?;
         let validized = raw_module.fix_validity(&wasm_bin, self)?;
         let types = validized.to_types_table(&wasm_bin)?;
 
@@ -783,106 +783,6 @@ impl Editor {
         self.audit();
 
         Ok(())
-    }
-
-    /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8]) -> Result<RawModule<'a>> {
-        use wasmparser::*;
-        let parser = Parser::new(0);
-        let mut functions: Vec<RawFunction> = Vec::new();
-        let mut types: Vec<FuncType> = Vec::new();
-        let mut func_type_indices: Vec<usize> = Vec::new();
-        let mut imports: Vec<Import> = Vec::new();
-        let mut memory: Vec<MemoryType> = Vec::new();
-        let mut globals: Vec<Global> = Vec::new();
-        let mut func_locals: Vec<Vec<(u32, ValType)>> = Vec::new();
-        let mut func_ops: Vec<Vec<Operator<'a>>> = Vec::new();
-
-        for payload in parser.parse_all(wasm_bin) {
-            match payload? {
-                Payload::TypeSection(reader) => {
-                    for ft in reader.into_iter_err_on_gc_types().flatten() {
-                        types.push(ft);
-                    }
-                }
-                Payload::ImportSection(reader) => {
-                    for import in reader.into_imports().flatten() {
-                        imports.push(import);
-                    }
-                }
-                Payload::FunctionSection(reader) => {
-                    for func_type_idx in reader.into_iter().flatten() {
-                        func_type_indices.push(func_type_idx as usize);
-                    }
-                }
-                Payload::MemorySection(reader) => {
-                    for mem in reader.into_iter_with_offsets().flatten() {
-                        memory.push(mem.1);
-                    }
-                }
-                Payload::GlobalSection(reader) => {
-                    for global in reader.into_iter_with_offsets().flatten() {
-                        globals.push(global.1);
-                    }
-                }
-                Payload::CodeSectionEntry(body) => {
-                    let mut locals: Vec<(u32, ValType)> = Vec::new();
-                    let local_reader = body.get_locals_reader()?;
-                    for local in local_reader {
-                        let entry = local?;
-                        locals.push((entry.0, entry.1));
-                    }
-                    func_locals.push(locals);
-                    let mut ops = Vec::new();
-                    for op in body.get_operators_reader()?.into_iter() {
-                        ops.push(op?);
-                    }
-                    //include the function's end opcode
-                    func_ops.push(ops);
-                }
-                _ => {}
-            }
-        }
-        for (func_idx, (func_start, func_end)) in self.0.borrow().function_ranges.iter().enumerate()
-        {
-            //match each operator with its idx in the editor
-            let mut aligned_ops = Vec::new();
-            let mut ops_iter = func_ops[func_idx].clone().into_iter();
-            for line_idx in *func_start..=*func_end {
-                for _ in 0..self.line(line_idx).num_ops() {
-                    let op = ops_iter.next().context("not enough operators")?;
-                    aligned_ops.push(Aligned { op, line_idx });
-                }
-            }
-            match ops_iter.next() {
-                Some(end @ wasmparser::Operator::End) => {
-                    aligned_ops.push(Aligned {
-                        op: end,
-                        line_idx: *func_end,
-                    });
-                }
-                Some(_) => {
-                    bail!("not enough instructions");
-                }
-                None => {
-                    bail!("not enough operators");
-                }
-            }
-            let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
-            functions.push(RawFunction {
-                type_idx: func_type_indices[func_idx],
-                locals,
-                operators: aligned_ops,
-            });
-        }
-
-        Ok(RawModule {
-            types,
-            imports,
-            memory,
-            globals,
-            functions,
-        })
     }
 
     fn execute(&self, binary: &[u8]) {
@@ -1275,7 +1175,7 @@ impl<'a> Iterator for InstructionTextIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.line_idx < self.editor.len()
-            && self.active_str_idx >= self.editor[self.line_idx].num_well_formed_strs()
+            && self.active_str_idx >= self.editor[self.line_idx].info().num_well_formed_strs()
         {
             self.line_idx += 1;
             self.active_str_idx = 0;
