@@ -1686,7 +1686,7 @@ pub(crate) mod tests {
             Self {
                 instr_text: String::from(s),
                 info: LineInfo {
-                    kind: parse_line(&s),
+                    kind: parse_line(s),
                     ..Default::default()
                 },
             }
