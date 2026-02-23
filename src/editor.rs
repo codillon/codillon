@@ -15,7 +15,10 @@ use crate::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         find_frames, find_function_ranges, fix_syntax,
     },
-    utils::{CodillonType, FmtError, RawModule, ValidModule, str_to_binary},
+    utils::{
+        CodillonType, FmtError, RawModule, ValidModule, content_to_lines, lines_to_content,
+        str_to_binary,
+    },
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -280,7 +283,7 @@ impl Editor {
         for i in 0..len {
             lines.push(text[i].suffix(Position::begin()).unwrap_or_default());
         }
-        lines.join("\n")
+        lines_to_content(&lines)
     }
 
     fn load_content(&mut self, content: &str) {
@@ -293,11 +296,8 @@ impl Editor {
             inner.undo_stack.clear();
             inner.redo_stack.clear();
         }
-        for line_str in content.lines() {
+        for line_str in content_to_lines(content) {
             self.push_line(line_str);
-        }
-        if self.text().is_empty() {
-            self.push_line("");
         }
         let _ = self.on_change();
         let height = LINE_SPACING * self.text().len();
