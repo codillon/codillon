@@ -1115,17 +1115,17 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
 /// Used by import to split file contents into editor lines.
 pub fn content_to_lines(content: &str) -> Vec<&str> {
     let lines: Vec<&str> = content.lines().collect();
-    if lines.is_empty() {
-        vec![""]
-    } else {
-        lines
-    }
+    if lines.is_empty() { vec![""] } else { lines }
 }
 
 /// Join editor lines into a single content string.
 /// Used by export to serialize editor contents to a file.
 pub fn lines_to_content<S: AsRef<str>>(lines: &[S]) -> String {
-    lines.iter().map(|s| s.as_ref()).collect::<Vec<_>>().join("\n")
+    lines
+        .iter()
+        .map(|s| s.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -2098,7 +2098,10 @@ pub(crate) mod tests {
     #[test]
     fn test_content_to_lines() {
         // Normal multi-line content
-        assert_eq!(content_to_lines("(func\ndrop\n)"), vec!["(func", "drop", ")"]);
+        assert_eq!(
+            content_to_lines("(func\ndrop\n)"),
+            vec!["(func", "drop", ")"]
+        );
 
         // Single line without trailing newline
         assert_eq!(content_to_lines("(func)"), vec!["(func)"]);

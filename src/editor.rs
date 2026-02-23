@@ -136,10 +136,8 @@ impl Editor {
         let mut toolbar_div = factory.div();
         toolbar_div.set_attribute("class", "toolbar");
 
-        let toolbar: Toolbar = DomStruct::new(
-            (export_btn, (import_btn, (file_input, ()))),
-            toolbar_div,
-        );
+        let toolbar: Toolbar =
+            DomStruct::new((export_btn, (import_btn, (file_input, ()))), toolbar_div);
 
         let inner = _Editor {
             component: DomStruct::new(
@@ -208,7 +206,7 @@ impl Editor {
             let export_btn = &mut toolbar.0;
             let import_btn = &mut toolbar.1.0;
             let file_input = &mut toolbar.1.1.0;
-            
+
             // Export button
             {
                 let editor_ref = Rc::clone(&editor_ref);
@@ -301,7 +299,8 @@ impl Editor {
         }
         let _ = self.on_change();
         let height = LINE_SPACING * self.text().len();
-        self.image_mut().set_attribute("height", &height.to_string());
+        self.image_mut()
+            .set_attribute("height", &height.to_string());
     }
 
     fn export_wat(&self) {
@@ -310,8 +309,8 @@ impl Editor {
         arr.push(&JsValue::from_str(&content));
         let opts = web_sys::BlobPropertyBag::new();
         opts.set_type("text/plain");
-        let blob = web_sys::Blob::new_with_str_sequence_and_options(&arr, &opts)
-            .expect("Blob::new");
+        let blob =
+            web_sys::Blob::new_with_str_sequence_and_options(&arr, &opts).expect("Blob::new");
         let url = web_sys::Url::create_object_url_with_blob(&blob).expect("createObjectURL");
 
         let window = web_sys::window().expect("window");
