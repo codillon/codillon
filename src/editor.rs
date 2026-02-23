@@ -28,12 +28,25 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
+type Toolbar = DomStruct<
+    (
+        ElementHandle<HtmlInputElement>,
+        (
+            ElementHandle<HtmlInputElement>,
+            (ElementHandle<HtmlInputElement>, ()),
+        ),
+    ),
+    HtmlDivElement,
+>;
 type ComponentType = DomStruct<
     (
-        DomImage,
+        Toolbar,
         (
-            ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, ()),
+            DomImage,
+            (
+                ReactiveComponent<TextType>,
+                (ElementHandle<HtmlInputElement>, ()),
+            ),
         ),
     ),
     HtmlDivElement,
@@ -101,13 +114,40 @@ impl Clone for Editor {
 
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
+        // Build toolbar elements
+        let mut export_btn = factory.input();
+        export_btn.set_attribute("type", "button");
+        export_btn.set_attribute("value", "Export .wat");
+        export_btn.set_attribute("class", "toolbar-button");
+
+        let mut import_btn = factory.input();
+        import_btn.set_attribute("type", "button");
+        import_btn.set_attribute("value", "Import .wat");
+        import_btn.set_attribute("class", "toolbar-button");
+
+        let mut file_input = factory.input();
+        file_input.set_attribute("type", "file");
+        file_input.set_attribute("accept", ".wat,.wast,.txt");
+        file_input.set_attribute("style", "display:none");
+
+        let mut toolbar_div = factory.div();
+        toolbar_div.set_attribute("class", "toolbar");
+
+        let toolbar: Toolbar = DomStruct::new(
+            (export_btn, (import_btn, (file_input, ()))),
+            toolbar_div,
+        );
+
         let inner = _Editor {
             component: DomStruct::new(
                 (
-                    DomImage::new(factory.clone()),
+                    toolbar,
                     (
-                        ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), ()),
+                        DomImage::new(factory.clone()),
+                        (
+                            ReactiveComponent::new(DomVec::new(factory.div())),
+                            ((factory.input()), ()),
+                        ),
                     ),
                 ),
                 factory.div(),
@@ -150,19 +190,68 @@ impl Editor {
         }
         {
             let mut binding = ret.0.borrow_mut();
-            let slider = &mut binding.component.get_mut().1.1.0;
+            let slider = &mut binding.component.get_mut().1.1.1.0;
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
         ret.image_mut().set_attribute("class", "annotations");
 
-        ret.push_line("(func");
-        ret.push_line("i32.const 5");
-        ret.push_line("i32.const 6");
-        ret.push_line("i32.add");
-        ret.push_line("drop");
-        ret.push_line(")");
+        // Wire toolbar handlers
+        {
+            let editor_ref = Rc::clone(&ret.0);
+            let mut binding = ret.0.borrow_mut();
+            let component = binding.component.get_mut();
+            let toolbar = component.0.get_mut();
 
-        ret.on_change().expect("well-formed initial contents");
+            let export_btn = &mut toolbar.0;
+            let import_btn = &mut toolbar.1.0;
+            let file_input = &mut toolbar.1.1.0;
+            
+            // Export button
+            {
+                let editor_ref = Rc::clone(&editor_ref);
+                export_btn.set_onclick(move |_| {
+                    Editor(editor_ref.clone()).export_wat();
+                });
+            }
+            // Import button
+            {
+                let editor_ref = Rc::clone(&editor_ref);
+                import_btn.set_onclick(move |_| {
+                    let binding = editor_ref.borrow();
+                    binding.component.get().0.get().1.1.0.click();
+                });
+            }
+            // Import - handle file change
+            {
+                let editor_ref = Rc::clone(&editor_ref);
+                file_input.set_onchange(move |event: web_sys::Event| {
+                    handle_file_import(Rc::clone(&editor_ref), event);
+                });
+            }
+        }
+
+        // Restore from localStorage, or use default content
+        let mut restored_ok = false;
+        if let Some(content) = restore_from_local_storage()
+            && !content.is_empty()
+        {
+            for line_str in content.lines() {
+                ret.push_line(line_str);
+            }
+            if ret.on_change().is_ok() {
+                restored_ok = true;
+            } else {
+                // Clear malformed restored content and fall back to default
+                let len = ret.text().len();
+                if len > 0 {
+                    ret.text_mut().remove_range(0, len);
+                }
+            }
+        }
+        if !restored_ok {
+            ret.push_default_lines();
+            ret.on_change().expect("well-formed initial contents");
+        }
 
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
@@ -173,6 +262,78 @@ impl Editor {
     fn push_line(&mut self, string: &str) {
         let newline = CodeLine::new(string, &self.0.borrow().factory);
         self.text_mut().push(newline);
+    }
+
+    fn push_default_lines(&mut self) {
+        self.push_line("(func");
+        self.push_line("i32.const 5");
+        self.push_line("i32.const 6");
+        self.push_line("i32.add");
+        self.push_line("drop");
+        self.push_line(")");
+    }
+
+    fn get_content(&self) -> String {
+        let text = self.text();
+        let len = text.len();
+        let mut lines = Vec::with_capacity(len);
+        for i in 0..len {
+            lines.push(text[i].suffix(Position::begin()).unwrap_or_default());
+        }
+        lines.join("\n")
+    }
+
+    fn load_content(&mut self, content: &str) {
+        let len = self.text().len();
+        if len > 0 {
+            self.text_mut().remove_range(0, len);
+        }
+        {
+            let mut inner = self.0.borrow_mut();
+            inner.undo_stack.clear();
+            inner.redo_stack.clear();
+        }
+        for line_str in content.lines() {
+            self.push_line(line_str);
+        }
+        if self.text().is_empty() {
+            self.push_line("");
+        }
+        let _ = self.on_change();
+        let height = LINE_SPACING * self.text().len();
+        self.image_mut().set_attribute("height", &height.to_string());
+    }
+
+    fn export_wat(&self) {
+        let content = self.get_content();
+        let arr = js_sys::Array::new();
+        arr.push(&JsValue::from_str(&content));
+        let opts = web_sys::BlobPropertyBag::new();
+        opts.set_type("text/plain");
+        let blob = web_sys::Blob::new_with_str_sequence_and_options(&arr, &opts)
+            .expect("Blob::new");
+        let url = web_sys::Url::create_object_url_with_blob(&blob).expect("createObjectURL");
+
+        let window = web_sys::window().expect("window");
+        let document = window.document().expect("document");
+        let a: web_sys::HtmlAnchorElement = document
+            .create_element("a")
+            .expect("create_element")
+            .unchecked_into();
+        a.set_href(&url);
+        a.set_download("program.wat");
+        let body = document.body().expect("body");
+        body.append_child(&a).expect("append_child");
+        a.click();
+        body.remove_child(&a).expect("remove_child");
+        web_sys::Url::revoke_object_url(&url).expect("revokeObjectURL");
+    }
+
+    fn save_to_local_storage(&self) {
+        let content = self.get_content();
+        let _ = web_sys::window()
+            .and_then(|w| w.local_storage().ok().flatten())
+            .map(|storage| storage.set_item("codillon_content", &content));
     }
 
     fn get_lines_and_positions(
@@ -504,15 +665,15 @@ impl Editor {
 
     // Accessors for the component and for a particular line of code
     fn textbox(&self) -> Ref<'_, ReactiveComponent<TextType>> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().1.0)
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
     }
 
     fn textbox_mut(&self) -> RefMut<'_, ReactiveComponent<TextType>> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
     }
 
     fn image_mut(&self) -> RefMut<'_, DomImage> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().0)
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
     }
 
     fn text(&self) -> Ref<'_, TextType> {
@@ -615,6 +776,8 @@ impl Editor {
         self.initialize_globals(&validized);
         self.initialize_locals(&validized);
         self.execute(&validized.build_executable_binary(&types)?);
+
+        self.save_to_local_storage();
 
         #[cfg(debug_assertions)]
         self.audit();
@@ -752,6 +915,7 @@ impl Editor {
                     .get_mut()
                     .1
                     .1
+                    .1
                     .0
                     .set_attribute("max", &(last_step() + 1).to_string());
                 let step = inner.program_state.step_number;
@@ -770,7 +934,7 @@ impl Editor {
         let line_num = inner.program_state.line_number as usize;
         let saved_states = inner.saved_states.clone();
         let mut textentry: RefMut<ReactiveComponent<TextType>> =
-            RefMut::map(inner, |comp| &mut comp.component.get_mut().1.0);
+            RefMut::map(inner, |comp| &mut comp.component.get_mut().1.1.0);
         let lines: &mut TextType = textentry.inner_mut();
         if let Some(message) = error {
             lines[0].set_debug_annotation(Some(&message));
@@ -887,7 +1051,7 @@ impl Editor {
 
     fn build_program_state(&self, start: usize, stop: usize) {
         let mut inner = self.0.borrow_mut();
-        let line_count = inner.component.get().1.0.inner().len();
+        let line_count = inner.component.get().1.1.0.inner().len();
         inner.saved_states.resize_with(line_count, || None);
         if start == 0 {
             inner.program_state.globals_state = inner.globals.clone();
@@ -1049,6 +1213,55 @@ impl Editor {
         }
         Ok(())
     }
+}
+
+fn restore_from_local_storage() -> Option<String> {
+    web_sys::window()?
+        .local_storage()
+        .ok()
+        .flatten()?
+        .get_item("codillon_content")
+        .ok()
+        .flatten()
+}
+
+fn handle_file_import(editor_ref: Rc<RefCell<_Editor>>, event: web_sys::Event) {
+    let target = match event.target() {
+        Some(t) => t,
+        None => return,
+    };
+    let input: web_sys::HtmlInputElement = match target.dyn_into() {
+        Ok(i) => i,
+        Err(_) => return,
+    };
+    let files = match input.files() {
+        Some(f) => f,
+        None => return,
+    };
+    let file = match files.get(0) {
+        Some(f) => f,
+        None => return,
+    };
+    let reader = match web_sys::FileReader::new() {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    let _ = reader.read_as_text(&file);
+
+    let editor_clone = Rc::clone(&editor_ref);
+    let reader_clone = reader.clone();
+    let onload = wasm_bindgen::closure::Closure::wrap(Box::new(move |_: web_sys::Event| {
+        if let Ok(result) = reader_clone.result()
+            && let Some(text) = result.as_string()
+        {
+            Editor(Rc::clone(&editor_clone)).load_content(&text);
+        }
+    }) as Box<dyn FnMut(web_sys::Event)>);
+    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+    onload.forget();
+
+    // Reset input so the same file can be re-imported
+    input.set_value("");
 }
 
 pub struct InstructionTextIterator<'a> {

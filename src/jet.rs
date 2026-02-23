@@ -525,6 +525,45 @@ impl ElementHandle<web_sys::HtmlInputElement> {
         );
         closure.forget();
     }
+
+    pub fn set_onclick<F>(&mut self, handler: F)
+    where
+        F: 'static + FnMut(web_sys::Event),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::Event)>);
+        self.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onclick(Some(closure.as_ref().unchecked_ref()));
+            },
+            TOKEN,
+        );
+        closure.forget();
+    }
+
+    pub fn set_onchange<F>(&mut self, handler: F)
+    where
+        F: 'static + FnMut(web_sys::Event),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::Event)>);
+        self.with_element(
+            |elem| {
+                elem.set_onchange(Some(closure.as_ref().unchecked_ref()));
+            },
+            TOKEN,
+        );
+        closure.forget();
+    }
+
+    pub fn click(&self) {
+        self.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.click();
+            },
+            TOKEN,
+        );
+    }
 }
 
 // Wrapper for a DOM NodeList, allowing audit that each entry matches an expected node.
