@@ -4,7 +4,10 @@ use anyhow::Result;
 use std::ops::Deref;
 use wast::{
     Error,
-    core::{Global, InlineImport, Instruction, LocalParser, Memory, Table, ValType},
+    core::{
+        Export, Global, Imports, InlineExport, InlineImport, Instruction, LocalParser, Memory,
+        Table, ValType,
+    },
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
     token::Id,
@@ -64,6 +67,24 @@ impl<'a> From<Id<'a>> for ModulePart {
 impl<'a> From<InlineImport<'a>> for ModulePart {
     fn from(_: InlineImport) -> Self {
         ModulePart::Import
+    }
+}
+
+impl<'a> From<Imports<'a>> for ModulePart {
+    fn from(_: Imports) -> Self {
+        ModulePart::Import
+    }
+}
+
+impl<'a> From<InlineExport<'a>> for ModulePart {
+    fn from(_: InlineExport) -> Self {
+        ModulePart::Export
+    }
+}
+
+impl<'a> From<Export<'a>> for ModulePart {
+    fn from(_: Export) -> Self {
+        ModulePart::Export
     }
 }
 
@@ -164,15 +185,14 @@ impl<'a> Parse<'a> for ModulePart {
     fn parse(parser: Parser<'a>) -> Result<Self, Error> {
         // Prioritize fields of format "(...)" over single "(" token
 
-        if parser.peek2::<kw::export>()? {
-            // Modified from InlineExport parser
-            parser.parens(|p| {
-                p.parse::<kw::export>()?;
-                p.parse::<&str>()?;
-                Ok(ModulePart::Export)
-            })
-        } else if parser.peek2::<kw::import>()? {
+        if parser.peek::<InlineExport>()? {
+            Ok(parser.parse::<InlineExport<'a>>()?.into())
+        } else if parser.peek2::<kw::export>()? {
+            parser.parens(|p| Ok(p.parse::<Export<'a>>()?.into()))
+        } else if parser.peek::<InlineImport>()? {
             Ok(parser.parse::<InlineImport<'a>>()?.into())
+        } else if parser.peek2::<kw::import>()? {
+            parser.parens(|p| Ok(p.parse::<Imports<'a>>()?.into()))
         } else if parser.peek2::<kw::param>()? {
             // Modified from FunctionType parser
             parser.parens(|p| {
@@ -454,9 +474,14 @@ impl SyntaxState {
     fn transit_state_from_module_part(&mut self, part: ModulePart) -> Result<(), &'static str> {
         *self = match (&self, part) {
             (SyntaxState::Initial, ModulePart::LParen) => SyntaxState::AfterModuleFieldLParen,
-            (SyntaxState::Initial, ModulePart::Memory | ModulePart::Table | ModulePart::Global) => {
-                SyntaxState::Initial
-            }
+            (
+                SyntaxState::Initial,
+                ModulePart::Memory
+                | ModulePart::Table
+                | ModulePart::Global
+                | ModulePart::Import
+                | ModulePart::Export,
+            ) => SyntaxState::Initial,
             (SyntaxState::AfterModuleFieldLParen, ModulePart::FuncKeyword) => {
                 SyntaxState::AfterFuncHeader(FuncHeader {
                     is_import: false,
@@ -930,6 +955,14 @@ mod tests {
             ModulePart::Import
         );
         assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new(r#" ( import "foo" "bar" (func $bar)) "#)?)?,
+            ModulePart::Import
+        );
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new(r#"  ( export "foo" (func $bar))    "#)?)?,
+            ModulePart::Export
+        );
+        assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    (param $x i32)    ")?)?,
             ModulePart::Param
         );
@@ -1017,6 +1050,19 @@ mod tests {
                 ModulePart::Param,
                 ModulePart::Result,
                 ModulePart::Local
+            ])
+        );
+        assert_eq!(
+            parse::<LineKind>(&ParseBuffer::new(
+                "(import \"foo\" \"bar\" (func $bar)) (func $baz) (export \"foo\" (func $baz))"
+            )?)?,
+            LineKind::Other(vec![
+                ModulePart::Import,
+                ModulePart::LParen,
+                ModulePart::FuncKeyword,
+                ModulePart::Id,
+                ModulePart::RParen,
+                ModulePart::Export
             ])
         );
 
