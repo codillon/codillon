@@ -1,14 +1,15 @@
 // The Codillon code editor
 
 use crate::{
+    autocomplete::{attach_hint_bar, completion_suffix, setup_hint_bar, suggest, update_hint_bar},
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
-        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, WithElement,
-        compare_document_position, get_selection, now_ms, set_selection_range,
+        NodeRef, RangeLike, ReactiveComponent, WithElement, compare_document_position,
+        get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
@@ -89,6 +90,8 @@ struct _Editor {
     globals: Vec<WebAssemblyTypes>,
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
+    suggestions: Vec<String>,
+    hint_bar: HtmlDivElement,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -121,6 +124,15 @@ impl Editor {
             globals: Vec::new(),
             saved_states: Vec::new(),
             function_ranges: Vec::new(),
+            suggestions: Vec::new(),
+            hint_bar: web_sys::window()
+                .unwrap()
+                .document()
+                .unwrap()
+                .create_element("div")
+                .unwrap()
+                .dyn_into::<HtmlDivElement>()
+                .unwrap(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -154,6 +166,16 @@ impl Editor {
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
         ret.image_mut().set_attribute("class", "annotations");
+        {
+            let editor_weak = Rc::downgrade(&ret.0);
+            let bar = setup_hint_bar(move || {
+                if let Some(editor_rc) = editor_weak.upgrade() {
+                    Editor(editor_rc).dismiss_suggestions();
+                }
+            });
+            attach_hint_bar(&bar);
+            ret.0.borrow_mut().hint_bar = bar;
+        }
 
         ret.push_line("(func");
         ret.push_line("i32.const 5");
@@ -189,7 +211,7 @@ impl Editor {
     }
 
     // Replace a given range (currently within a single line) with new text
-    fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
+    fn replace_range(&mut self, target_range: &impl RangeLike, new_str: &str) -> Result<()> {
         if new_str.chars().any(|x| x.is_control() && x != '\n') {
             bail!("unhandled control char in input");
         }
@@ -197,7 +219,7 @@ impl Editor {
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
 
         let (start_line, start_pos, end_line, end_pos) =
-            self.get_lines_and_positions(&target_range)?;
+            self.get_lines_and_positions(target_range)?;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -380,18 +402,18 @@ impl Editor {
         let target_range = ev.get_first_target_range()?;
 
         match &ev.input_type() as &str {
-            "insertText" => self.replace_range(target_range, &ev.data().context("no data")?),
+            "insertText" => self.replace_range(&target_range, &ev.data().context("no data")?),
             "insertFromPaste" => self.replace_range(
-                target_range,
+                &target_range,
                 &ev.data_transfer()
                     .context("no data_transfer")?
                     .get_data("text/plain")
                     .fmt_err()?,
             ),
             "deleteContentBackward" | "deleteContentForward" => {
-                self.replace_range(target_range, "")
+                self.replace_range(&target_range, "")
             }
-            "insertParagraph" | "insertLineBreak" => self.replace_range(target_range, "\n"),
+            "insertParagraph" | "insertLineBreak" => self.replace_range(&target_range, "\n"),
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
@@ -399,6 +421,7 @@ impl Editor {
             )),
         }?;
 
+        self.refresh_suggestion();
         Ok(())
     }
 
@@ -453,6 +476,14 @@ impl Editor {
                 }
             }
 
+            "Tab" | "Enter" => {
+                let first = self.0.borrow().suggestions.first().cloned();
+                if let Some(s) = first {
+                    ev.prevent_default();
+                    self.accept_suggestion(&s).ok();
+                }
+            }
+
             "z" | "Z" => {
                 if ev.ctrl_key() || ev.meta_key() {
                     ev.prevent_default();
@@ -467,6 +498,7 @@ impl Editor {
             _ => {}
         }
 
+        self.refresh_suggestion();
         Ok(())
     }
 
@@ -1044,5 +1076,57 @@ impl WithElement for Editor {
 impl Component for Editor {
     fn audit(&self) {
         self.0.borrow().component.audit()
+    }
+}
+
+impl Editor {
+    fn accept_suggestion(&mut self, suggestion: &str) -> Result<()> {
+        let sel = get_selection();
+        if !sel.is_collapsed() {
+            return Ok(());
+        }
+        if let Ok((line_idx, pos)) =
+            self.find_idx_and_utf16_pos(sel.focus_node().context("focus")?, sel.focus_offset())
+        {
+            let line_text = self.line(line_idx).instr().get().to_owned();
+            let typed = line_text[..pos.offset.min(line_text.len())].trim_start();
+            let suffix = completion_suffix(suggestion, typed);
+            self.replace_range(&sel, suffix)?;
+            self.dismiss_suggestions();
+        }
+        Ok(())
+    }
+
+    fn dismiss_suggestions(&mut self) {
+        self.0.borrow_mut().suggestions.clear();
+        let bar = self.0.borrow().hint_bar.clone();
+        update_hint_bar(&bar, &[], |_| {});
+    }
+
+    fn refresh_suggestion(&mut self) {
+        let sel = get_selection();
+        let new_sugg: Vec<String> = if sel.is_collapsed() {
+            let typed_prefix: Option<String> = (|| {
+                let (idx, pos) = self
+                    .find_idx_and_utf16_pos(sel.focus_node()?, sel.focus_offset())
+                    .ok()?;
+                let line = self.line(idx).suffix(Position::begin()).ok()?;
+                let end = pos.offset.min(line.len());
+                Some(line[..end].trim_start().to_owned())
+            })();
+            typed_prefix
+                .map(|prefix| suggest(&prefix, 10))
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        self.0.borrow_mut().suggestions = new_sugg.clone();
+
+        let bar = self.0.borrow().hint_bar.clone();
+        let editor = Rc::clone(&self.0);
+        update_hint_bar(&bar, &new_sugg, move |s| {
+            Editor(editor.clone()).accept_suggestion(&s).ok();
+        });
     }
 }
