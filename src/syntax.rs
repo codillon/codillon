@@ -32,6 +32,8 @@ pub enum ModulePart {
     Id,
     Export,
     Import,
+    InlineExport,
+    InlineImport,
     Param,
     Result,
     Local,
@@ -66,7 +68,7 @@ impl<'a> From<Id<'a>> for ModulePart {
 
 impl<'a> From<InlineImport<'a>> for ModulePart {
     fn from(_: InlineImport) -> Self {
-        ModulePart::Import
+        ModulePart::InlineImport
     }
 }
 
@@ -78,7 +80,7 @@ impl<'a> From<Imports<'a>> for ModulePart {
 
 impl<'a> From<InlineExport<'a>> for ModulePart {
     fn from(_: InlineExport) -> Self {
-        ModulePart::Export
+        ModulePart::InlineExport
     }
 }
 
@@ -365,13 +367,13 @@ struct FuncHeader {
 impl FuncHeader {
     // Expected order of function fields
     const ORDER: &'static [ModulePart] = &[
-        ModulePart::FuncKeyword, // 0 - Required
-        ModulePart::Id,          // 1 - Optional
-        ModulePart::Export,      // 2 - Optional, Repeatable
-        ModulePart::Import,      // 3 - Optional
-        ModulePart::Param,       // 4 - Optional, Repeatable
-        ModulePart::Result,      // 5 - Optional, Repeatable
-        ModulePart::Local,       // 6 - Optional, Repeatable
+        ModulePart::FuncKeyword,  // 0 - Required
+        ModulePart::Id,           // 1 - Optional
+        ModulePart::InlineExport, // 2 - Optional, Repeatable
+        ModulePart::InlineImport, // 3 - Optional
+        ModulePart::Param,        // 4 - Optional, Repeatable
+        ModulePart::Result,       // 5 - Optional, Repeatable
+        ModulePart::Local,        // 6 - Optional, Repeatable
     ];
 
     fn transit_state(&mut self, part: ModulePart) -> Result<(), &'static str> {
@@ -407,7 +409,7 @@ impl FuncHeader {
         }
 
         // Transition state
-        self.is_import |= matches!(part, ModulePart::Import);
+        self.is_import |= matches!(part, ModulePart::InlineImport);
         self.next_field = part_pos + 1;
 
         Ok(())
@@ -491,8 +493,8 @@ impl SyntaxState {
             (
                 &&mut SyntaxState::AfterFuncHeader(mut fh),
                 ModulePart::Id
-                | ModulePart::Export
-                | ModulePart::Import
+                | ModulePart::InlineExport
+                | ModulePart::InlineImport
                 | ModulePart::Param
                 | ModulePart::Result
                 | ModulePart::Local,
@@ -948,11 +950,11 @@ mod tests {
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("  ( export \"main\")    ")?)?,
-            ModulePart::Export
+            ModulePart::InlineExport
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("  ( import \"foo\" \"bar\" )    ")?)?,
-            ModulePart::Import
+            ModulePart::InlineImport
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new(r#" ( import "foo" "bar" (func $bar)) "#)?)?,
@@ -1045,8 +1047,8 @@ mod tests {
                 ModulePart::LParen,
                 ModulePart::FuncKeyword,
                 ModulePart::Id,
-                ModulePart::Export,
-                ModulePart::Import,
+                ModulePart::InlineExport,
+                ModulePart::InlineImport,
                 ModulePart::Param,
                 ModulePart::Result,
                 ModulePart::Local
@@ -1078,13 +1080,13 @@ mod tests {
         let _ = header_valid.transit_state(ModulePart::FuncKeyword);
         assert!(!header_valid.is_import);
         assert_eq!(header_valid.next_field, 1);
-        let _ = header_valid.transit_state(ModulePart::Export);
+        let _ = header_valid.transit_state(ModulePart::InlineExport);
         assert!(!header_valid.is_import);
         assert_eq!(header_valid.next_field, 3);
-        let _ = header_valid.transit_state(ModulePart::Export);
+        let _ = header_valid.transit_state(ModulePart::InlineExport);
         assert!(!header_valid.is_import);
         assert_eq!(header_valid.next_field, 3);
-        let _ = header_valid.transit_state(ModulePart::Import);
+        let _ = header_valid.transit_state(ModulePart::InlineImport);
         assert!(header_valid.is_import);
         assert_eq!(header_valid.next_field, 4);
         let _ = header_valid.transit_state(ModulePart::Result);
