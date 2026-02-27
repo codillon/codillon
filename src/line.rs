@@ -205,16 +205,8 @@ impl CodeLine {
         &mut self.contents.get_mut().1.0.get_mut().0
     }
 
-    pub fn num_well_formed_strs(&self) -> usize {
-        self.info.num_well_formed_strs()
-    }
-
     pub fn well_formed_str(&self, idx: usize) -> &str {
         self.info.well_formed_str(idx, self.instr().get())
-    }
-
-    pub fn num_ops(&self) -> usize {
-        self.info.num_ops()
     }
 
     pub fn end_position(&self) -> Position {

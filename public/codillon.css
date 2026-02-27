@@ -274,6 +274,7 @@ span.debug[data-debug]::after {
     margin-right: auto;
 }
 
+
 .autocomplete-hint-bar {
     position: fixed;
     bottom: 0;

@@ -13,7 +13,7 @@ pub fn suggest(prefix: &str, limit: usize) -> Vec<String> {
     }
     names
         .into_iter()
-        .filter(|s| s.starts_with(prefix) && s != prefix)
+        .filter(|s: &String| s.starts_with(prefix) && s != prefix)
         .take(limit)
         .collect()
 }
@@ -33,7 +33,7 @@ pub fn setup_hint_bar(mut on_click_outside: impl FnMut() + 'static) -> HtmlDivEl
         move |ev: web_sys::MouseEvent| {
             let outside = ev
                 .target()
-                .and_then(|t| t.dyn_into::<web_sys::Node>().ok())
+                .and_then(|t: web_sys::EventTarget| t.dyn_into::<web_sys::Node>().ok())
                 .is_none_or(|n| {
                     !<HtmlDivElement as AsRef<web_sys::Node>>::as_ref(&b).contains(Some(&n))
                 });
