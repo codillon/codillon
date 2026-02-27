@@ -1,6 +1,7 @@
 // The Codillon code editor
 
 use crate::{
+    action_history::{ActionHistory, Edit, Selection},
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -43,30 +44,6 @@ type ComponentType = DomStruct<
 >;
 
 pub const LINE_SPACING: usize = 40;
-// Chrome uses 1 second and VSCode uses 300 - 500 ms, but for comparatively short
-// WebAssembly lines, 150 ms felt more natural.
-pub const GROUP_INTERVAL_MS: f64 = 150.0;
-// 10 minutes - arbitrary
-pub const KEEP_DURATION_MS: f64 = 10.0 * 60.0 * 1000.0;
-
-#[derive(Clone)]
-struct Selection {
-    start_line: usize,
-    start_pos: Position,
-    end_line: usize,
-    end_pos: Position,
-}
-
-#[derive(Clone)]
-struct Edit {
-    start_line: usize,
-    old_lines: Vec<String>,
-    // new lines
-    new_lines: Vec<String>,
-    selection_before: Selection,
-    selection_after: Selection,
-    time_ms: f64,
-}
 
 #[derive(Clone, Default)]
 pub struct ProgramState {
@@ -81,11 +58,7 @@ pub struct ProgramState {
 struct _Editor {
     component: ComponentType,
     factory: ElementFactory,
-
-    // Storing changes
-    undo_stack: Vec<Edit>,
-    redo_stack: Vec<Edit>,
-    last_time_ms: f64,
+    action_history: ActionHistory,
 
     program_state: ProgramState,
     function_locals: Vec<Vec<WebAssemblyTypes>>,
@@ -116,9 +89,7 @@ impl Editor {
                 factory.div(),
             ),
             factory,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            last_time_ms: 0.0,
+            action_history: ActionHistory::default(),
             program_state: ProgramState::default(),
             function_locals: Vec::new(),
             globals: Vec::new(),
@@ -322,9 +293,8 @@ impl Editor {
                     new_lines.push(self.line(i).suffix(Position::begin())?);
                 }
                 // Store new edit
-                let time_ms = now_ms();
-                self.store_edit(
-                    Edit {
+                {
+                    self.0.borrow_mut().action_history.store_edit(Edit {
                         start_line,
                         old_lines: backup,
                         new_lines,
@@ -340,10 +310,9 @@ impl Editor {
                             end_line: fixup_line,
                             end_pos: new_cursor_pos,
                         },
-                        time_ms,
-                    },
-                    time_ms,
-                );
+                        time_ms: now_ms(),
+                    });
+                }
             }
             Err(e) => {
                 log_1(&format!("reverting after {e}").into());
@@ -868,34 +837,6 @@ impl Editor {
         });
     }
 
-    fn store_edit(&mut self, edit: Edit, now_ms: f64) {
-        let mut inner = self.0.borrow_mut();
-        inner.redo_stack.clear();
-        // Combine edit if close together
-        if now_ms - inner.last_time_ms <= GROUP_INTERVAL_MS
-            && let Some(last_edit) = inner.undo_stack.last_mut()
-            && last_edit.start_line == edit.start_line
-            && last_edit.new_lines.len() == 1
-            && edit.new_lines.len() == 1
-        {
-            last_edit.new_lines = edit.new_lines;
-            last_edit.selection_after = edit.selection_after;
-            last_edit.time_ms = now_ms;
-        } else {
-            inner.undo_stack.push(edit);
-        }
-        // Remove old edits
-        let num_discard = inner
-            .undo_stack
-            .iter()
-            .take_while(|ed| (now_ms - ed.time_ms) > KEEP_DURATION_MS)
-            .count();
-        if num_discard > 0 {
-            inner.undo_stack.drain(0..num_discard);
-        }
-        inner.last_time_ms = now_ms;
-    }
-
     fn apply_selection(
         &mut self,
         start_line: usize,
@@ -949,7 +890,7 @@ impl Editor {
     // Undo the most recent edit.
     pub fn undo(&mut self) -> Result<()> {
         let mut inner = self.0.borrow_mut();
-        if let Some(edit) = inner.undo_stack.pop() {
+        if let Some(edit) = inner.action_history.undo_stack.pop() {
             drop(inner);
             self.apply_selection(
                 edit.start_line,
@@ -958,8 +899,8 @@ impl Editor {
                 &edit.selection_before,
             )?;
             let mut inner = self.0.borrow_mut();
-            inner.redo_stack.push(edit);
-            inner.last_time_ms = 0.0;
+            inner.action_history.redo_stack.push(edit);
+            inner.action_history.last_time_ms = 0.0;
         }
         Ok(())
     }
@@ -967,7 +908,7 @@ impl Editor {
     // Re-apply most recently undone edit
     pub fn redo(&mut self) -> Result<()> {
         let mut inner = self.0.borrow_mut();
-        if let Some(edit) = inner.redo_stack.pop() {
+        if let Some(edit) = inner.action_history.redo_stack.pop() {
             drop(inner);
             self.apply_selection(
                 edit.start_line,
@@ -976,8 +917,8 @@ impl Editor {
                 &edit.selection_after,
             )?;
             let mut inner = self.0.borrow_mut();
-            inner.undo_stack.push(edit);
-            inner.last_time_ms = 0.0;
+            inner.action_history.undo_stack.push(edit);
+            inner.action_history.last_time_ms = 0.0;
         }
         Ok(())
     }
