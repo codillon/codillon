@@ -520,6 +520,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     use SyntaxState::*;
     let mut state = Initial;
     let mut frame_stack: Vec<InstrKind> = Vec::new();
+    let mut before_imports = true;
 
     assert!(lines.len() > 0);
 
@@ -527,6 +528,32 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         lines.set_synthetic_before(line_no, SyntheticWasm::default());
         lines.set_active_status(line_no, Active);
         lines.set_invalid(line_no, None);
+
+        // Enforce no imports after other module fields
+        let instr_kind = lines.info(line_no).kind.stripped_clone();
+        if let LineKind::Other(parts) = &instr_kind {
+            let has_import = parts
+                .iter()
+                .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport));
+            let module_field = parts.iter().any(|&p| {
+                matches!(
+                    p,
+                    ModulePart::Memory
+                        | ModulePart::Table
+                        | ModulePart::Global
+                        | ModulePart::Export
+                )
+            });
+            if has_import && !before_imports {
+                lines.set_active_status(
+                    line_no,
+                    Inactive("imports must appear before other module fields"),
+                );
+                continue;
+            } else if module_field || (parts.contains(&ModulePart::RParen) && !has_import) {
+                before_imports = false;
+            }
+        }
 
         // Fixup instructions that appear where they don't belong
         if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
@@ -611,7 +638,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         }
 
         // Enforce syntax requirements of structured instructions
-        let instr_kind = lines.info(line_no).kind.stripped_clone();
         if let LineKind::Instr(kind) = instr_kind {
             match kind {
                 // For a structured instruction that opens a frame, log this.
@@ -1367,6 +1393,31 @@ mod tests {
                     kind: InstrKind::Else
                 }
             );
+        }
+
+        {
+            // Test case 6: Imports after other module fields
+            let mut infos6 =
+                TestLineInfos::new(["(global i32 (i32.const 0))", "(import \"\" \"\" (func))"]);
+            fix_syntax(&mut infos6);
+            assert!(infos6.lines[0].is_active());
+            assert!(!infos6.lines[1].is_active());
+
+            infos6 =
+                TestLineInfos::new(["(global i32 (i32.const 0))", "(func (import \"\" \"\"))"]);
+            fix_syntax(&mut infos6);
+            assert!(infos6.lines[0].is_active());
+            assert!(!infos6.lines[1].is_active());
+
+            infos6 = TestLineInfos::new(["(func)", "(import \"\" \"\" (func))"]);
+            fix_syntax(&mut infos6);
+            assert!(infos6.lines[0].is_active());
+            assert!(!infos6.lines[1].is_active());
+
+            infos6 = TestLineInfos::new(["(func)", "(func (import \"\" \"\"))"]);
+            fix_syntax(&mut infos6);
+            assert!(infos6.lines[0].is_active());
+            assert!(!infos6.lines[1].is_active());
         }
     }
 }
