@@ -4,10 +4,7 @@ use anyhow::Result;
 use std::ops::Deref;
 use wast::{
     Error,
-    core::{
-        Export, Global, Imports, InlineExport, InlineImport, Instruction, LocalParser, Memory,
-        Table, ValType,
-    },
+    core::{Global, InlineImport, Instruction, LocalParser, Memory, Table, ValType},
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
     token::Id,
@@ -32,8 +29,6 @@ pub enum ModulePart {
     Id,
     Export,
     Import,
-    InlineExport,
-    InlineImport,
     Param,
     Result,
     Local,
@@ -68,25 +63,7 @@ impl<'a> From<Id<'a>> for ModulePart {
 
 impl<'a> From<InlineImport<'a>> for ModulePart {
     fn from(_: InlineImport) -> Self {
-        ModulePart::InlineImport
-    }
-}
-
-impl<'a> From<Imports<'a>> for ModulePart {
-    fn from(_: Imports) -> Self {
         ModulePart::Import
-    }
-}
-
-impl<'a> From<InlineExport<'a>> for ModulePart {
-    fn from(_: InlineExport) -> Self {
-        ModulePart::InlineExport
-    }
-}
-
-impl<'a> From<Export<'a>> for ModulePart {
-    fn from(_: Export) -> Self {
-        ModulePart::Export
     }
 }
 
@@ -187,14 +164,15 @@ impl<'a> Parse<'a> for ModulePart {
     fn parse(parser: Parser<'a>) -> Result<Self, Error> {
         // Prioritize fields of format "(...)" over single "(" token
 
-        if parser.peek::<InlineExport>()? {
-            Ok(parser.parse::<InlineExport<'a>>()?.into())
-        } else if parser.peek2::<kw::export>()? {
-            parser.parens(|p| Ok(p.parse::<Export<'a>>()?.into()))
-        } else if parser.peek::<InlineImport>()? {
-            Ok(parser.parse::<InlineImport<'a>>()?.into())
+        if parser.peek2::<kw::export>()? {
+            // Modified from InlineExport parser
+            parser.parens(|p| {
+                p.parse::<kw::export>()?;
+                p.parse::<&str>()?;
+                Ok(ModulePart::Export)
+            })
         } else if parser.peek2::<kw::import>()? {
-            parser.parens(|p| Ok(p.parse::<Imports<'a>>()?.into()))
+            Ok(parser.parse::<InlineImport<'a>>()?.into())
         } else if parser.peek2::<kw::param>()? {
             // Modified from FunctionType parser
             parser.parens(|p| {
@@ -367,13 +345,13 @@ struct FuncHeader {
 impl FuncHeader {
     // Expected order of function fields
     const ORDER: &'static [ModulePart] = &[
-        ModulePart::FuncKeyword,  // 0 - Required
-        ModulePart::Id,           // 1 - Optional
-        ModulePart::InlineExport, // 2 - Optional, Repeatable
-        ModulePart::InlineImport, // 3 - Optional
-        ModulePart::Param,        // 4 - Optional, Repeatable
-        ModulePart::Result,       // 5 - Optional, Repeatable
-        ModulePart::Local,        // 6 - Optional, Repeatable
+        ModulePart::FuncKeyword, // 0 - Required
+        ModulePart::Id,          // 1 - Optional
+        ModulePart::Export,      // 2 - Optional, Repeatable
+        ModulePart::Import,      // 3 - Optional
+        ModulePart::Param,       // 4 - Optional, Repeatable
+        ModulePart::Result,      // 5 - Optional, Repeatable
+        ModulePart::Local,       // 6 - Optional, Repeatable
     ];
 
     fn transit_state(&mut self, part: ModulePart) -> Result<(), &'static str> {
@@ -409,7 +387,7 @@ impl FuncHeader {
         }
 
         // Transition state
-        self.is_import |= matches!(part, ModulePart::InlineImport);
+        self.is_import |= matches!(part, ModulePart::Import);
         self.next_field = part_pos + 1;
 
         Ok(())
@@ -476,14 +454,9 @@ impl SyntaxState {
     fn transit_state_from_module_part(&mut self, part: ModulePart) -> Result<(), &'static str> {
         *self = match (&self, part) {
             (SyntaxState::Initial, ModulePart::LParen) => SyntaxState::AfterModuleFieldLParen,
-            (
-                SyntaxState::Initial,
-                ModulePart::Memory
-                | ModulePart::Table
-                | ModulePart::Global
-                | ModulePart::Import
-                | ModulePart::Export,
-            ) => SyntaxState::Initial,
+            (SyntaxState::Initial, ModulePart::Memory | ModulePart::Table | ModulePart::Global) => {
+                SyntaxState::Initial
+            }
             (SyntaxState::AfterModuleFieldLParen, ModulePart::FuncKeyword) => {
                 SyntaxState::AfterFuncHeader(FuncHeader {
                     is_import: false,
@@ -493,8 +466,8 @@ impl SyntaxState {
             (
                 &&mut SyntaxState::AfterFuncHeader(mut fh),
                 ModulePart::Id
-                | ModulePart::InlineExport
-                | ModulePart::InlineImport
+                | ModulePart::Export
+                | ModulePart::Import
                 | ModulePart::Param
                 | ModulePart::Result
                 | ModulePart::Local,
@@ -950,19 +923,11 @@ mod tests {
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("  ( export \"main\")    ")?)?,
-            ModulePart::InlineExport
+            ModulePart::Export
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("  ( import \"foo\" \"bar\" )    ")?)?,
-            ModulePart::InlineImport
-        );
-        assert_eq!(
-            parse::<ModulePart>(&ParseBuffer::new(r#" ( import "foo" "bar" (func $bar)) "#)?)?,
             ModulePart::Import
-        );
-        assert_eq!(
-            parse::<ModulePart>(&ParseBuffer::new(r#"  ( export "foo" (func $bar))    "#)?)?,
-            ModulePart::Export
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    (param $x i32)    ")?)?,
@@ -1047,24 +1012,11 @@ mod tests {
                 ModulePart::LParen,
                 ModulePart::FuncKeyword,
                 ModulePart::Id,
-                ModulePart::InlineExport,
-                ModulePart::InlineImport,
+                ModulePart::Export,
+                ModulePart::Import,
                 ModulePart::Param,
                 ModulePart::Result,
                 ModulePart::Local
-            ])
-        );
-        assert_eq!(
-            parse::<LineKind>(&ParseBuffer::new(
-                "(import \"foo\" \"bar\" (func $bar)) (func $baz) (export \"foo\" (func $baz))"
-            )?)?,
-            LineKind::Other(vec![
-                ModulePart::Import,
-                ModulePart::LParen,
-                ModulePart::FuncKeyword,
-                ModulePart::Id,
-                ModulePart::RParen,
-                ModulePart::Export
             ])
         );
 
@@ -1080,13 +1032,13 @@ mod tests {
         let _ = header_valid.transit_state(ModulePart::FuncKeyword);
         assert!(!header_valid.is_import);
         assert_eq!(header_valid.next_field, 1);
-        let _ = header_valid.transit_state(ModulePart::InlineExport);
+        let _ = header_valid.transit_state(ModulePart::Export);
         assert!(!header_valid.is_import);
         assert_eq!(header_valid.next_field, 3);
-        let _ = header_valid.transit_state(ModulePart::InlineExport);
+        let _ = header_valid.transit_state(ModulePart::Export);
         assert!(!header_valid.is_import);
         assert_eq!(header_valid.next_field, 3);
-        let _ = header_valid.transit_state(ModulePart::InlineImport);
+        let _ = header_valid.transit_state(ModulePart::Import);
         assert!(header_valid.is_import);
         assert_eq!(header_valid.next_field, 4);
         let _ = header_valid.transit_state(ModulePart::Result);

@@ -273,3 +273,67 @@ span.debug[data-debug]::after {
     margin-left: auto;
     margin-right: auto;
 }
+
+.autocomplete-hint-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 36px;
+    background: linear-gradient(to bottom, #fffff8, #fffff0);
+    border-top: 1px solid burlywood;
+    display: flex;
+    flex-direction: row;
+    gap: 6px;
+    padding: 0 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    align-items: center;
+    z-index: 100;
+    scroll-behavior: smooth;
+}
+
+.autocomplete-hint-bar::-webkit-scrollbar {
+    height: 4px;
+}
+
+.autocomplete-hint-bar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.autocomplete-hint-bar::-webkit-scrollbar-thumb {
+    background: burlywood;
+    border-radius: 2px;
+}
+
+.autocomplete-item {
+    flex-shrink: 0;
+    padding: 4px 12px;
+    background: white;
+    border: 1px solid burlywood;
+    border-radius: 3px;
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 14pt;
+    color: darkred;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+    transition: all 0.15s ease;
+}
+
+.autocomplete-item:hover {
+    background: linen;
+    border-color: darkred;
+    transform: translateY(-1px);
+}
+
+.autocomplete-item:active {
+    transform: translateY(0);
+}
+
+.autocomplete-item:first-child {
+    border-color: darkred;
+    border-width: 2px;
+    font-weight: bold;
+    background: #fff8f8;
+}

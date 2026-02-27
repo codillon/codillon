@@ -324,6 +324,10 @@ impl<T: AnyElement> ElementHandle<T> {
         )
     }
 
+    pub fn clear_children(&self) {
+        self.elem.element().set_text_content(Some(""));
+    }
+
     pub fn attach_nodes(&self, children: ArrayHandle) {
         self.elem.element().replace_children_with_node(&children.0);
     }
@@ -357,6 +361,12 @@ impl<T: AnyElement> ElementHandle<T> {
         self.elem
             .element()
             .scroll_into_view_with_scroll_into_view_options(&opts);
+    }
+
+    pub fn as_node_ref(&self) -> NodeRef {
+        let t: &T = &self.elem;
+        let node: &web_sys::Node = t.as_ref();
+        node.clone().into()
     }
 }
 
@@ -524,6 +534,26 @@ impl ElementHandle<web_sys::HtmlInputElement> {
         self.with_element(
             |elem| {
                 elem.set_oninput(Some(closure.as_ref().unchecked_ref()));
+            },
+            TOKEN,
+        );
+        closure.forget();
+    }
+}
+
+impl<T: AnyElement> ElementHandle<T>
+where
+    T: AsRef<web_sys::HtmlElement>,
+{
+    pub fn set_onmousedown<F>(&mut self, handler: F)
+    where
+        F: 'static + FnMut(web_sys::MouseEvent),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
+        self.with_element(
+            |elem| {
+                let html: &web_sys::HtmlElement = elem.as_ref();
+                html.set_onmousedown(Some(closure.as_ref().unchecked_ref()));
             },
             TOKEN,
         );
@@ -760,6 +790,18 @@ impl SelectionHandle {
         #[expr($.map(From::from))]
         pub fn focus_node(&self) -> Option<NodeRef>;
     }
+    }
+
+    pub fn to_static_range(&self) -> Result<StaticRangeHandle> {
+        if self.0.range_count() > 0 {
+            Ok(StaticRangeHandle(
+                self.0
+                    .get_range_at(0)
+                    .map_err(|e| anyhow::anyhow!("{:?}", e))?,
+            ))
+        } else {
+            bail!("no range")
+        }
     }
 }
 
