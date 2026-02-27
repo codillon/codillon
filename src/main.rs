@@ -10,17 +10,12 @@ thread_local! {
 }
 
 fn setup() -> Result<()> {
-    let editor = DOCUMENT.with_borrow_mut(|doc| {
+    DOCUMENT.with_borrow_mut(|doc| {
         let factory = doc.element_factory();
         let body = factory.body();
-        let editor = Editor::new(factory);
-        let editor_clone = editor.clone();
-        doc.set_body(Body::new((editor, ()), body));
+        doc.set_body(Body::new((Editor::new(factory), ()), body));
         doc.audit();
-        editor_clone
     });
-
-    editor.attach_hint_bar();
 
     web_sys::console::log_1(&"successful audit".into());
 

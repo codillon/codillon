@@ -1,22 +1,22 @@
 // The Codillon code editor
 
 use crate::{
-    autocomplete::{completion_suffix, suggest},
+    autocomplete::{completion_suffix, setup_hint_bar, suggest, update_hint_bar},
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
-        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, WithElement,
-        compare_document_position, get_selection, now_ms, set_selection_range,
+        NodeRef, RangeLike, ReactiveComponent, WithElement, compare_document_position,
+        get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         find_frames, find_function_ranges, fix_syntax,
     },
-    utils::{Aligned, CodillonType, FmtError, RawFunction, RawModule, ValidModule, str_to_binary},
+    utils::{CodillonType, FmtError, RawModule, ValidModule, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -26,7 +26,6 @@ use std::{
     rc::{Rc, Weak},
 };
 use wasm_bindgen::{JsCast, JsValue};
-use wasmparser::{Parser, Payload};
 use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
@@ -92,7 +91,7 @@ struct _Editor {
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
     suggestions: Vec<String>,
-    hint_bar: Option<web_sys::HtmlDivElement>,
+    hint_bar: web_sys::HtmlDivElement,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -126,7 +125,14 @@ impl Editor {
             saved_states: Vec::new(),
             function_ranges: Vec::new(),
             suggestions: Vec::new(),
-            hint_bar: None,
+            hint_bar: web_sys::window()
+                .unwrap()
+                .document()
+                .unwrap()
+                .create_element("div")
+                .unwrap()
+                .dyn_into::<HtmlDivElement>()
+                .unwrap(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -160,8 +166,15 @@ impl Editor {
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
         }
         ret.image_mut().set_attribute("class", "annotations");
-        ret.image_mut().set_attribute("class", "annotations");
-        ret.setup_hint_bar();
+        {
+            let editor_weak = Rc::downgrade(&ret.0);
+            let bar = setup_hint_bar(move || {
+                if let Some(editor_rc) = editor_weak.upgrade() {
+                    Editor(editor_rc).dismiss_suggestions();
+                }
+            });
+            ret.0.borrow_mut().hint_bar = bar;
+        }
 
         ret.push_line("(func");
         ret.push_line("i32.const 5");
@@ -197,7 +210,7 @@ impl Editor {
     }
 
     // Replace a given range (currently within a single line) with new text
-    fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
+    fn replace_range(&mut self, target_range: &impl RangeLike, new_str: &str) -> Result<()> {
         if new_str.chars().any(|x| x.is_control() && x != '\n') {
             bail!("unhandled control char in input");
         }
@@ -205,7 +218,7 @@ impl Editor {
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
 
         let (start_line, start_pos, end_line, end_pos) =
-            self.get_lines_and_positions(&target_range)?;
+            self.get_lines_and_positions(target_range)?;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -347,7 +360,6 @@ impl Editor {
                     },
                     time_ms,
                 );
-                self.refresh_suggestion();
             }
             Err(e) => {
                 log_1(&format!("reverting after {e}").into());
@@ -389,18 +401,18 @@ impl Editor {
         let target_range = ev.get_first_target_range()?;
 
         match &ev.input_type() as &str {
-            "insertText" => self.replace_range(target_range, &ev.data().context("no data")?),
+            "insertText" => self.replace_range(&target_range, &ev.data().context("no data")?),
             "insertFromPaste" => self.replace_range(
-                target_range,
+                &target_range,
                 &ev.data_transfer()
                     .context("no data_transfer")?
                     .get_data("text/plain")
                     .fmt_err()?,
             ),
-            "deleteContentBackward" | "deleteContentForward" => {
-                self.replace_range(target_range, "")
+            "deleteContentBackward" | "deleteContentForward" | "deleteByCut" => {
+                self.replace_range(&target_range, "")
             }
-            "insertParagraph" | "insertLineBreak" => self.replace_range(target_range, "\n"),
+            "insertParagraph" | "insertLineBreak" => self.replace_range(&target_range, "\n"),
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
@@ -408,6 +420,7 @@ impl Editor {
             )),
         }?;
 
+        self.refresh_suggestion();
         Ok(())
     }
 
@@ -415,8 +428,10 @@ impl Editor {
     // later in the line. It also has trouble deleting if the cursor position is at the end of the surrounding
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
     fn handle_keydown(&mut self, ev: web_sys::KeyboardEvent) -> Result<()> {
+        let mut dismiss = false;
         match ev.key().as_str() {
             "ArrowRight" => {
+                dismiss = true;
                 let selection = get_selection();
                 if selection.is_collapsed() {
                     let (line_idx, pos) = self.find_idx_and_utf16_pos(
@@ -433,6 +448,7 @@ impl Editor {
             }
 
             "ArrowDown" => {
+                dismiss = true;
                 let selection = get_selection();
                 if selection.is_collapsed() {
                     let (line_idx, _) = self.find_idx_and_utf16_pos(
@@ -448,6 +464,7 @@ impl Editor {
             }
 
             "ArrowLeft" => {
+                dismiss = true;
                 let selection = get_selection();
                 if selection.is_collapsed() {
                     let (line_idx, pos) = self.find_idx_and_utf16_pos(
@@ -462,6 +479,18 @@ impl Editor {
                 }
             }
 
+            "Home" | "End" | "PageUp" | "PageDown" | "Escape" | "ArrowUp" => {
+                dismiss = true;
+            }
+
+            "Tab" | "Enter" => {
+                let s = self.0.borrow().suggestions.first().cloned();
+                if let Some(s) = s {
+                    ev.prevent_default();
+                    self.accept_suggestion(&s).ok();
+                }
+            }
+
             "z" | "Z" => {
                 if ev.ctrl_key() || ev.meta_key() {
                     ev.prevent_default();
@@ -473,19 +502,14 @@ impl Editor {
                 }
             }
 
-            "Tab" | "Enter" => {
-                let first = self.0.borrow().suggestions.first().cloned();
-                if let Some(s) = first {
-                    ev.prevent_default();
-                    self.accept_suggestion(&s).ok();
-                }
-            }
-
             _ => {}
         }
 
-        self.refresh_suggestion();
-
+        if dismiss {
+            self.dismiss_suggestions();
+        } else {
+            self.refresh_suggestion();
+        }
         Ok(())
     }
 
@@ -567,17 +591,14 @@ impl Editor {
         find_frames(self);
 
         // Get function ranges
-        self.0.borrow_mut().function_ranges = match find_function_ranges(self) {
-            None => return Ok(()),
-            Some(range) if range.is_empty() => return Ok(()),
-            Some(ranges) => ranges,
-        };
+        self.0.borrow_mut().function_ranges = find_function_ranges(self);
+
         let wasm_bin = str_to_binary(
             self.buffer_as_text()
                 .fold(String::new(), |acc, elem| acc + "\n" + elem.as_ref()),
         )?;
 
-        let raw_module = self.to_raw_module(&wasm_bin)?;
+        let raw_module = RawModule::new(self, &wasm_bin, &self.0.borrow().function_ranges)?;
         let validized = raw_module.fix_validity(&wasm_bin, self)?;
         let types = validized.to_types_table(&wasm_bin)?;
 
@@ -642,103 +663,6 @@ impl Editor {
         self.audit();
 
         Ok(())
-    }
-
-    /// note that the FuncEnd will also get a line in the Instruction Table for a given function
-    fn to_raw_module<'a>(&self, wasm_bin: &'a [u8]) -> Result<RawModule<'a>> {
-        use wasmparser::ValType;
-        let parser = Parser::new(0);
-        let mut functions: Vec<RawFunction> = Vec::new();
-        let mut func_params: Vec<Vec<ValType>> = Vec::new();
-        let mut func_results: Vec<Vec<ValType>> = Vec::new();
-        let mut func_locals: Vec<Vec<(u32, ValType)>> = Vec::new();
-        let mut func_ops: Vec<Vec<wasmparser::Operator<'a>>> = Vec::new();
-        let mut globals: Vec<(ValType, bool, bool, wasmparser::ConstExpr<'a>)> = Vec::new();
-        let mut memory: Vec<wasmparser::MemoryType> = Vec::new();
-
-        for payload in parser.parse_all(wasm_bin) {
-            match payload? {
-                Payload::MemorySection(reader) => {
-                    for mem in reader.into_iter_with_offsets().flatten() {
-                        memory.push(mem.1);
-                    }
-                }
-                Payload::GlobalSection(reader) => {
-                    for global in reader.into_iter_with_offsets().flatten() {
-                        globals.push((
-                            global.1.ty.content_type,
-                            global.1.ty.mutable,
-                            global.1.ty.shared,
-                            global.1.init_expr,
-                        ))
-                    }
-                }
-                Payload::TypeSection(reader) => {
-                    for ft in reader.into_iter_err_on_gc_types().flatten() {
-                        func_params.push(ft.params().to_vec());
-                        func_results.push(ft.results().to_vec());
-                    }
-                }
-                Payload::CodeSectionEntry(body) => {
-                    let mut locals: Vec<(u32, ValType)> = Vec::new();
-                    let local_reader = body.get_locals_reader()?;
-                    for local in local_reader {
-                        let entry = local?;
-                        locals.push((entry.0, entry.1));
-                    }
-                    func_locals.push(locals);
-                    let mut ops = Vec::new();
-                    for op in body.get_operators_reader()?.into_iter() {
-                        ops.push(op?);
-                    }
-                    //include the function's end opcode
-                    func_ops.push(ops);
-                }
-                _ => {}
-            }
-        }
-        for (func_idx, (func_start, func_end)) in self.0.borrow().function_ranges.iter().enumerate()
-        {
-            //match each operator with its idx in the editor
-            let mut aligned_ops = Vec::new();
-            let mut ops_iter = func_ops[func_idx].clone().into_iter();
-            for line_idx in *func_start..=*func_end {
-                for _ in 0..self.line(line_idx).num_ops() {
-                    let op = ops_iter.next().context("not enough operators")?;
-                    aligned_ops.push(Aligned { op, line_idx });
-                }
-            }
-            match ops_iter.next() {
-                Some(end @ wasmparser::Operator::End) => {
-                    aligned_ops.push(Aligned {
-                        op: end,
-                        line_idx: *func_end,
-                    });
-                }
-                Some(_) => {
-                    bail!("not enough instructions");
-                }
-                None => {
-                    bail!("not enough operators");
-                }
-            }
-            if ops_iter.next().is_some() {
-                bail!("not enough instructions");
-            }
-            let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
-            functions.push(RawFunction {
-                locals,
-                params: func_params.get(func_idx).unwrap_or(&Vec::new()).clone(),
-                results: func_results.get(func_idx).unwrap_or(&Vec::new()).clone(),
-                operators: aligned_ops,
-            });
-        }
-
-        Ok(RawModule {
-            globals,
-            memory,
-            functions,
-        })
     }
 
     fn execute(&self, binary: &[u8]) {
@@ -869,8 +793,8 @@ impl Editor {
     fn initialize_globals(&self, validized: &ValidModule) {
         use wasmparser::Operator::*;
         let mut globals: Vec<WebAssemblyTypes> = Vec::with_capacity(validized.globals.len());
-        for (.., init_expr) in &validized.globals {
-            let mut init_reader = init_expr.get_operators_reader();
+        for global in &validized.globals {
+            let mut init_reader = global.init_expr.get_operators_reader();
             if let Ok(op) = init_reader.read() {
                 globals.push(match op {
                     I32Const { value } => WebAssemblyTypes::I32(value),
@@ -888,9 +812,10 @@ impl Editor {
     fn initialize_locals(&self, validized: &ValidModule) {
         let mut function_locals: Vec<Vec<WebAssemblyTypes>> =
             Vec::with_capacity(validized.functions.len());
-        for func in &validized.functions {
-            let mut locals: Vec<WebAssemblyTypes> = Vec::with_capacity(func.params.len());
-            for param in &func.params {
+        for (func_idx, func) in validized.functions.iter().enumerate() {
+            let mut locals: Vec<WebAssemblyTypes> =
+                Vec::with_capacity(validized.get_func_type(func_idx).params().len());
+            for param in validized.get_func_type(func_idx).params() {
                 locals.push(Self::valtype_default_editor(param));
             }
             for (count, local_type) in &func.locals {
@@ -1067,127 +992,6 @@ impl Editor {
         }
         Ok(())
     }
-
-    fn setup_hint_bar(&mut self) {
-        use wasm_bindgen::JsCast;
-        let doc = web_sys::window().unwrap().document().unwrap();
-        let bar = doc
-            .create_element("div")
-            .unwrap()
-            .dyn_into::<web_sys::HtmlDivElement>()
-            .unwrap();
-        bar.set_class_name("autocomplete-hint-bar");
-        bar.set_attribute("style", "display:none").ok();
-
-        let editor = Rc::clone(&self.0);
-        let bar_clone = bar.clone();
-        let capture_click =
-            wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::Event| {
-                if let Some(target) = ev.target() {
-                    let t: Option<web_sys::Node> = target.dyn_into::<web_sys::Node>().ok();
-                    let b: web_sys::Node = bar_clone.clone().into();
-                    if t.is_none_or(|n| !b.contains(Some(&n))) {
-                        Editor(editor.clone()).dismiss_suggestions();
-                    }
-                }
-            }) as Box<dyn FnMut(_)>);
-        doc.add_event_listener_with_callback("click", capture_click.as_ref().unchecked_ref())
-            .ok();
-        capture_click.forget();
-
-        self.0.borrow_mut().hint_bar = Some(bar);
-    }
-
-    fn accept_suggestion(&mut self, suggestion: &str) -> Result<()> {
-        let sel = get_selection();
-        if !sel.is_collapsed() {
-            return Ok(());
-        }
-
-        if let Ok((line_idx, pos)) =
-            self.find_idx_and_utf16_pos(sel.focus_node().context("focus")?, sel.focus_offset())
-        {
-            let line = self.line(line_idx).suffix(Position::begin())?;
-            let typed = &line[..pos.offset.min(line.len())].trim_start();
-            let suffix = completion_suffix(suggestion, typed);
-            let range = sel.to_static_range().context("range")?;
-            self.replace_range(range, suffix)?;
-            self.dismiss_suggestions();
-        }
-        Ok(())
-    }
-
-    fn dismiss_suggestions(&mut self) {
-        self.0.borrow_mut().suggestions.clear();
-        if let Some(bar) = &self.0.borrow().hint_bar {
-            bar.set_attribute("style", "display:none").ok();
-            bar.set_inner_html("");
-        }
-    }
-
-    fn refresh_suggestion(&mut self) {
-        use wasm_bindgen::JsCast;
-        let sel = get_selection();
-        let new_sugg: Vec<String> = if sel.is_collapsed() {
-            self.find_idx_and_utf16_pos(
-                sel.focus_node().unwrap_or(self.text().as_node_ref()),
-                sel.focus_offset(),
-            )
-            .ok()
-            .and_then(|(idx, pos)| {
-                let line = self.line(idx).suffix(Position::begin()).ok()?;
-                let typed = line[..pos.offset.min(line.len())].trim_start();
-                Some(suggest(typed, 10))
-            })
-            .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-
-        self.0.borrow_mut().suggestions = new_sugg.clone();
-
-        if let Some(bar) = &self.0.borrow().hint_bar {
-            if new_sugg.is_empty() {
-                bar.set_attribute("style", "display:none").ok();
-                bar.set_inner_html("");
-            } else {
-                bar.set_attribute("style", "display:flex").ok();
-                bar.set_inner_html("");
-                let doc = web_sys::window().unwrap().document().unwrap();
-                let editor = Rc::clone(&self.0);
-                for s in &new_sugg {
-                    let s_clone = s.clone();
-                    let item = doc.create_element("div").unwrap();
-                    item.set_class_name("autocomplete-item");
-                    item.set_text_content(Some(s));
-                    let ed = Rc::clone(&editor);
-                    let c =
-                        wasm_bindgen::closure::Closure::wrap(Box::new(move |ev: web_sys::Event| {
-                            ev.stop_propagation();
-                            Editor(ed.clone()).accept_suggestion(&s_clone).ok();
-                        })
-                            as Box<dyn FnMut(_)>);
-                    item.add_event_listener_with_callback("click", c.as_ref().unchecked_ref())
-                        .ok();
-                    c.forget();
-                    bar.append_child(&item).ok();
-                }
-            }
-        }
-    }
-
-    pub fn attach_hint_bar(&self) {
-        if let Some(bar) = &self.0.borrow().hint_bar {
-            web_sys::window()
-                .unwrap()
-                .document()
-                .unwrap()
-                .body()
-                .unwrap()
-                .append_child(bar)
-                .ok();
-        }
-    }
 }
 
 pub struct InstructionTextIterator<'a> {
@@ -1201,7 +1005,7 @@ impl<'a> Iterator for InstructionTextIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.line_idx < self.editor.len()
-            && self.active_str_idx >= self.editor[self.line_idx].num_well_formed_strs()
+            && self.active_str_idx >= self.editor[self.line_idx].info().num_well_formed_strs()
         {
             self.line_idx += 1;
             self.active_str_idx = 0;
@@ -1283,5 +1087,43 @@ impl WithElement for Editor {
 impl Component for Editor {
     fn audit(&self) {
         self.0.borrow().component.audit()
+    }
+}
+
+impl Editor {
+    fn accept_suggestion(&mut self, suggestion: &str) -> Result<()> {
+        let sel = get_selection();
+        if !sel.is_collapsed() { return Ok(()); }
+        if let Ok((idx, pos)) = self.find_idx_and_utf16_pos(sel.focus_node().context("focus")?, sel.focus_offset()) {
+            let text = self.line(idx).instr().get().to_owned();
+            self.replace_range(&sel, completion_suffix(suggestion, text[..pos.offset.min(text.len())].trim_start()))?;
+            self.dismiss_suggestions();
+        }
+        Ok(())
+    }
+
+    fn dismiss_suggestions(&mut self) {
+        let mut inner = self.0.borrow_mut();
+        inner.suggestions.clear();
+        let bar = inner.hint_bar.clone();
+        drop(inner);
+        update_hint_bar(&bar, &[], |_| {});
+    }
+
+    fn refresh_suggestion(&mut self) {
+        let sel = get_selection();
+        let new_sugg = if sel.is_collapsed() {
+            (|| -> Option<Vec<String>> {
+                let (idx, pos) = self.find_idx_and_utf16_pos(sel.focus_node()?, sel.focus_offset()).ok()?;
+                let line = self.line(idx).suffix(Position::begin()).ok()?;
+                Some(suggest(line[..pos.offset.min(line.len())].trim_start(), 40))
+            })().unwrap_or_default()
+        } else { Vec::new() };
+        let mut inner = self.0.borrow_mut();
+        inner.suggestions = new_sugg.clone();
+        let bar = inner.hint_bar.clone();
+        drop(inner);
+        let editor = Rc::clone(&self.0);
+        update_hint_bar(&bar, &new_sugg, move |s| { Editor(editor.clone()).accept_suggestion(&s).ok(); });
     }
 }

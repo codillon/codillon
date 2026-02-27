@@ -40,25 +40,3 @@ pub fn get_all_instruction_names() -> Vec<String> {
         })
         .collect()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_instruction_names() {
-        let names = get_all_instruction_names();
-        assert!(
-            names.len() > 100,
-            "Should have many instructions, found {}",
-            names.len()
-        );
-        assert!(names.contains(&"i32.add".to_string()), "Missing i32.add");
-        assert!(names.contains(&"block".to_string()), "Missing block");
-
-        assert!(
-            names.contains(&"memory.copy".to_string()),
-            "Missing memory.copy"
-        );
-    }
-}

@@ -256,6 +256,24 @@ span.debug[data-debug]::after {
     box-shadow: none;
 }
 
+.step-slider::-moz-range-thumb {
+    width: var(--slider-thumb-size);
+    height: var(--slider-thumb-size);
+    border-radius: 50%;
+    background: var(--slider-thumb-bg);
+    border: var(--slider-thumb-border);
+    cursor: pointer;
+    box-shadow: none;
+}
+
+.graph-canvas {
+    background-color: #fff;
+    display: block; 
+    border: 1px solid darkred;
+    margin-left: auto;
+    margin-right: auto;
+}
+
 .autocomplete-hint-bar {
     position: fixed;
     bottom: 0;
@@ -317,15 +335,5 @@ span.debug[data-debug]::after {
     border-color: darkred;
     border-width: 2px;
     font-weight: bold;
-}
-
-
-.step-slider::-moz-range-thumb {
-    width: var(--slider-thumb-size);
-    height: var(--slider-thumb-size);
-    border-radius: 50%;
-    background: var(--slider-thumb-bg);
-    border: var(--slider-thumb-border);
-    cursor: pointer;
-    box-shadow: none;
+    background: #fff8f8;
 }
