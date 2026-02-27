@@ -737,6 +737,15 @@ pub fn set_selection_range(
     )
 }
 
+pub fn set_selection(sel: &SelectionHandle) {
+    set_selection_range(
+        &sel.anchor_node().unwrap(),
+        sel.anchor_offset(),
+        &sel.focus_node().unwrap(),
+        sel.focus_offset(),
+    )
+}
+
 // Wrapper for a Selection (giving access to its anchor and focus nodes as NodeRefs)
 pub struct SelectionHandle(web_sys::Selection);
 
