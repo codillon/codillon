@@ -362,7 +362,7 @@ impl Editor {
                     .get_data("text/plain")
                     .fmt_err()?,
             ),
-            "deleteContentBackward" | "deleteContentForward" => {
+            "deleteContentBackward" | "deleteContentForward" | "deleteByCut" => {
                 self.replace_range(target_range, "")
             }
             "insertParagraph" | "insertLineBreak" => self.replace_range(target_range, "\n"),
