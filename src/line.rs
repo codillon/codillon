@@ -7,9 +7,8 @@ use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
     jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
-    syntax::{
-        InstrKind, LineKind, LineSymbols, ModulePart, SyntheticWasm, parse_line, parse_line_symbols,
-    },
+    symbolic::{LineSymbols, parse_line_symbols},
+    syntax::{InstrKind, LineKind, ModulePart, SyntheticWasm, parse_line},
     utils::find_comment,
 };
 use anyhow::{Result, bail};
