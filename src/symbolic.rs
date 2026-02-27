@@ -3,8 +3,9 @@
 use std::collections::HashSet;
 use wast::{
     core::{
-        ElemPayload, Expression, Func, FuncKind, FunctionType, Global, GlobalKind, HeapType,
-        Instruction, Local, Memory, ModuleField, Table, TableKind, ValType,
+        ElemPayload, Export, ExportKind, Expression, Func, FuncKind, FunctionType, Global,
+        GlobalKind, HeapType, ImportItems, Imports, Instruction, ItemKind, ItemSig, Local, Memory,
+        ModuleField, Table, TableKind, ValType,
     },
     parser::{self, ParseBuffer},
     token::Index,
@@ -23,6 +24,31 @@ enum IdentifierContext {
     Elem,
     Local,
     Label,
+    Undefined,
+}
+
+impl From<ExportKind> for IdentifierContext {
+    fn from(kind: ExportKind) -> Self {
+        match kind {
+            ExportKind::Func => IdentifierContext::Func,
+            ExportKind::Table => IdentifierContext::Table,
+            ExportKind::Memory => IdentifierContext::Mem,
+            ExportKind::Global => IdentifierContext::Global,
+            _ => IdentifierContext::Undefined,
+        }
+    }
+}
+
+impl From<&ItemKind<'_>> for IdentifierContext {
+    fn from(kind: &ItemKind<'_>) -> Self {
+        match kind {
+            ItemKind::Func(_) | ItemKind::FuncExact(_) => IdentifierContext::Func,
+            ItemKind::Table(_) => IdentifierContext::Table,
+            ItemKind::Memory(_) => IdentifierContext::Mem,
+            ItemKind::Global(_) => IdentifierContext::Global,
+            _ => IdentifierContext::Undefined,
+        }
+    }
 }
 
 pub struct Identifiers {
@@ -63,6 +89,7 @@ impl Identifiers {
                 IdentifierContext::Elem => &mut self.elems,
                 IdentifierContext::Local => &mut self.locals,
                 IdentifierContext::Label => &mut self.labels,
+                IdentifierContext::Undefined => continue,
             };
             set.insert(symbol.name);
         }
@@ -297,6 +324,62 @@ impl<'a> From<FunctionType<'a>> for LineSymbols {
     }
 }
 
+impl<'a> From<ItemSig<'a>> for LineSymbols {
+    fn from(item: ItemSig) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        if let Some(id) = item.id {
+            line_symbols
+                .defines
+                .push(SymbolRef::new(id.name(), (&item.kind).into()));
+        }
+
+        match item.kind {
+            ItemKind::Func(f) | ItemKind::FuncExact(f) => {
+                if let Some(Index::Id(id)) = f.index {
+                    line_symbols
+                        .consumes
+                        .push(SymbolRef::new(id.name(), IdentifierContext::Type));
+                }
+                if let Some(ft) = f.inline {
+                    line_symbols.merge(ft.into());
+                }
+            }
+            ItemKind::Table(t) => {
+                line_symbols.merge(t.elem.heap.into());
+            }
+            ItemKind::Global(g) => {
+                line_symbols.merge(g.ty.into());
+            }
+            _ => {}
+        }
+
+        line_symbols
+    }
+}
+
+impl<'a> From<Export<'a>> for LineSymbols {
+    fn from(export: Export) -> Self {
+        match export.item {
+            Index::Id(id) => Self {
+                defines: Vec::new(),
+                consumes: vec![SymbolRef::new(id.name(), export.kind.into())],
+            },
+            _ => Self::default(),
+        }
+    }
+}
+
+impl<'a> From<Imports<'a>> for LineSymbols {
+    fn from(import: Imports) -> Self {
+        match import.items {
+            ImportItems::Single { sig, .. } => sig.into(),
+            ImportItems::Group1 { .. } => Self::default(),
+            ImportItems::Group2 { sig, .. } => sig.into(),
+        }
+    }
+}
+
 impl<'a> From<Local<'a>> for LineSymbols {
     fn from(local: Local) -> Self {
         let mut line_symbols = LineSymbols::default();
@@ -382,15 +465,13 @@ impl<'a> From<Table<'a>> for LineSymbols {
 
 impl<'a> From<Memory<'a>> for LineSymbols {
     fn from(memory: Memory) -> Self {
-        let mut line_symbols = LineSymbols::default();
-
-        if let Some(id) = memory.id {
-            line_symbols
-                .defines
-                .push(SymbolRef::new(id.name(), IdentifierContext::Mem));
-        };
-
-        line_symbols
+        match memory.id {
+            Some(id) => Self {
+                defines: vec![SymbolRef::new(id.name(), IdentifierContext::Mem)],
+                consumes: Vec::new(),
+            },
+            None => Self::default(),
+        }
     }
 }
 
@@ -412,6 +493,8 @@ pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
             };
             if let Ok(field) = parser::parse::<ModuleField>(&buf) {
                 match field {
+                    ModuleField::Export(e) => return e.into(),
+                    ModuleField::Import(i) => return i.into(),
                     ModuleField::Global(g) => return g.into(),
                     ModuleField::Table(t) => return t.into(),
                     ModuleField::Memory(m) => return m.into(),
@@ -465,9 +548,9 @@ pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wast::parser::parse;
-    use anyhow::Result;
     use crate::syntax::InstrKind;
+    use anyhow::Result;
+    use wast::parser::parse;
 
     #[test]
     fn test_parse_line_symbols() -> Result<()> {
