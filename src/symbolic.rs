@@ -1,6 +1,5 @@
 // Symbolic reference utilities for producing valid syntax
 
-use std::collections::HashSet;
 use wast::{
     core::{
         ElemPayload, Export, ExportKind, Expression, Func, FuncKind, FunctionType, Global,
@@ -51,52 +50,8 @@ impl From<&ItemKind<'_>> for IndexSpace {
     }
 }
 
-pub struct Identifiers {
-    // defined symbolic references in different indentifier contexts
-    types: HashSet<String>,
-    globals: HashSet<String>,
-    mems: HashSet<String>,
-    tables: HashSet<String>,
-    funcs: HashSet<String>,
-    datas: HashSet<String>,
-    elems: HashSet<String>,
-    locals: HashSet<String>,
-    labels: HashSet<String>,
-}
-
-impl Identifiers {
-    pub fn reset(&mut self) {
-        self.types.clear();
-        self.globals.clear();
-        self.mems.clear();
-        self.tables.clear();
-        self.funcs.clear();
-        self.datas.clear();
-        self.elems.clear();
-        self.locals.clear();
-        self.labels.clear();
-    }
-
-    pub fn push_symbols(&mut self, symbols: Vec<SymbolRef>) {
-        for symbol in symbols {
-            let set = match symbol.space {
-                IndexSpace::Type => &mut self.types,
-                IndexSpace::Global => &mut self.globals,
-                IndexSpace::Mem => &mut self.mems,
-                IndexSpace::Table => &mut self.tables,
-                IndexSpace::Func => &mut self.funcs,
-                IndexSpace::Data => &mut self.datas,
-                IndexSpace::Elem => &mut self.elems,
-                IndexSpace::Local => &mut self.locals,
-                IndexSpace::Label => &mut self.labels,
-                IndexSpace::Undefined => continue,
-            };
-            set.insert(symbol.name);
-        }
-    }
-}
-
 #[derive(Clone)]
+#[allow(dead_code)] // TODO remove this when SymbolRef is read in syntax fixing
 pub struct SymbolRef {
     name: String,
     space: IndexSpace,
