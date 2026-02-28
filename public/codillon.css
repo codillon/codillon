@@ -218,29 +218,6 @@ span.debug[data-debug]::after {
     transform: scaleY(0) translateX(0) translateY(0);
 }
 
-.toolbar {
-    display: flex;
-    gap: 10px;
-    padding: 8px 0;
-    margin-bottom: 4px;
-    margin-left: 20pt;
-}
-
-.toolbar-button {
-    font-family: 'MLMSansDemiCond10-Regular';
-    font-size: 14pt;
-    background-color: #fffff0;
-    color: darkred;
-    border: 1px solid darkred;
-    padding: 4px 12px;
-    cursor: pointer;
-}
-
-.toolbar-button:hover {
-    background-color: darkred;
-    color: #fffff0;
-}
-
 .step-slider {
     appearance: none;
     background: transparent;

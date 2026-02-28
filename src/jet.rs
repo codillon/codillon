@@ -787,6 +787,27 @@ pub fn now_ms() -> f64 {
         .now()
 }
 
+// Wrapper for browser Storage (e.g. localStorage), removing the need for direct window() access
+pub struct StorageHandle(web_sys::Storage);
+
+impl StorageHandle {
+    pub fn local_storage() -> Option<Self> {
+        web_sys::window()?
+            .local_storage()
+            .ok()
+            .flatten()
+            .map(StorageHandle)
+    }
+
+    pub fn get_item(&self, key: &str) -> Option<String> {
+        self.0.get_item(key).ok().flatten()
+    }
+
+    pub fn set_item(&self, key: &str, value: &str) {
+        let _ = self.0.set_item(key, value);
+    }
+}
+
 pub trait RangeLike {
     fn node1(&self) -> Option<NodeRef>;
     fn node2(&self) -> Option<NodeRef>;
