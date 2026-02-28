@@ -16,7 +16,7 @@ delegate = "0.13.5"
 js-sys = "0.3.85"
 str_indices = "0.4.4"
 wasm-bindgen = "0.2.108"
-web-sys = { version = "0.3.85", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "SvgElement", "SvgLineElement", "SvgDefsElement", "SvgMarkerElement", "SvggElement", "SvgCircleElement", "SvgUseElement", "SvgPathElement", "HtmlInputElement", "Performance", "Storage"] }
+web-sys = { version = "0.3.85", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "SvgElement", "SvgLineElement", "SvgDefsElement", "SvgMarkerElement", "SvggElement", "SvgCircleElement", "SvgUseElement", "SvgPathElement", "HtmlInputElement", "HtmlCanvasElement", "CanvasRenderingContext2d", "Performance", "Storage"] }
 wasm-bindgen-futures = "0.4.58"
 wasm-encoder = { version = "0.245.0", features = ["wasmparser"] }
 

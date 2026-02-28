@@ -1,6 +1,7 @@
 // The Codillon code editor
 
 use crate::{
+    action_history::{ActionHistory, Edit, Selection},
     debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -25,7 +26,7 @@ use std::{
     rc::{Rc, Weak},
 };
 use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
+use web_sys::{HtmlCanvasElement, HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<
@@ -33,37 +34,16 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, ()),
+            (
+                ElementHandle<HtmlInputElement>,
+                (ElementHandle<HtmlCanvasElement>, ()),
+            ),
         ),
     ),
     HtmlDivElement,
 >;
 
 pub const LINE_SPACING: usize = 40;
-// Chrome uses 1 second and VSCode uses 300 - 500 ms, but for comparatively short
-// WebAssembly lines, 150 ms felt more natural.
-pub const GROUP_INTERVAL_MS: f64 = 150.0;
-// 10 minutes - arbitrary
-pub const KEEP_DURATION_MS: f64 = 10.0 * 60.0 * 1000.0;
-
-#[derive(Clone)]
-struct Selection {
-    start_line: usize,
-    start_pos: Position,
-    end_line: usize,
-    end_pos: Position,
-}
-
-#[derive(Clone)]
-struct Edit {
-    start_line: usize,
-    old_lines: Vec<String>,
-    // new lines
-    new_lines: Vec<String>,
-    selection_before: Selection,
-    selection_after: Selection,
-    time_ms: f64,
-}
 
 #[derive(Clone, Default)]
 pub struct ProgramState {
@@ -78,11 +58,7 @@ pub struct ProgramState {
 struct _Editor {
     component: ComponentType,
     factory: ElementFactory,
-
-    // Storing changes
-    undo_stack: Vec<Edit>,
-    redo_stack: Vec<Edit>,
-    last_time_ms: f64,
+    action_history: ActionHistory,
 
     program_state: ProgramState,
     function_locals: Vec<Vec<WebAssemblyTypes>>,
@@ -107,15 +83,13 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), ()),
+                        ((factory.input()), ((factory.canvas()), ())),
                     ),
                 ),
                 factory.div(),
             ),
             factory,
-            undo_stack: Vec::new(),
-            redo_stack: Vec::new(),
-            last_time_ms: 0.0,
+            action_history: ActionHistory::default(),
             program_state: ProgramState::default(),
             function_locals: Vec::new(),
             globals: Vec::new(),
@@ -152,6 +126,8 @@ impl Editor {
             let mut binding = ret.0.borrow_mut();
             let slider = &mut binding.component.get_mut().1.1.0;
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
+            let canvas = &mut binding.component.get_mut().1.1.1.0;
+            ret.setup_canvas(canvas);
         }
         ret.image_mut().set_attribute("class", "annotations");
 
@@ -357,9 +333,8 @@ impl Editor {
                     new_lines.push(self.line(i).suffix(Position::begin())?);
                 }
                 // Store new edit
-                let time_ms = now_ms();
-                self.store_edit(
-                    Edit {
+                {
+                    self.0.borrow_mut().action_history.store_edit(Edit {
                         start_line,
                         old_lines: backup,
                         new_lines,
@@ -375,10 +350,9 @@ impl Editor {
                             end_line: fixup_line,
                             end_pos: new_cursor_pos,
                         },
-                        time_ms,
-                    },
-                    time_ms,
-                );
+                        time_ms: now_ms(),
+                    });
+                }
             }
             Err(e) => {
                 log_1(&format!("reverting after {e}").into());
@@ -428,7 +402,7 @@ impl Editor {
                     .get_data("text/plain")
                     .fmt_err()?,
             ),
-            "deleteContentBackward" | "deleteContentForward" => {
+            "deleteContentBackward" | "deleteContentForward" | "deleteByCut" => {
                 self.replace_range(target_range, "")
             }
             "insertParagraph" | "insertLineBreak" => self.replace_range(target_range, "\n"),
@@ -737,6 +711,27 @@ impl Editor {
         lines[line_num].set_highlight(true);
     }
 
+    fn setup_canvas(&self, canvas: &mut ElementHandle<HtmlCanvasElement>) {
+        canvas.set_attribute("class", "graph-canvas");
+        canvas.set_size_pixels(500, 500);
+        canvas.clear_canvas();
+    }
+
+    fn draw_point(&self, x: f64, y: f64, canvas: &ElementHandle<HtmlCanvasElement>) {
+        canvas.with_2d_context_and_size(|context, width, height| {
+            let w = width as f64 / 2.0;
+            let h = height as f64 / 2.0;
+
+            // map to pixel space. y is inverted because (0, 0) is top left corner of HTML canvas
+            let px = w + x * w;
+            let py = h - y * h;
+
+            context.begin_path();
+            let _ = context.arc(px, py, 3.0, 0.0, std::f64::consts::PI * 2.0);
+            context.fill();
+        });
+    }
+
     fn setup_slider(
         &self,
         editor: Weak<RefCell<_Editor>>,
@@ -836,6 +831,8 @@ impl Editor {
             if let Some((first_start, _first_end)) = inner.function_ranges.first().cloned() {
                 inner.saved_states[first_start] = Some(inner.program_state.clone());
             }
+            let canvas = &inner.component.get_mut().1.1.1.0;
+            canvas.clear_canvas();
         }
         with_changes(|changes| {
             for (i, change) in changes.enumerate().skip(start).take(stop - start) {
@@ -874,36 +871,12 @@ impl Editor {
                     memory[idx_usize] = *val;
                 }
                 inner.saved_states[change.line_number as usize] = Some(inner.program_state.clone());
+                if let Some((x, y)) = &change.point {
+                    let canvas = &inner.component.get_mut().1.1.1.0;
+                    self.draw_point(*x, *y, canvas);
+                }
             }
         });
-    }
-
-    fn store_edit(&mut self, edit: Edit, now_ms: f64) {
-        let mut inner = self.0.borrow_mut();
-        inner.redo_stack.clear();
-        // Combine edit if close together
-        if now_ms - inner.last_time_ms <= GROUP_INTERVAL_MS
-            && let Some(last_edit) = inner.undo_stack.last_mut()
-            && last_edit.start_line == edit.start_line
-            && last_edit.new_lines.len() == 1
-            && edit.new_lines.len() == 1
-        {
-            last_edit.new_lines = edit.new_lines;
-            last_edit.selection_after = edit.selection_after;
-            last_edit.time_ms = now_ms;
-        } else {
-            inner.undo_stack.push(edit);
-        }
-        // Remove old edits
-        let num_discard = inner
-            .undo_stack
-            .iter()
-            .take_while(|ed| (now_ms - ed.time_ms) > KEEP_DURATION_MS)
-            .count();
-        if num_discard > 0 {
-            inner.undo_stack.drain(0..num_discard);
-        }
-        inner.last_time_ms = now_ms;
     }
 
     fn apply_selection(
@@ -959,7 +932,7 @@ impl Editor {
     // Undo the most recent edit.
     pub fn undo(&mut self) -> Result<()> {
         let mut inner = self.0.borrow_mut();
-        if let Some(edit) = inner.undo_stack.pop() {
+        if let Some(edit) = inner.action_history.undo_stack.pop() {
             drop(inner);
             self.apply_selection(
                 edit.start_line,
@@ -968,8 +941,8 @@ impl Editor {
                 &edit.selection_before,
             )?;
             let mut inner = self.0.borrow_mut();
-            inner.redo_stack.push(edit);
-            inner.last_time_ms = 0.0;
+            inner.action_history.redo_stack.push(edit);
+            inner.action_history.last_time_ms = 0.0;
         }
         Ok(())
     }
@@ -977,7 +950,7 @@ impl Editor {
     // Re-apply most recently undone edit
     pub fn redo(&mut self) -> Result<()> {
         let mut inner = self.0.borrow_mut();
-        if let Some(edit) = inner.redo_stack.pop() {
+        if let Some(edit) = inner.action_history.redo_stack.pop() {
             drop(inner);
             self.apply_selection(
                 edit.start_line,
@@ -986,8 +959,8 @@ impl Editor {
                 &edit.selection_after,
             )?;
             let mut inner = self.0.borrow_mut();
-            inner.undo_stack.push(edit);
-            inner.last_time_ms = 0.0;
+            inner.action_history.undo_stack.push(edit);
+            inner.action_history.last_time_ms = 0.0;
         }
         Ok(())
     }
