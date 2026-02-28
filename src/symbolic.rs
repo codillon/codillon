@@ -494,16 +494,11 @@ pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
             if let Ok(field) = parser::parse::<ModuleField>(&buf) {
                 match field {
                     ModuleField::Export(e) => return e.into(),
-                    ModuleField::Import(i) => {
-                        println!("import called");
-                        return i.into();
-                    }
+                    ModuleField::Import(i) => return i.into(),
                     ModuleField::Global(g) => return g.into(),
                     ModuleField::Table(t) => return t.into(),
                     ModuleField::Memory(m) => return m.into(),
-                    _ => {
-                        println!("not a modulefield");
-                    }
+                    _ => {}
                 }
             }
 
