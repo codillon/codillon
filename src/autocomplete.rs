@@ -27,7 +27,6 @@ pub fn setup_hint_bar(mut on_click_outside: impl FnMut() + 'static) -> HtmlDivEl
     let bar: HtmlDivElement = doc.create_element("div").unwrap().dyn_into().unwrap();
     bar.set_class_name("autocomplete-hint-bar");
     bar.set_attribute("style", "display:none").ok();
-
     let b = bar.clone();
     let click = wasm_bindgen::closure::Closure::<dyn FnMut(_)>::wrap(Box::new(
         move |ev: web_sys::MouseEvent| {
@@ -49,16 +48,20 @@ pub fn setup_hint_bar(mut on_click_outside: impl FnMut() + 'static) -> HtmlDivEl
     let bw = bar.clone();
     let wheel = wasm_bindgen::closure::Closure::<dyn FnMut(_)>::wrap(Box::new(
         move |ev: web_sys::WheelEvent| {
-            if ev.delta_y() != 0.0 {
+            if ev.delta_y() != 0.0 || ev.delta_x() != 0.0 {
                 ev.prevent_default();
-                bw.set_scroll_left(bw.scroll_left() + ev.delta_y() as i32);
+                let delta = if ev.delta_x() != 0.0 {
+                    ev.delta_x()
+                } else {
+                    ev.delta_y()
+                };
+                bw.set_scroll_left(bw.scroll_left() + (delta * 2.0) as i32);
             }
         },
     ));
     bar.add_event_listener_with_callback("wheel", wheel.as_ref().unchecked_ref())
         .ok();
     wheel.forget();
-
     bar
 }
 
