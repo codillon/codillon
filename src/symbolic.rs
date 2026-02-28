@@ -494,11 +494,16 @@ pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
             if let Ok(field) = parser::parse::<ModuleField>(&buf) {
                 match field {
                     ModuleField::Export(e) => return e.into(),
-                    ModuleField::Import(i) => return i.into(),
+                    ModuleField::Import(i) => {
+                        println!("import called");
+                        return i.into();
+                    }
                     ModuleField::Global(g) => return g.into(),
                     ModuleField::Table(t) => return t.into(),
                     ModuleField::Memory(m) => return m.into(),
-                    _ => {}
+                    _ => {
+                        println!("not a modulefield");
+                    }
                 }
             }
 
@@ -660,6 +665,31 @@ mod tests {
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert!(symbols.defines.is_empty());
         assert!(symbols.consumes.is_empty());
+
+        line = "(export \"foo\" (func $myfunc))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert!(symbols.defines.is_empty());
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0].name, "myfunc");
+        assert_eq!(symbols.consumes[0].space, IdentifierContext::Func);
+
+        line = "(import \"env\" \"fn\"  (func $f (param $p i32)))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 2);
+        assert_eq!(symbols.defines[0].name, "f");
+        assert_eq!(symbols.defines[0].space, IdentifierContext::Func);
+        assert_eq!(symbols.defines[1].name, "p");
+        assert_eq!(symbols.defines[1].space, IdentifierContext::Local);
+        assert!(symbols.consumes.is_empty());
+
+        line = "(import \"env\" \"fn\"  (func $f (type $t)))";
+        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        assert_eq!(symbols.defines.len(), 1);
+        assert_eq!(symbols.defines[0].name, "f");
+        assert_eq!(symbols.defines[0].space, IdentifierContext::Func);
+        assert_eq!(symbols.consumes.len(), 1);
+        assert_eq!(symbols.consumes[0].name, "t");
+        assert_eq!(symbols.consumes[0].space, IdentifierContext::Type);
 
         line = "(func $f (param $p i32) (result (ref $ft)) (local $l i64))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
