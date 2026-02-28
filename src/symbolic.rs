@@ -14,7 +14,7 @@ use wast::{
 use crate::syntax::{LineKind, ModulePart};
 
 #[derive(Clone, Debug, PartialEq)]
-enum IdentifierContext {
+enum IndexSpace {
     Type,
     Global,
     Mem,
@@ -27,26 +27,26 @@ enum IdentifierContext {
     Undefined,
 }
 
-impl From<ExportKind> for IdentifierContext {
+impl From<ExportKind> for IndexSpace {
     fn from(kind: ExportKind) -> Self {
         match kind {
-            ExportKind::Func => IdentifierContext::Func,
-            ExportKind::Table => IdentifierContext::Table,
-            ExportKind::Memory => IdentifierContext::Mem,
-            ExportKind::Global => IdentifierContext::Global,
-            _ => IdentifierContext::Undefined,
+            ExportKind::Func => IndexSpace::Func,
+            ExportKind::Table => IndexSpace::Table,
+            ExportKind::Memory => IndexSpace::Mem,
+            ExportKind::Global => IndexSpace::Global,
+            _ => IndexSpace::Undefined,
         }
     }
 }
 
-impl From<&ItemKind<'_>> for IdentifierContext {
+impl From<&ItemKind<'_>> for IndexSpace {
     fn from(kind: &ItemKind<'_>) -> Self {
         match kind {
-            ItemKind::Func(_) | ItemKind::FuncExact(_) => IdentifierContext::Func,
-            ItemKind::Table(_) => IdentifierContext::Table,
-            ItemKind::Memory(_) => IdentifierContext::Mem,
-            ItemKind::Global(_) => IdentifierContext::Global,
-            _ => IdentifierContext::Undefined,
+            ItemKind::Func(_) | ItemKind::FuncExact(_) => IndexSpace::Func,
+            ItemKind::Table(_) => IndexSpace::Table,
+            ItemKind::Memory(_) => IndexSpace::Mem,
+            ItemKind::Global(_) => IndexSpace::Global,
+            _ => IndexSpace::Undefined,
         }
     }
 }
@@ -80,16 +80,16 @@ impl Identifiers {
     pub fn push_symbols(&mut self, symbols: Vec<SymbolRef>) {
         for symbol in symbols {
             let set = match symbol.space {
-                IdentifierContext::Type => &mut self.types,
-                IdentifierContext::Global => &mut self.globals,
-                IdentifierContext::Mem => &mut self.mems,
-                IdentifierContext::Table => &mut self.tables,
-                IdentifierContext::Func => &mut self.funcs,
-                IdentifierContext::Data => &mut self.datas,
-                IdentifierContext::Elem => &mut self.elems,
-                IdentifierContext::Local => &mut self.locals,
-                IdentifierContext::Label => &mut self.labels,
-                IdentifierContext::Undefined => continue,
+                IndexSpace::Type => &mut self.types,
+                IndexSpace::Global => &mut self.globals,
+                IndexSpace::Mem => &mut self.mems,
+                IndexSpace::Table => &mut self.tables,
+                IndexSpace::Func => &mut self.funcs,
+                IndexSpace::Data => &mut self.datas,
+                IndexSpace::Elem => &mut self.elems,
+                IndexSpace::Local => &mut self.locals,
+                IndexSpace::Label => &mut self.labels,
+                IndexSpace::Undefined => continue,
             };
             set.insert(symbol.name);
         }
@@ -99,11 +99,11 @@ impl Identifiers {
 #[derive(Clone)]
 pub struct SymbolRef {
     name: String,
-    space: IdentifierContext,
+    space: IndexSpace,
 }
 
 impl SymbolRef {
-    fn new(name: &str, space: IdentifierContext) -> Self {
+    fn new(name: &str, space: IndexSpace) -> Self {
         Self {
             name: name.to_string(),
             space,
@@ -136,19 +136,19 @@ impl From<Instruction<'_>> for LineSymbols {
             // Variant(Box<BlockType<'a>>)
             Instruction::Block(i) | Instruction::Loop(i) | Instruction::If(i) => {
                 if let Some(id) = i.label {
-                    defines.push(SymbolRef::new(id.name(), IdentifierContext::Label));
+                    defines.push(SymbolRef::new(id.name(), IndexSpace::Label));
                 }
 
                 // These instructions can involve (type $id), e.g. "block (type $x)"
                 if let Some(Index::Id(id)) = i.ty.index {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Type));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Type));
                 }
             }
 
             // Variant(Index<'a>)
             Instruction::Br(i) | Instruction::BrIf(i) => {
                 if let Index::Id(id) = i {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Label));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Label));
                 }
             }
 
@@ -157,19 +157,19 @@ impl From<Instruction<'_>> for LineSymbols {
             | Instruction::CallRef(i)
             | Instruction::ReturnCallRef(i) => {
                 if let Index::Id(id) = i {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Func));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Func));
                 }
             }
 
             Instruction::LocalGet(i) | Instruction::LocalSet(i) | Instruction::LocalTee(i) => {
                 if let Index::Id(id) = i {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Local));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Local));
                 }
             }
 
             Instruction::GlobalGet(i) | Instruction::GlobalSet(i) => {
                 if let Index::Id(id) = i {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Global));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Global));
                 }
             }
 
@@ -180,14 +180,14 @@ impl From<Instruction<'_>> for LineSymbols {
             | Instruction::ArrayGet(i)
             | Instruction::ArraySet(i) => {
                 if let Index::Id(id) = i {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Type));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Type));
                 }
             }
 
             // Variant(Option<Id<'a>>)
             Instruction::Else(i) | Instruction::End(i) => {
                 if let Some(id) = i {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Label));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Label));
                 }
             }
 
@@ -198,7 +198,7 @@ impl From<Instruction<'_>> for LineSymbols {
             | Instruction::TableSize(i)
             | Instruction::TableGrow(i) => {
                 if let Index::Id(id) = i.dst {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Table));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Table));
                 }
             }
 
@@ -212,7 +212,7 @@ impl From<Instruction<'_>> for LineSymbols {
             | Instruction::F32Store(i)
             | Instruction::F64Store(i) => {
                 if let Index::Id(id) = i.memory {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Mem));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Mem));
                 }
             }
 
@@ -222,44 +222,44 @@ impl From<Instruction<'_>> for LineSymbols {
             | Instruction::MemoryFill(i)
             | Instruction::MemoryDiscard(i) => {
                 if let Index::Id(id) = i.mem {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Mem));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Mem));
                 }
             }
 
             // Special variants
             Instruction::MemoryInit(i) => {
                 if let Index::Id(id) = i.data {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Data));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Data));
                 }
                 if let Index::Id(id) = i.mem {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Mem));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Mem));
                 }
             }
 
             Instruction::MemoryCopy(i) => {
                 if let Index::Id(id) = i.dst {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Mem));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Mem));
                 }
                 if let Index::Id(id) = i.src {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Mem));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Mem));
                 }
             }
 
             Instruction::TableInit(i) => {
                 if let Index::Id(id) = i.table {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Table));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Table));
                 }
                 if let Index::Id(id) = i.elem {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Elem));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Elem));
                 }
             }
 
             Instruction::TableCopy(i) => {
                 if let Index::Id(id) = i.dst {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Table));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Table));
                 }
                 if let Index::Id(id) = i.src {
-                    consumes.push(SymbolRef::new(id.name(), IdentifierContext::Table));
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Table));
                 }
             }
 
@@ -287,7 +287,7 @@ impl<'a> From<HeapType<'a>> for LineSymbols {
         match ht {
             HeapType::Concrete(Index::Id(id)) | HeapType::Exact(Index::Id(id)) => Self {
                 defines: Vec::new(),
-                consumes: vec![SymbolRef::new(id.name(), IdentifierContext::Type)],
+                consumes: vec![SymbolRef::new(id.name(), IndexSpace::Type)],
             },
             _ => Self::default(),
         }
@@ -311,7 +311,7 @@ impl<'a> From<FunctionType<'a>> for LineSymbols {
             if let Some(id) = id {
                 line_symbols
                     .defines
-                    .push(SymbolRef::new(id.name(), IdentifierContext::Local));
+                    .push(SymbolRef::new(id.name(), IndexSpace::Local));
             };
             line_symbols.merge((*vt).into());
         }
@@ -339,7 +339,7 @@ impl<'a> From<ItemSig<'a>> for LineSymbols {
                 if let Some(Index::Id(id)) = f.index {
                     line_symbols
                         .consumes
-                        .push(SymbolRef::new(id.name(), IdentifierContext::Type));
+                        .push(SymbolRef::new(id.name(), IndexSpace::Type));
                 }
                 if let Some(ft) = f.inline {
                     line_symbols.merge(ft.into());
@@ -387,7 +387,7 @@ impl<'a> From<Local<'a>> for LineSymbols {
         if let Some(id) = local.id {
             line_symbols
                 .defines
-                .push(SymbolRef::new(id.name(), IdentifierContext::Local));
+                .push(SymbolRef::new(id.name(), IndexSpace::Local));
         };
 
         line_symbols.merge(local.ty.into());
@@ -403,7 +403,7 @@ impl<'a> From<Global<'a>> for LineSymbols {
         if let Some(id) = global.id {
             line_symbols
                 .defines
-                .push(SymbolRef::new(id.name(), IdentifierContext::Global));
+                .push(SymbolRef::new(id.name(), IndexSpace::Global));
         };
 
         if let GlobalKind::Inline(expr) = global.kind {
@@ -421,7 +421,7 @@ impl<'a> From<Table<'a>> for LineSymbols {
         if let Some(id) = table.id {
             line_symbols
                 .defines
-                .push(SymbolRef::new(id.name(), IdentifierContext::Table));
+                .push(SymbolRef::new(id.name(), IndexSpace::Table));
         };
 
         match table.kind {
@@ -442,9 +442,7 @@ impl<'a> From<Table<'a>> for LineSymbols {
                     ElemPayload::Indices(indices) => {
                         line_symbols.consumes.extend(indices.iter().filter_map(
                             |index| match index {
-                                Index::Id(id) => {
-                                    Some(SymbolRef::new(id.name(), IdentifierContext::Func))
-                                }
+                                Index::Id(id) => Some(SymbolRef::new(id.name(), IndexSpace::Func)),
                                 _ => None,
                             },
                         ));
@@ -467,7 +465,7 @@ impl<'a> From<Memory<'a>> for LineSymbols {
     fn from(memory: Memory) -> Self {
         match memory.id {
             Some(id) => Self {
-                defines: vec![SymbolRef::new(id.name(), IdentifierContext::Mem)],
+                defines: vec![SymbolRef::new(id.name(), IndexSpace::Mem)],
                 consumes: Vec::new(),
             },
             None => Self::default(),
@@ -527,7 +525,7 @@ pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
             if let Some(id) = func.id {
                 line_symbols
                     .defines
-                    .push(SymbolRef::new(id.name(), IdentifierContext::Func));
+                    .push(SymbolRef::new(id.name(), IndexSpace::Func));
             }
             // Param & Result
             if let Some(ft) = func.ty.inline {
@@ -563,24 +561,24 @@ mod tests {
         symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::OtherStructured));
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "label");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Label);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Label);
         assert!(symbols.consumes.is_empty());
 
         line = "block $label (type $x) (param i32)";
         symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::OtherStructured));
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "label");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Label);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Label);
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "x");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Type);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = " br $label";
         symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "label");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Label);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Label);
 
         line = "br 1";
         symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
@@ -592,23 +590,23 @@ mod tests {
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "something");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Local);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Local);
 
         line = "memory.copy $x $y";
         symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 2);
         assert_eq!(symbols.consumes[0].name, "x");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Mem);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Mem);
         assert_eq!(symbols.consumes[1].name, "y");
-        assert_eq!(symbols.consumes[1].space, IdentifierContext::Mem);
+        assert_eq!(symbols.consumes[1].space, IndexSpace::Mem);
 
         line = "memory.copy 10 $y";
         symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "y");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Mem);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Mem);
 
         line = "(global i32 (i32.const 0))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
@@ -619,41 +617,41 @@ mod tests {
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "x");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Global);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Global);
         assert!(symbols.consumes.is_empty());
 
         line = "(global $x i32 (global.get $y))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "x");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Global);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Global);
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "y");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Global);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Global);
 
         line = "(table $t 1 (ref $ft))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "t");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Table);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Table);
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "ft");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Type);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = "(table funcref (elem $f1 $f2))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 2);
         assert_eq!(symbols.consumes[0].name, "f1");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Func);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Func);
         assert_eq!(symbols.consumes[1].name, "f2");
-        assert_eq!(symbols.consumes[1].space, IdentifierContext::Func);
+        assert_eq!(symbols.consumes[1].space, IndexSpace::Func);
 
         line = "(memory $mem 1 2)";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "mem");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Mem);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Mem);
         assert!(symbols.consumes.is_empty());
 
         line = "(memory $mem 1 2) (func)";
@@ -666,57 +664,57 @@ mod tests {
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "myfunc");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Func);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Func);
 
         line = "(import \"env\" \"fn\"  (func $f (param $p i32)))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 2);
         assert_eq!(symbols.defines[0].name, "f");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Func);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Func);
         assert_eq!(symbols.defines[1].name, "p");
-        assert_eq!(symbols.defines[1].space, IdentifierContext::Local);
+        assert_eq!(symbols.defines[1].space, IndexSpace::Local);
         assert!(symbols.consumes.is_empty());
 
         line = "(import \"env\" \"fn\"  (func $f (type $t)))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "f");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Func);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Func);
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "t");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Type);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = "(func $f (param $p i32) (result (ref $ft)) (local $l i64))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 3);
         assert_eq!(symbols.defines[0].name, "f");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Func);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Func);
         assert_eq!(symbols.defines[1].name, "p");
-        assert_eq!(symbols.defines[1].space, IdentifierContext::Local);
+        assert_eq!(symbols.defines[1].space, IndexSpace::Local);
         assert_eq!(symbols.defines[2].name, "l");
-        assert_eq!(symbols.defines[2].space, IdentifierContext::Local);
+        assert_eq!(symbols.defines[2].space, IndexSpace::Local);
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "ft");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Type);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = " func  (local $l1 i64) (local $l2 (ref $ft))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 2);
         assert_eq!(symbols.defines[0].name, "l1");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Local);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Local);
         assert_eq!(symbols.defines[1].name, "l2");
-        assert_eq!(symbols.defines[1].space, IdentifierContext::Local);
+        assert_eq!(symbols.defines[1].space, IndexSpace::Local);
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "ft");
-        assert_eq!(symbols.consumes[0].space, IdentifierContext::Type);
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = "  (export \"\") (param $x i32) (param $y i64))";
         symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 2);
         assert_eq!(symbols.defines[0].name, "x");
-        assert_eq!(symbols.defines[0].space, IdentifierContext::Local);
+        assert_eq!(symbols.defines[0].space, IndexSpace::Local);
         assert_eq!(symbols.defines[1].name, "y");
-        assert_eq!(symbols.defines[1].space, IdentifierContext::Local);
+        assert_eq!(symbols.defines[1].space, IndexSpace::Local);
         assert!(symbols.consumes.is_empty());
 
         line = "(import \"\" \"\") (local $l f32)";
