@@ -512,6 +512,21 @@ struct SimulatedStack {
     idx_stack: Vec<(usize, usize)>,
 }
 
+// Opcodes that make the rest of the frame unreachable and pop all accessible operands.
+// (Unfortunate that we have to hardcode this.)
+fn is_unreachable_op(op: &Operator<'_>) -> bool {
+    matches!(
+        op,
+        Operator::Return
+            | Operator::Unreachable
+            | Operator::Throw { .. }
+            | Operator::ThrowRef
+            | Operator::Br { .. }
+            | Operator::BrTable { .. }
+            | Operator::Rethrow { .. }
+    )
+}
+
 impl SimulatedStack {
     // Given an operator, validate it and return its type (the param and result types).
     fn op(
@@ -530,21 +545,27 @@ impl SimulatedStack {
         assert!(pre_instr_height >= frame_base_height);
         let accessible_operands = pre_instr_height - frame_base_height;
 
-        let untyped = untyped || pop_count > accessible_operands; // can happen after unreachable
-
-        let inputs = if untyped {
-            vec![]
+        let pop_count = if is_unreachable_op(op) {
+            accessible_operands
         } else {
-            (0..pop_count)
-                .map(|i| InputType {
-                    instr_type: validator
-                        .get_operand_type(pop_count - i - 1)
-                        .flatten()
-                        .unwrap(),
-                    origin: self.idx_stack[pre_instr_height + i - pop_count],
-                })
-                .collect::<Vec<_>>()
+            pop_count
         };
+
+        let inputs = (0..pop_count)
+            .map(|i| {
+                if untyped || (pop_count - i - 1) >= accessible_operands {
+                    None
+                } else {
+                    Some(InputType {
+                        instr_type: validator
+                            .get_operand_type(pop_count - i - 1)
+                            .flatten()
+                            .unwrap(),
+                        origin: self.idx_stack[pre_instr_height + i - pop_count],
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
 
         for _ in 0..std::cmp::min(pop_count, accessible_operands) {
             self.idx_stack.pop();
@@ -571,11 +592,7 @@ impl SimulatedStack {
             })
             .collect::<Vec<_>>();
 
-        Ok(CodillonType {
-            inputs,
-            outputs,
-            input_arity: untyped.then(|| pop_count.try_into().unwrap_or(0)),
-        })
+        Ok(CodillonType { inputs, outputs })
     }
 }
 
@@ -637,43 +654,49 @@ impl<'a> ValidModule<'a> {
             Return | End => EndFunc,
             LocalSet { local_index } | LocalTee { local_index } => {
                 match op_type.inputs.first().expect("local op type") {
-                    InputType {
-                        instr_type: ValType::I32,
-                        ..
-                    } => SetLocalI32(*local_index),
-                    InputType {
-                        instr_type: ValType::F32,
-                        ..
-                    } => SetLocalF32(*local_index),
-                    InputType {
-                        instr_type: ValType::I64,
-                        ..
-                    } => SetLocalI64(*local_index),
-                    InputType {
-                        instr_type: ValType::F64,
-                        ..
-                    } => SetLocalF64(*local_index),
-                    _ => Other,
+                    Some(ty) => match ty {
+                        InputType {
+                            instr_type: ValType::I32,
+                            ..
+                        } => SetLocalI32(*local_index),
+                        InputType {
+                            instr_type: ValType::F32,
+                            ..
+                        } => SetLocalF32(*local_index),
+                        InputType {
+                            instr_type: ValType::I64,
+                            ..
+                        } => SetLocalI64(*local_index),
+                        InputType {
+                            instr_type: ValType::F64,
+                            ..
+                        } => SetLocalF64(*local_index),
+                        _ => Other,
+                    },
+                    None => panic!("classify run on unreachable op"),
                 }
             }
             GlobalSet { global_index } => match op_type.inputs.first().expect("global op type") {
-                InputType {
-                    instr_type: ValType::I32,
-                    ..
-                } => SetGlobalI32(*global_index),
-                InputType {
-                    instr_type: ValType::F32,
-                    ..
-                } => SetGlobalF32(*global_index),
-                InputType {
-                    instr_type: ValType::I64,
-                    ..
-                } => SetGlobalI64(*global_index),
-                InputType {
-                    instr_type: ValType::F64,
-                    ..
-                } => SetGlobalF64(*global_index),
-                _ => Other,
+                Some(ty) => match ty {
+                    InputType {
+                        instr_type: ValType::I32,
+                        ..
+                    } => SetGlobalI32(*global_index),
+                    InputType {
+                        instr_type: ValType::F32,
+                        ..
+                    } => SetGlobalF32(*global_index),
+                    InputType {
+                        instr_type: ValType::I64,
+                        ..
+                    } => SetGlobalI64(*global_index),
+                    InputType {
+                        instr_type: ValType::F64,
+                        ..
+                    } => SetGlobalF64(*global_index),
+                    _ => Other,
+                },
+                None => panic!("classify run on unreachable op"),
             },
             I32Store { .. } | I32Store8 { .. } | I32Store16 { .. } => SetMemoryI32,
             F32Store { .. } => SetMemoryF32,
@@ -878,12 +901,24 @@ impl<'a> ValidModule<'a> {
             func.instruction(&Call(InstrImports::PopI as u32));
         };
         self.record_params(func_idx, &mut f);
+        let mut unreachable = false;
         for (i, codillon_instruction) in function.operators.iter().enumerate() {
-            if !codillon_instruction.op.prepended.is_empty() {
+            // Skip unreachable operators until end of frame.
+            if unreachable && codillon_instruction.op.op == Operator::End {
+                // End of frame; need to include this operator and all after.
+                unreachable = false;
+            } else if unreachable {
+                // Otherwise, skip operator.
+                continue;
+            } else if !codillon_instruction.op.prepended.is_empty() {
+                // Originally invalid operator that was "validized" for type-analysis purposes.
+                // Traps at runtime.
                 f.instruction(&Unreachable);
-                for preop in &codillon_instruction.op.prepended {
-                    f.instruction(&RoundtripReencoder.instruction(preop.clone())?);
-                }
+                unreachable = true;
+                continue;
+            } else if is_unreachable_op(&codillon_instruction.op.op) {
+                // Legit operator that will render the rest of frame unreachable.
+                unreachable = true;
             }
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.op.clone())?;
@@ -1065,9 +1100,8 @@ pub struct InputType {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct CodillonType {
-    pub inputs: Vec<InputType>,
+    pub inputs: Vec<Option<InputType>>,
     pub outputs: Vec<ValType>,
-    pub input_arity: Option<u8>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1152,9 +1186,8 @@ pub(crate) mod tests {
 
         fn ins(inputs: Vec<InputType>) -> CodillonType {
             CodillonType {
-                inputs,
+                inputs: inputs.into_iter().map(Some).collect(),
                 outputs: Vec::new(),
-                input_arity: None,
             }
         }
 
@@ -1162,15 +1195,13 @@ pub(crate) mod tests {
             CodillonType {
                 inputs: Vec::new(),
                 outputs,
-                input_arity: None,
             }
         }
 
         fn inout(inputs: Vec<InputType>, outputs: Vec<ValType>) -> CodillonType {
             CodillonType {
-                inputs,
+                inputs: inputs.into_iter().map(Some).collect(),
                 outputs,
-                input_arity: None,
             }
         }
 
@@ -1939,28 +1970,6 @@ pub(crate) mod tests {
       unreachable
     end
     unreachable
-    drop
-    i32.const 0
-    i32.const 0
-    i32.const 2
-    call 1
-    i32.add
-    call 14
-    i32.const 2
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
-    i32.const 1
-    call 1
-    drop
-    i32.const 3
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
     i32.const 0
     call 1
   )
@@ -2037,14 +2046,6 @@ pub(crate) mod tests {
     end
     unreachable
     i32.const 0
-    drop
-    i32.const 3
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
-    i32.const 0
     call 1
   )
 )
@@ -2053,6 +2054,52 @@ pub(crate) mod tests {
                 "  (export \"main\" (func 18))",
                 "  (memory (;0;) 0)\n  (export \"main\" (func 18))",
             );
+
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // branch instruction renders rest of frame unreachable and pops all accessible operands
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("loop");
+            editor.push_line("i32.const 5");
+            editor.push_line("br 0");
+            editor.push_line("end");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    loop ;; label = @1
+      i32.const 0
+      call 0
+      i32.eqz
+      if ;; label = @2
+        unreachable
+      end
+      i32.const 5
+      call 14
+      i32.const 1
+      call 0
+      i32.eqz
+      if ;; label = @2
+        unreachable
+      end
+      i32.const 1
+      call 1
+      br 0 (;@1;)
+      i32.const 2
+      call 0
+      i32.eqz
+      if ;; label = @2
+        unreachable
+      end
+      i32.const 0
+      call 1
+    end
+    i32.const 0
+    call 1
+  )
+)
+"#;
 
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }

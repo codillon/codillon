@@ -535,30 +535,20 @@ impl Editor {
 
         let mut last_line_no = 0;
         for i in 0..validized.functions.len() {
-            for (
-                op,
-                CodillonType {
-                    inputs,
-                    outputs,
-                    input_arity,
-                },
-            ) in std::iter::zip(&validized.functions[i].operators, &types.functions[i].types)
+            for (op, CodillonType { inputs, outputs }) in
+                std::iter::zip(&validized.functions[i].operators, &types.functions[i].types)
             {
                 let mut type_str = String::new();
 
-                if let Some(params) = input_arity {
-                    type_str.push_str(&"? ".repeat(*params as usize));
-                    if *params == 0u8 {
-                        type_str.push_str("𝜖 ");
+                for t in inputs {
+                    match t {
+                        Some(ty) => type_str.push_str(&ty.instr_type.to_string()),
+                        None => type_str.push('?'),
                     }
-                } else {
-                    for t in inputs {
-                        type_str.push_str(&t.instr_type.to_string());
-                        type_str.push(' ');
-                    }
-                    if inputs.is_empty() {
-                        type_str.push_str("𝜖 ");
-                    }
+                    type_str.push(' ');
+                }
+                if inputs.is_empty() {
+                    type_str.push_str("𝜖 ");
                 }
 
                 type_str.push('→');
