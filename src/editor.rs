@@ -8,7 +8,7 @@ use crate::{
     graphics::DomImage,
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
-        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, WithElement,
+        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
         compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
@@ -16,7 +16,7 @@ use crate::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         find_frames, find_function_ranges, fix_syntax,
     },
-    utils::{CodillonType, FmtError, RawModule, ValidModule, str_to_binary},
+    utils::{CodillonType, FmtError, RawModule, ValidModule, lines_to_content, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -131,14 +131,28 @@ impl Editor {
         }
         ret.image_mut().set_attribute("class", "annotations");
 
-        ret.push_line("(func");
-        ret.push_line("i32.const 5");
-        ret.push_line("i32.const 6");
-        ret.push_line("i32.add");
-        ret.push_line("drop");
-        ret.push_line(")");
-
-        ret.on_change().expect("well-formed initial contents");
+        // Restore from localStorage, or use default content
+        let mut restored_ok = false;
+        if let Some(content) = restore_from_local_storage()
+            && !content.is_empty()
+        {
+            for line_str in content.lines() {
+                ret.push_line(line_str);
+            }
+            if ret.on_change().is_ok() {
+                restored_ok = true;
+            } else {
+                // Clear malformed restored content and fall back to default
+                let len = ret.text().len();
+                if len > 0 {
+                    ret.text_mut().remove_range(0, len);
+                }
+            }
+        }
+        if !restored_ok {
+            ret.push_default_lines();
+            ret.on_change().expect("well-formed initial contents");
+        }
 
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
@@ -149,6 +163,32 @@ impl Editor {
     fn push_line(&mut self, string: &str) {
         let newline = CodeLine::new(string, &self.0.borrow().factory);
         self.text_mut().push(newline);
+    }
+
+    fn push_default_lines(&mut self) {
+        self.push_line("(func");
+        self.push_line("i32.const 5");
+        self.push_line("i32.const 6");
+        self.push_line("i32.add");
+        self.push_line("drop");
+        self.push_line(")");
+    }
+
+    fn get_content(&self) -> String {
+        let text = self.text();
+        let len = text.len();
+        let mut lines = Vec::with_capacity(len);
+        for i in 0..len {
+            lines.push(text[i].suffix(Position::begin()).unwrap_or_default());
+        }
+        lines_to_content(&lines)
+    }
+
+    fn save_to_local_storage(&self) {
+        let content = self.get_content();
+        if let Some(storage) = StorageHandle::local_storage() {
+            storage.set_item("codillon_content", &content);
+        }
     }
 
     fn get_lines_and_positions(
@@ -580,6 +620,8 @@ impl Editor {
         self.initialize_locals(&validized);
         self.execute(&validized.build_executable_binary(&types)?);
 
+        self.save_to_local_storage();
+
         #[cfg(debug_assertions)]
         self.audit();
 
@@ -912,6 +954,10 @@ impl Editor {
         }
         Ok(())
     }
+}
+
+fn restore_from_local_storage() -> Option<String> {
+    StorageHandle::local_storage()?.get_item("codillon_content")
 }
 
 pub struct InstructionTextIterator<'a> {

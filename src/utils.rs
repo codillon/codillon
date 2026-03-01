@@ -1144,6 +1144,15 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
     }
 }
 
+/// Join editor lines into a single content string.
+pub fn lines_to_content<S: AsRef<str>>(lines: &[S]) -> String {
+    lines
+        .iter()
+        .map(|s| s.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -2105,5 +2114,16 @@ pub(crate) mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn test_lines_to_content() {
+        assert_eq!(lines_to_content(&["(func", "drop", ")"]), "(func\ndrop\n)");
+        assert_eq!(lines_to_content(&["(func)"]), "(func)");
+        assert_eq!(lines_to_content(&[""]), "");
+
+        // Works with Vec<String> too
+        let owned = vec![String::from("a"), String::from("b")];
+        assert_eq!(lines_to_content(&owned), "a\nb");
     }
 }
