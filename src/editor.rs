@@ -8,7 +8,7 @@ use crate::{
     graphics::DomImage,
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
-        NodeRef, RangeLike, ReactiveComponent, StorageHandle, WithElement,
+        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
         compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
@@ -201,7 +201,7 @@ impl Editor {
     }
 
     // Replace a given range (currently within a single line) with new text
-    fn replace_range(&mut self, target_range: &impl RangeLike, new_str: &str) -> Result<()> {
+    fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
         if new_str.chars().any(|x| x.is_control() && x != '\n') {
             bail!("unhandled control char in input");
         }
@@ -209,7 +209,7 @@ impl Editor {
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
 
         let (start_line, start_pos, end_line, end_pos) =
-            self.get_lines_and_positions(target_range)?;
+            self.get_lines_and_positions(&target_range)?;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -390,18 +390,20 @@ impl Editor {
         let target_range = ev.get_first_target_range()?;
 
         match &ev.input_type() as &str {
-            "insertText" => self.replace_range(&target_range, &ev.data().context("no data")?),
+            "insertText" => {
+                self.replace_range(target_range.clone(), &ev.data().context("no data")?)
+            }
             "insertFromPaste" => self.replace_range(
-                &target_range,
+                target_range.clone(),
                 &ev.data_transfer()
                     .context("no data_transfer")?
                     .get_data("text/plain")
                     .fmt_err()?,
             ),
             "deleteContentBackward" | "deleteContentForward" | "deleteByCut" => {
-                self.replace_range(&target_range, "")
+                self.replace_range(target_range.clone(), "")
             }
-            "insertParagraph" | "insertLineBreak" => self.replace_range(&target_range, "\n"),
+            "insertParagraph" | "insertLineBreak" => self.replace_range(target_range, "\n"),
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
@@ -523,8 +525,10 @@ impl Editor {
     fn accept_autocomplete(&self, prefix: &str, accepted: &str) {
         let suffix = &accepted[prefix.trim_start().len()..];
         let selection = crate::jet::get_selection();
-        if !suffix.is_empty() {
-            let _ = self.clone().replace_range(&selection, suffix);
+        if !suffix.is_empty()
+            && let Ok(range) = selection.get_range_at(0)
+        {
+            let _ = self.clone().replace_range(range, suffix);
         }
         self.hide_autocomplete();
     }

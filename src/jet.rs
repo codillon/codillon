@@ -641,6 +641,7 @@ impl From<web_sys::Node> for NodeRef {
 }
 
 // Wrapper for a StaticRange (giving access to its start and end nodes as NodeRefs)
+#[derive(Clone)]
 pub struct StaticRangeHandle(web_sys::Range);
 
 impl StaticRangeHandle {
@@ -759,6 +760,8 @@ impl SelectionHandle {
         pub fn anchor_offset(&self) -> u32;
         pub fn focus_offset(&self) -> u32;
         pub fn is_collapsed(&self) -> bool;
+        #[expr(Ok(StaticRangeHandle($.fmt_err()?)))]
+        pub fn get_range_at(&self, index: u32) -> Result<StaticRangeHandle>;
         #[expr($.map(From::from))]
         pub fn anchor_node(&self) -> Option<NodeRef>;
         #[expr($.map(From::from))]
