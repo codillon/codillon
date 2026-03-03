@@ -20,6 +20,10 @@ struct _Private();
 pub struct AccessToken(_Private);
 const TOKEN: AccessToken = AccessToken(_Private());
 
+pub(crate) fn access_token() -> AccessToken {
+    TOKEN
+}
+
 pub trait WithNode {
     fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken);
 }
