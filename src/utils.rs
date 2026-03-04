@@ -122,7 +122,6 @@ impl InstrImports {
     ];
 }
 
-#[derive(Debug)]
 struct HelperFunc {
     name: &'static str,
     params: &'static [wasmparser::ValType],
@@ -553,11 +552,11 @@ impl<'a> RawModule<'a> {
                     }
                 }
                 return Some(format!(
-                    "component: {import_name} not found in module {module}"
+                    "component {import_name} not found in module {module}"
                 ));
             }
         }
-        Some(format!("module: {import_module} not found"))
+        Some(format!("module {import_module} not found"))
     }
 
     fn instr_imports(
@@ -2188,7 +2187,7 @@ pub(crate) mod tests {
                     .invalid
                     .as_ref()
                     .expect("nonexistent module name should be invalid"),
-                "module: not_helpers not found"
+                "module not_helpers not found"
             );
         }
 
@@ -2203,7 +2202,7 @@ pub(crate) mod tests {
                     .invalid
                     .as_ref()
                     .expect("nonexistent component name should be invalid"),
-                "component: not_draw_point not found in module helpers"
+                "component not_draw_point not found in module helpers"
             );
         }
 
