@@ -2173,20 +2173,62 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
-            editor.push_line("i32.const 4");
             editor.push_line("call 1");
-            editor.push_line("i32.const 5");
-            editor.push_line("i32.add");
-            editor.push_line("drop");
+            editor.push_line("i32.add"); // missing drop
             editor.push_line(")");
-            editor.push_line("(func (param i32)");
+            editor.push_line("(func (result i32 i32)");
+            editor.push_line("i32.const 9");
+            editor.push_line("i32.const 10");
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
                 + r#"  (func (;18;) (type 13)
+    call 19
+    i32.const 1
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 2
+    call 1
+    i32.add
+    call 14
+    i32.const 2
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    unreachable
+  )
+  (func (;19;) (type 14) (result i32 i32)
+    i32.const 9
+    call 14
+    i32.const 5
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 10
+    call 14
+    i32.const 6
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 2
+    call 1
   )
 )
 "#;
+
+            let expected = expected.replace(
+                "  (type (;13;) (func))",
+                "  (type (;13;) (func))\n  (type (;14;) (func (result i32 i32)))",
+            );
 
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
