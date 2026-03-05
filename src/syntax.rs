@@ -713,6 +713,21 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     }
 }
 
+pub fn find_import_lines(code: &impl LineInfos) -> Vec<usize> {
+    let mut imports = Vec::new();
+    for line_no in 0..code.len() {
+        if let LineKind::Other(parts) = &code.info(line_no).kind
+            && code.info(line_no).is_active()
+            && parts
+                .iter()
+                .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport))
+        {
+            imports.push(line_no);
+        }
+    }
+    imports
+}
+
 pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
     use SyntaxState::*;
     let mut ranges = Vec::new();

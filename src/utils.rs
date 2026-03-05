@@ -35,7 +35,6 @@ enum InstrumentationFuncs {
     PushI64,
     PushF64,
     CallFunc(u32),
-    EndFunc,
     Other,
 }
 #[repr(u32)]
@@ -122,6 +121,22 @@ impl InstrImports {
     ];
 }
 
+struct HelperFunc {
+    name: &'static str,
+    params: &'static [wasmparser::ValType],
+    results: &'static [wasmparser::ValType],
+    reason: &'static str,
+}
+const HELPER_IMPORTS: &[(&str, &[HelperFunc])] = &[(
+    "helpers",
+    &[HelperFunc {
+        name: "draw_point",
+        params: &[ValType::F64, ValType::F64],
+        results: &[],
+        reason: "expected type (f64, f64) -> ()",
+    }],
+)];
+
 pub struct GeneralOperator<'a> {
     prepended: Vec<Operator<'a>>,
     op: Operator<'a>,
@@ -155,10 +170,11 @@ pub struct RawModule<'a> {
 
 pub struct ValidModule<'a> {
     pub types: Vec<wasmparser::FuncType>,
-    pub imports: Vec<wasmparser::Import<'a>>,
+    pub imports: wasm_encoder::ImportSection,
     pub memory: Vec<wasmparser::MemoryType>,
     pub globals: Vec<wasmparser::Global<'a>>,
     pub functions: Vec<ValidFunction<'a>>,
+    pub num_func_imports: u32,
 }
 
 impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
@@ -282,17 +298,20 @@ impl<'a> RawModule<'a> {
         self,
         wasm_bin: &'a [u8],
         editor: &mut impl LineInfosMut,
+        import_lines: &[usize],
     ) -> Result<ValidModule<'a>> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = Validator::new();
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
+        let (imports, num_func_imports) = self.instr_imports(import_lines, editor);
 
         let mut ret = ValidModule {
             types: self.types,
-            imports: self.imports,
+            imports,
             memory: self.memory,
             globals: self.globals,
             functions: Vec::with_capacity(self.functions.len()),
+            num_func_imports,
         };
 
         let mut raw_functions = self.functions.into_iter();
@@ -505,6 +524,107 @@ impl<'a> RawModule<'a> {
         assert!(&ops_reader.eof());
         Ok(())
     }
+
+    fn check_import(
+        import_module: &str,
+        import_name: &str,
+        ty: &wasmparser::FuncType,
+    ) -> Option<String> {
+        // Check if module name exists
+        for (module, components) in HELPER_IMPORTS {
+            if *module == import_module {
+                for HelperFunc {
+                    name,
+                    params,
+                    results,
+                    reason,
+                } in *components
+                {
+                    // Check if component name exists
+                    if *name == import_name {
+                        // Check if function type matches
+                        return if ty.params() == *params && ty.results() == *results {
+                            None
+                        } else {
+                            Some(reason.to_string())
+                        };
+                    }
+                }
+                return Some(format!(
+                    "component {import_name} not found in module {module}"
+                ));
+            }
+        }
+        Some(format!("module {import_module} not found"))
+    }
+
+    fn instr_imports(
+        &self,
+        import_lines: &[usize],
+        editor: &mut impl LineInfosMut,
+    ) -> (wasm_encoder::ImportSection, u32) {
+        use wasm_encoder::EntityType;
+        use wasmparser::*;
+        use web_sys::console::log_1;
+        // Encode the instrumentation functions as imports.
+        let mut imports = wasm_encoder::ImportSection::new();
+        for (name, type_idx) in InstrImports::TYPE_INDICES.iter() {
+            imports.import("codillon_debug", name, EntityType::Function(*type_idx));
+        }
+        let mut num_func_imports = InstrImports::TYPE_INDICES.len() as u32;
+        for (import_idx, Import { module, name, ty }) in self.imports.iter().enumerate() {
+            match *ty {
+                TypeRef::Func(type_idx) | TypeRef::FuncExact(type_idx) => {
+                    let reason = Self::check_import(module, name, &self.types[type_idx as usize]);
+                    editor.set_invalid(import_lines[import_idx], reason);
+                    imports.import(
+                        module,
+                        name,
+                        EntityType::Function(type_idx + InstrImports::FUNC_SIGS.len() as u32),
+                    );
+                    num_func_imports += 1;
+                }
+                TypeRef::Memory(MemoryType {
+                    initial,
+                    memory64,
+                    shared,
+                    maximum,
+                    page_size_log2,
+                }) => {
+                    imports.import(
+                        module,
+                        name,
+                        EntityType::Memory(wasm_encoder::MemoryType {
+                            minimum: initial,
+                            maximum,
+                            memory64,
+                            shared,
+                            page_size_log2,
+                        }),
+                    );
+                }
+                TypeRef::Global(GlobalType {
+                    content_type,
+                    mutable,
+                    shared,
+                }) => {
+                    imports.import(
+                        module,
+                        name,
+                        EntityType::Global(wasm_encoder::GlobalType {
+                            val_type: parser_to_encoder(&content_type),
+                            shared,
+                            mutable,
+                        }),
+                    );
+                }
+                _ => {
+                    log_1(&format!("unsupported import {name} from module {module}").into());
+                }
+            };
+        }
+        (imports, num_func_imports)
+    }
 }
 
 #[derive(Default)]
@@ -651,7 +771,6 @@ impl<'a> ValidModule<'a> {
         match operation {
             // Special Functions
             Call { function_index } => CallFunc(*function_index),
-            Return | End => EndFunc,
             LocalSet { local_index } | LocalTee { local_index } => {
                 match op_type.inputs.first().expect("local op type") {
                     Some(ty) => match ty {
@@ -738,68 +857,6 @@ impl<'a> ValidModule<'a> {
         types
     }
 
-    fn instr_imports(&self) -> (wasm_encoder::ImportSection, u32) {
-        use wasm_encoder::EntityType;
-        use wasmparser::*;
-        use web_sys::console::log_1;
-        // Encode the instrumentation functions as imports.
-        let mut imports = wasm_encoder::ImportSection::new();
-        for (name, type_idx) in InstrImports::TYPE_INDICES.iter() {
-            imports.import("codillon_debug", name, EntityType::Function(*type_idx));
-        }
-        let mut num_imports = InstrImports::TYPE_INDICES.len() as u32;
-        for Import { name, module, ty } in &self.imports {
-            match *ty {
-                TypeRef::Func(type_idx) | TypeRef::FuncExact(type_idx) => {
-                    imports.import(
-                        module,
-                        name,
-                        EntityType::Function(type_idx + InstrImports::FUNC_SIGS.len() as u32),
-                    );
-                    num_imports += 1;
-                }
-                TypeRef::Memory(MemoryType {
-                    initial,
-                    memory64,
-                    shared,
-                    maximum,
-                    page_size_log2,
-                }) => {
-                    imports.import(
-                        module,
-                        name,
-                        EntityType::Memory(wasm_encoder::MemoryType {
-                            minimum: initial,
-                            maximum,
-                            memory64,
-                            shared,
-                            page_size_log2,
-                        }),
-                    );
-                }
-                TypeRef::Global(GlobalType {
-                    content_type,
-                    mutable,
-                    shared,
-                }) => {
-                    imports.import(
-                        module,
-                        name,
-                        EntityType::Global(wasm_encoder::GlobalType {
-                            val_type: parser_to_encoder(&content_type),
-                            shared,
-                            mutable,
-                        }),
-                    );
-                }
-                _ => {
-                    log_1(&format!("unsupported import {name} from module {module}").into());
-                }
-            };
-        }
-        (imports, num_imports)
-    }
-
     fn build_globals(&self) -> wasm_encoder::GlobalSection {
         use wasm_encoder::ConstExpr;
         use wasmparser::Operator::*;
@@ -852,8 +909,7 @@ impl<'a> ValidModule<'a> {
     pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
         module.section(&self.instr_func_types());
-        let (imports, num_imports) = self.instr_imports();
-        module.section(&imports);
+        module.section(&self.imports);
 
         // Encode the function section.
         let mut functions = FunctionSection::new();
@@ -867,7 +923,13 @@ impl<'a> ValidModule<'a> {
 
         // Encode the export section.
         let mut exports = ExportSection::new();
-        exports.export("main", wasm_encoder::ExportKind::Func, num_imports);
+        if !self.functions.is_empty() {
+            exports.export(
+                "main",
+                wasm_encoder::ExportKind::Func,
+                self.num_func_imports,
+            );
+        }
         module.section(&exports);
 
         // Encode the code section.
@@ -904,35 +966,37 @@ impl<'a> ValidModule<'a> {
         let mut unreachable = false;
         for (i, codillon_instruction) in function.operators.iter().enumerate() {
             // Skip unreachable operators until end of frame.
-            if unreachable && codillon_instruction.op.op == Operator::End {
+            if codillon_instruction.op.op == Operator::End {
                 // End of frame; need to include this operator and all after.
                 unreachable = false;
             } else if unreachable {
                 // Otherwise, skip operator.
                 continue;
-            } else if !codillon_instruction.op.prepended.is_empty() {
-                // Originally invalid operator that was "validized" for type-analysis purposes.
-                // Traps at runtime.
-                f.instruction(&Unreachable);
-                unreachable = true;
-                continue;
-            } else if is_unreachable_op(&codillon_instruction.op.op) {
-                // Legit operator that will render the rest of frame unreachable.
-                unreachable = true;
             }
+
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.op.clone())?;
             let value_type = &types.functions.get(func_idx).unwrap().types[i];
             let operation_type = Self::classify(&codillon_instruction.op.op, value_type);
-            if !value_type.inputs.is_empty() {
+
+            if !codillon_instruction.op.prepended.is_empty() {
+                // Originally invalid operator that was "validized" for type-analysis purposes.
+                // Traps at runtime.
+                f.instruction(&Unreachable);
+                unreachable = true;
+            } else if !value_type.inputs.is_empty() {
                 pop_debug(&mut f, value_type.inputs.len() as i32);
             }
+
+            if codillon_instruction.op.op == wasmparser::Operator::End {
+                f.instruction(&instruction);
+                continue;
+            } else if unreachable {
+                continue;
+            }
+
             if let CallFunc(function_idx) = operation_type {
                 f.instruction(&Call(function_idx + num_instr_imports));
-            } else if matches!(operation_type, EndFunc) {
-                // Don't need to pop on returns
-                pop_debug(&mut f, 0);
-                f.instruction(&instruction);
             } else {
                 // Instrumentation that needs to occur before execution
                 Self::instrument_memory_ops(&mut f, &operation_type);
@@ -942,21 +1006,21 @@ impl<'a> ValidModule<'a> {
                 Self::instrument_global_ops(&mut f, &operation_type);
                 Self::instrument_push_ops(&mut f, &operation_type);
             }
-            if !matches!(
-                codillon_instruction.op.op,
-                wasmparser::Operator::End
-                    | wasmparser::Operator::Return
-                    | wasmparser::Operator::Unreachable
-            ) {
-                // Step after each instruction evaluation
-                f.instruction(&I32Const(line_idx));
-                f.instruction(&Call(InstrImports::Step as u32));
-                f.instruction(&I32Eqz);
-                f.instruction(&If(wasm_encoder::BlockType::Empty));
-                // Trap when run out of steps
-                f.instruction(&Unreachable);
-                f.instruction(&End);
+
+            if is_unreachable_op(&codillon_instruction.op.op) {
+                // Operator that will render the rest of frame unreachable.
+                unreachable = true;
+                continue;
             }
+
+            // Step after each instruction evaluation
+            f.instruction(&I32Const(line_idx));
+            f.instruction(&Call(InstrImports::Step as u32));
+            f.instruction(&I32Eqz);
+            f.instruction(&If(wasm_encoder::BlockType::Empty));
+            // Trap when run out of steps
+            f.instruction(&Unreachable);
+            f.instruction(&End);
         }
         codes.function(&f);
         Ok(())
@@ -1147,6 +1211,7 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use wasm_encoder::ImportSection;
     use wasmparser::BlockType;
 
     #[test]
@@ -1208,10 +1273,11 @@ pub(crate) mod tests {
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
             let mut ret = ValidModule {
                 types: vec![],
-                imports: vec![],
+                imports: ImportSection::new(),
                 memory: vec![],
                 globals: vec![],
                 functions: vec![],
+                num_func_imports: 0,
             };
 
             for func in raw.functions {
@@ -1677,10 +1743,11 @@ pub(crate) mod tests {
         };
         let valid_module = ValidModule {
             types: vec![],
-            imports: vec![],
+            imports: ImportSection::new(),
             memory: vec![test_mem],
             globals: vec![],
             functions: vec![],
+            num_func_imports: 0,
         };
         let wasm_bin = valid_module.build_executable_binary(&TypesTable { functions: vec![] })?;
         let mem_payload = wasmparser::Parser::new(0)
@@ -1699,7 +1766,9 @@ pub(crate) mod tests {
     }
 
     use crate::line::{Activity, LineInfo};
-    use crate::syntax::{SyntheticWasm, find_function_ranges, fix_syntax, parse_line};
+    use crate::syntax::{
+        SyntheticWasm, find_function_ranges, find_import_lines, fix_syntax, parse_line,
+    };
 
     #[derive(Default)]
     struct FakeTextLine {
@@ -1782,13 +1851,20 @@ pub(crate) mod tests {
 
         let wasm_bin = str_to_binary(well_formed_str)?;
 
-        let raw_module = RawModule::new(editor, &wasm_bin, &function_ranges)?;
-        let validized = raw_module.fix_validity(&wasm_bin, editor)?;
-        let types = validized.to_types_table(&wasm_bin)?;
-        let runnable = validized.build_executable_binary(&types)?;
-        let wat = wasmprinter::print_bytes(&runnable)?;
+        let raw_module =
+            RawModule::new(editor, &wasm_bin, &function_ranges).context("RawModule::new")?;
+        let validized = raw_module
+            .fix_validity(&wasm_bin, editor, &find_import_lines(editor))
+            .context("fix_validity")?;
+        let types = validized
+            .to_types_table(&wasm_bin)
+            .context("to_types_table")?;
+        let runnable = validized
+            .build_executable_binary(&types)
+            .context("build_executable_binary")?;
+        wasmparser::validate(&runnable).context("validate")?;
 
-        Ok(wat)
+        wasmprinter::print_bytes(&runnable).context("print_bytes")
     }
 
     const EXPECTED_FIELDS: &str = r#"  (type (;0;) (func (param i32)))
@@ -1836,10 +1912,7 @@ pub(crate) mod tests {
             editor.push_line("(func)");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 13)
-    i32.const 0
-    call 1
-  )
+                + r#"  (func (;18;) (type 13))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -1851,10 +1924,7 @@ pub(crate) mod tests {
             editor.push_line("(func");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 13)
-    i32.const 0
-    call 1
-  )
+                + r#"  (func (;18;) (type 13))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -1866,10 +1936,7 @@ pub(crate) mod tests {
             editor.push_line("(");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 13)
-    i32.const 0
-    call 1
-  )
+                + r#"  (func (;18;) (type 13))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -1900,8 +1967,6 @@ pub(crate) mod tests {
     if ;; label = @1
       unreachable
     end
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -1916,11 +1981,7 @@ pub(crate) mod tests {
       if ;; label = @2
         unreachable
       end
-      i32.const 0
-      call 1
     end
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -1970,8 +2031,6 @@ pub(crate) mod tests {
       unreachable
     end
     unreachable
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -1992,10 +2051,7 @@ pub(crate) mod tests {
                 + EXPECTED_FIELDS
                 + r#"  (import "hello" "goodbye" (func (;18;) (type 13)))
   (export "main" (func 19))
-  (func (;19;) (type 13)
-    i32.const 0
-    call 1
-  )
+  (func (;19;) (type 13))
 )
 "#;
             let expected = expected.replace("  (export \"main\" (func 18))\n", "");
@@ -2018,8 +2074,6 @@ pub(crate) mod tests {
     if ;; label = @1
       unreachable
     end
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -2045,8 +2099,6 @@ pub(crate) mod tests {
       unreachable
     end
     unreachable
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -2086,22 +2138,160 @@ pub(crate) mod tests {
       i32.const 1
       call 1
       br 0 (;@1;)
-      i32.const 2
-      call 0
-      i32.eqz
-      if ;; label = @2
-        unreachable
-      end
-      i32.const 0
-      call 1
     end
-    i32.const 0
-    call 1
   )
 )
 "#;
 
             assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // validation error
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("i32.const 4");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    i32.const 4
+    call 14
+    i32.const 1
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    unreachable
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("call 1");
+            editor.push_line("i32.add"); // missing drop
+            editor.push_line(")");
+            editor.push_line("(func (result i32 i32)");
+            editor.push_line("i32.const 9");
+            editor.push_line("i32.const 10");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    call 19
+    i32.const 1
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 2
+    call 1
+    i32.add
+    call 14
+    i32.const 2
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    unreachable
+  )
+  (func (;19;) (type 14) (result i32 i32)
+    i32.const 9
+    call 14
+    i32.const 5
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 10
+    call 14
+    i32.const 6
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    i32.const 2
+    call 1
+  )
+)
+"#;
+
+            let expected = expected.replace(
+                "  (type (;13;) (func))",
+                "  (type (;13;) (func))\n  (type (;14;) (func (result i32 i32)))",
+            );
+
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_import_validation() -> Result<()> {
+        // Test case 1: module name not found
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"not_helpers\" \"draw_point\" (func (param f64 f64)))");
+            let _ = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                editor.lines[0]
+                    .info
+                    .invalid
+                    .as_ref()
+                    .expect("nonexistent module name should be invalid"),
+                "module not_helpers not found"
+            );
+        }
+
+        // Test case 2: component name not found
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"helpers\" \"not_draw_point\" (func (param f64 f64)))");
+            let _ = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                editor.lines[0]
+                    .info
+                    .invalid
+                    .as_ref()
+                    .expect("nonexistent component name should be invalid"),
+                "component not_draw_point not found in module helpers"
+            );
+        }
+
+        // Test case 3: wrong function type
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"helpers\" \"draw_point\" (func (param i32)))");
+            let _ = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                editor.lines[0]
+                    .info
+                    .invalid
+                    .as_ref()
+                    .expect("wrong function type should be invalid"),
+                "expected type (f64, f64) -> ()"
+            );
+        }
+
+        // Test case 4: correct import
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"helpers\" \"draw_point\" (func (param f64, f64)))");
+            let _ = test_editor_flow(&mut editor)?;
+            assert!(
+                editor.lines[0].info.invalid.is_none(),
+                "draw_point should be correctly imported"
+            );
         }
 
         Ok(())
