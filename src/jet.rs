@@ -20,10 +20,6 @@ struct _Private();
 pub struct AccessToken(_Private);
 const TOKEN: AccessToken = AccessToken(_Private());
 
-pub(crate) fn access_token() -> AccessToken {
-    TOKEN
-}
-
 pub trait WithNode {
     fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken);
 }
@@ -361,6 +357,30 @@ impl<T: AnyElement> ElementHandle<T> {
         self.elem
             .element()
             .scroll_into_view_with_scroll_into_view_options(&opts);
+    }
+
+    pub fn set_onwheel<F>(&self, handler: F)
+    where
+        F: 'static + FnMut(web_sys::WheelEvent),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::WheelEvent)>);
+        self.elem
+            .element()
+            .add_event_listener_with_callback("wheel", closure.as_ref().unchecked_ref())
+            .unwrap();
+        closure.forget();
+    }
+
+    pub fn set_onmousedown<F>(&self, handler: F)
+    where
+        F: 'static + FnMut(web_sys::MouseEvent),
+    {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
+        self.elem
+            .element()
+            .add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref())
+            .unwrap();
+        closure.forget();
     }
 }
 
