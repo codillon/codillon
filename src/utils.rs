@@ -35,7 +35,6 @@ enum InstrumentationFuncs {
     PushI64,
     PushF64,
     CallFunc(u32),
-    EndFunc,
     Other,
 }
 #[repr(u32)]
@@ -772,7 +771,6 @@ impl<'a> ValidModule<'a> {
         match operation {
             // Special Functions
             Call { function_index } => CallFunc(*function_index),
-            Return | End => EndFunc,
             LocalSet { local_index } | LocalTee { local_index } => {
                 match op_type.inputs.first().expect("local op type") {
                     Some(ty) => match ty {
@@ -925,11 +923,13 @@ impl<'a> ValidModule<'a> {
 
         // Encode the export section.
         let mut exports = ExportSection::new();
-        exports.export(
-            "main",
-            wasm_encoder::ExportKind::Func,
-            self.num_func_imports,
-        );
+        if !self.functions.is_empty() {
+            exports.export(
+                "main",
+                wasm_encoder::ExportKind::Func,
+                self.num_func_imports,
+            );
+        }
         module.section(&exports);
 
         // Encode the code section.
@@ -966,35 +966,37 @@ impl<'a> ValidModule<'a> {
         let mut unreachable = false;
         for (i, codillon_instruction) in function.operators.iter().enumerate() {
             // Skip unreachable operators until end of frame.
-            if unreachable && codillon_instruction.op.op == Operator::End {
+            if codillon_instruction.op.op == Operator::End {
                 // End of frame; need to include this operator and all after.
                 unreachable = false;
             } else if unreachable {
                 // Otherwise, skip operator.
                 continue;
-            } else if !codillon_instruction.op.prepended.is_empty() {
-                // Originally invalid operator that was "validized" for type-analysis purposes.
-                // Traps at runtime.
-                f.instruction(&Unreachable);
-                unreachable = true;
-                continue;
-            } else if is_unreachable_op(&codillon_instruction.op.op) {
-                // Legit operator that will render the rest of frame unreachable.
-                unreachable = true;
             }
+
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.op.clone())?;
             let value_type = &types.functions.get(func_idx).unwrap().types[i];
             let operation_type = Self::classify(&codillon_instruction.op.op, value_type);
-            if !value_type.inputs.is_empty() {
+
+            if !codillon_instruction.op.prepended.is_empty() {
+                // Originally invalid operator that was "validized" for type-analysis purposes.
+                // Traps at runtime.
+                f.instruction(&Unreachable);
+                unreachable = true;
+            } else if !value_type.inputs.is_empty() {
                 pop_debug(&mut f, value_type.inputs.len() as i32);
             }
+
+            if codillon_instruction.op.op == wasmparser::Operator::End {
+                f.instruction(&instruction);
+                continue;
+            } else if unreachable {
+                continue;
+            }
+
             if let CallFunc(function_idx) = operation_type {
                 f.instruction(&Call(function_idx + num_instr_imports));
-            } else if matches!(operation_type, EndFunc) {
-                // Don't need to pop on returns
-                pop_debug(&mut f, 0);
-                f.instruction(&instruction);
             } else {
                 // Instrumentation that needs to occur before execution
                 Self::instrument_memory_ops(&mut f, &operation_type);
@@ -1004,21 +1006,21 @@ impl<'a> ValidModule<'a> {
                 Self::instrument_global_ops(&mut f, &operation_type);
                 Self::instrument_push_ops(&mut f, &operation_type);
             }
-            if !matches!(
-                codillon_instruction.op.op,
-                wasmparser::Operator::End
-                    | wasmparser::Operator::Return
-                    | wasmparser::Operator::Unreachable
-            ) {
-                // Step after each instruction evaluation
-                f.instruction(&I32Const(line_idx));
-                f.instruction(&Call(InstrImports::Step as u32));
-                f.instruction(&I32Eqz);
-                f.instruction(&If(wasm_encoder::BlockType::Empty));
-                // Trap when run out of steps
-                f.instruction(&Unreachable);
-                f.instruction(&End);
+
+            if is_unreachable_op(&codillon_instruction.op.op) {
+                // Operator that will render the rest of frame unreachable.
+                unreachable = true;
+                continue;
             }
+
+            // Step after each instruction evaluation
+            f.instruction(&I32Const(line_idx));
+            f.instruction(&Call(InstrImports::Step as u32));
+            f.instruction(&I32Eqz);
+            f.instruction(&If(wasm_encoder::BlockType::Empty));
+            // Trap when run out of steps
+            f.instruction(&Unreachable);
+            f.instruction(&End);
         }
         codes.function(&f);
         Ok(())
@@ -1849,13 +1851,20 @@ pub(crate) mod tests {
 
         let wasm_bin = str_to_binary(well_formed_str)?;
 
-        let raw_module = RawModule::new(editor, &wasm_bin, &function_ranges)?;
-        let validized = raw_module.fix_validity(&wasm_bin, editor, &find_import_lines(editor))?;
-        let types = validized.to_types_table(&wasm_bin)?;
-        let runnable = validized.build_executable_binary(&types)?;
-        let wat = wasmprinter::print_bytes(&runnable)?;
+        let raw_module =
+            RawModule::new(editor, &wasm_bin, &function_ranges).context("RawModule::new")?;
+        let validized = raw_module
+            .fix_validity(&wasm_bin, editor, &find_import_lines(editor))
+            .context("fix_validity")?;
+        let types = validized
+            .to_types_table(&wasm_bin)
+            .context("to_types_table")?;
+        let runnable = validized
+            .build_executable_binary(&types)
+            .context("build_executable_binary")?;
+        wasmparser::validate(&runnable).context("validate")?;
 
-        Ok(wat)
+        wasmprinter::print_bytes(&runnable).context("print_bytes")
     }
 
     const EXPECTED_FIELDS: &str = r#"  (type (;0;) (func (param i32)))
@@ -1903,10 +1912,7 @@ pub(crate) mod tests {
             editor.push_line("(func)");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 13)
-    i32.const 0
-    call 1
-  )
+                + r#"  (func (;18;) (type 13))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -1918,10 +1924,7 @@ pub(crate) mod tests {
             editor.push_line("(func");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 13)
-    i32.const 0
-    call 1
-  )
+                + r#"  (func (;18;) (type 13))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -1933,10 +1936,7 @@ pub(crate) mod tests {
             editor.push_line("(");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 13)
-    i32.const 0
-    call 1
-  )
+                + r#"  (func (;18;) (type 13))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -1967,8 +1967,6 @@ pub(crate) mod tests {
     if ;; label = @1
       unreachable
     end
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -1983,11 +1981,7 @@ pub(crate) mod tests {
       if ;; label = @2
         unreachable
       end
-      i32.const 0
-      call 1
     end
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -2037,8 +2031,6 @@ pub(crate) mod tests {
       unreachable
     end
     unreachable
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -2059,10 +2051,7 @@ pub(crate) mod tests {
                 + EXPECTED_FIELDS
                 + r#"  (import "hello" "goodbye" (func (;18;) (type 13)))
   (export "main" (func 19))
-  (func (;19;) (type 13)
-    i32.const 0
-    call 1
-  )
+  (func (;19;) (type 13))
 )
 "#;
             let expected = expected.replace("  (export \"main\" (func 18))\n", "");
@@ -2085,8 +2074,6 @@ pub(crate) mod tests {
     if ;; label = @1
       unreachable
     end
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -2112,8 +2099,6 @@ pub(crate) mod tests {
       unreachable
     end
     unreachable
-    i32.const 0
-    call 1
   )
 )
 "#;
@@ -2153,17 +2138,52 @@ pub(crate) mod tests {
       i32.const 1
       call 1
       br 0 (;@1;)
-      i32.const 2
-      call 0
-      i32.eqz
-      if ;; label = @2
-        unreachable
-      end
-      i32.const 0
-      call 1
     end
-    i32.const 0
-    call 1
+  )
+)
+"#;
+
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // validation error
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("i32.const 4");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    i32.const 4
+    call 14
+    i32.const 1
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+    unreachable
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("i32.const 4");
+            editor.push_line("call 1");
+            editor.push_line("i32.const 5");
+            editor.push_line("i32.add");
+            editor.push_line("drop");
+            editor.push_line(")");
+            editor.push_line("(func (param i32)");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
   )
 )
 "#;
