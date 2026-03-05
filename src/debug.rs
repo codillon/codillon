@@ -203,7 +203,7 @@ pub fn make_imports() -> Result<Object, JsValue> {
     Ok(imports)
 }
 
-fn create_closure_helpers(import_root: &Object) {
+fn create_closure_helpers(import: &Object) {
     let draw_point = Closure::wrap(Box::new(move |x: f64, y: f64| {
         STATE.with(|cur_state| {
             cur_state.borrow_mut().point = Some((x, y));
@@ -211,7 +211,7 @@ fn create_closure_helpers(import_root: &Object) {
     }) as Box<dyn Fn(f64, f64)>);
     let helpers = Object::new();
     register_closure(&helpers, "draw_point", draw_point);
-    Reflect::set(import_root, &JsValue::from_str("helpers"), &helpers).ok();
+    Reflect::set(import, &JsValue::from_str("helpers"), &helpers).ok();
 }
 
 fn create_closure_global_operations(debug_numbers: &Object) {

@@ -14,7 +14,7 @@ use crate::{
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
-        find_frames, find_function_ranges, fix_syntax,
+        find_frames, find_function_ranges, find_import_lines, fix_syntax,
     },
     utils::{CodillonType, FmtError, RawModule, ValidModule, str_to_binary},
 };
@@ -556,7 +556,7 @@ impl Editor {
 
         let wasm_bin = str_to_binary(self.active_as_text().join(" "))?;
         let raw_module = RawModule::new(self, &wasm_bin, &self.0.borrow().function_ranges)?;
-        let validized = raw_module.fix_validity(&wasm_bin, self)?;
+        let validized = raw_module.fix_validity(&wasm_bin, self, &find_import_lines(self))?;
         let types = validized.to_types_table(&wasm_bin)?;
 
         let mut last_line_no = 0;
