@@ -1,6 +1,7 @@
 // Structures and utilities to support multi-function/multi-module text buffers.
 
 use anyhow::Result;
+use std::collections::HashSet;
 use std::ops::Deref;
 use wast::{
     Error,
@@ -14,6 +15,9 @@ use wast::{
 };
 
 use crate::line::{Activity, LineInfo};
+use crate::symbolic::{
+    ModuleIdentifiers, collect_label_symbols, collect_local_symbols, collect_module_symbols,
+};
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum InstrKind {
@@ -522,9 +526,20 @@ impl SyntaxState {
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     use crate::line::Activity::*;
     use SyntaxState::*;
+    type LabelNames = Vec<String>;
+
     let mut state = Initial;
-    let mut frame_stack: Vec<InstrKind> = Vec::new();
+    let mut frame_stack: Vec<(InstrKind, LabelNames)> = Vec::new();
     let mut before_imports = true;
+
+    // Structures for symbolic references
+    let mut module_symbols = ModuleIdentifiers::default();
+    let mut local_symbols: HashSet<String> = HashSet::new();
+
+    // Collect module-level defined symbolic references
+    for line_no in 0..lines.len() {
+        collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbols);
+    }
 
     assert!(lines.len() > 0);
 
@@ -618,6 +633,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.clear();
+                        local_symbols.clear();
                     }
                     if syntax_after_internal_initial_state {
                         // Fix #4.5: Codiillon only wants one field per line. If this line reached the initial
@@ -641,23 +657,29 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             }
         }
 
+        // Collect local symbolic references if there's any
+        collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbols);
+
         // Enforce syntax requirements of structured instructions
         if let LineKind::Instr(kind) = instr_kind {
+            let mut labels: LabelNames = Vec::new();
+            collect_label_symbols(&lines.info(line_no).symbols, &mut labels);
+
             match kind {
                 // For a structured instruction that opens a frame, log this.
                 InstrKind::If | InstrKind::OtherStructured => {
                     lines.set_active_status(line_no, Active);
-                    frame_stack.push(kind);
+                    frame_stack.push((kind, labels));
                 }
 
                 // Fix #5: if an `else` appears outside an `if` frame, disable it
                 InstrKind::Else => {
-                    if let Some(InstrKind::If) = frame_stack.last() {
+                    if let Some((InstrKind::If, _)) = frame_stack.last() {
                         frame_stack.pop();
                         lines.set_active_status(line_no, Active);
-                        frame_stack.push(InstrKind::Else);
+                        frame_stack.push((InstrKind::Else, labels));
                     } else {
-                        lines.set_active_status(line_no, Inactive("‘else’ outside ‘if’"));
+                        lines.set_active_status(line_no, Inactive("’else’ outside ‘if’"));
                     }
                 }
 

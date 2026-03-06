@@ -52,8 +52,9 @@ impl From<&ItemKind<'_>> for IndexSpace {
 }
 
 #[derive(Default)]
-pub struct Identifiers {
+pub struct ModuleIdentifiers {
     // defined symbolic references in different identifier contexts
+    // only module-level symbolic references are recorded
     types: HashSet<String>,
     globals: HashSet<String>,
     mems: HashSet<String>,
@@ -61,11 +62,9 @@ pub struct Identifiers {
     funcs: HashSet<String>,
     datas: HashSet<String>,
     elems: HashSet<String>,
-    locals: HashSet<String>,
-    labels: HashSet<String>,
 }
 
-impl Identifiers {
+impl ModuleIdentifiers {
     fn set(&self, space: &IndexSpace) -> Option<&HashSet<String>> {
         match space {
             IndexSpace::Type => Some(&self.types),
@@ -75,9 +74,7 @@ impl Identifiers {
             IndexSpace::Func => Some(&self.funcs),
             IndexSpace::Data => Some(&self.datas),
             IndexSpace::Elem => Some(&self.elems),
-            IndexSpace::Local => Some(&self.locals),
-            IndexSpace::Label => Some(&self.labels),
-            IndexSpace::Undefined => None,
+            _ => None,
         }
     }
 
@@ -90,27 +87,8 @@ impl Identifiers {
             IndexSpace::Func => Some(&mut self.funcs),
             IndexSpace::Data => Some(&mut self.datas),
             IndexSpace::Elem => Some(&mut self.elems),
-            IndexSpace::Local => Some(&mut self.locals),
-            IndexSpace::Label => Some(&mut self.labels),
-            IndexSpace::Undefined => None,
+            _ => None,
         }
-    }
-
-    pub fn push_symbols(&mut self, symbols: Vec<SymbolRef>) {
-        for symbol in symbols {
-            if let Some(set) = self.set_mut(&symbol.space) {
-                set.insert(symbol.name);
-            }
-        }
-    }
-
-    // Return true if all symbols are defined in the corresponding index space.
-    // Symbols with IndexSpace::Undefined are considered undefined.
-    pub fn symbols_defined(&self, symbols: &[SymbolRef]) -> bool {
-        symbols.iter().all(|sym| {
-            self.set(&sym.space)
-                .is_some_and(|set| set.contains(&sym.name))
-        })
     }
 }
 
@@ -140,6 +118,52 @@ impl LineSymbols {
         self.defines.extend(other.defines);
         self.consumes.extend(other.consumes);
     }
+}
+
+/// Collect module-level defined symbols
+pub fn collect_module_symbols(line_symbols: &LineSymbols, identifiers: &mut ModuleIdentifiers) {
+    for symbol in &line_symbols.defines {
+        if let Some(set) = identifiers.set_mut(&symbol.space) {
+            set.insert(symbol.name.clone());
+        }
+    }
+}
+
+// Collect function-scoped Local symbols
+pub fn collect_local_symbols(line_symbols: &LineSymbols, locals: &mut HashSet<String>) {
+    for symbol in &line_symbols.defines {
+        if symbol.space == IndexSpace::Local {
+            locals.insert(symbol.name.clone());
+        }
+    }
+}
+
+// Collect defined labels
+pub fn collect_label_symbols(line_symbols: &LineSymbols, labels: &mut Vec<String>) {
+    for symbol in &line_symbols.defines {
+        if symbol.space == IndexSpace::Label {
+            labels.push(symbol.name.clone());
+        }
+    }
+}
+
+/// Return true if all consumed symbolic references in are resolved:
+/// - module-level symbols (funcs, globals, etc.) are looked up in ModuleIdentifiers
+/// - locals are looked up in the function-scoped locals set
+/// - labels are looked up in the current label stack
+pub fn symbols_resolved(
+    line_symbols: &LineSymbols,
+    identifiers: &ModuleIdentifiers,
+    locals: &HashSet<String>,
+    label_stack: &[String],
+) -> bool {
+    line_symbols.consumes.iter().all(|sym| match sym.space {
+        IndexSpace::Local => locals.contains(&sym.name),
+        IndexSpace::Label => label_stack.contains(&sym.name),
+        _ => identifiers
+            .set(&sym.space)
+            .is_some_and(|set| set.contains(&sym.name)),
+    })
 }
 
 impl From<Instruction<'_>> for LineSymbols {
