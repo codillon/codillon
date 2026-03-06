@@ -1,5 +1,6 @@
 // Symbolic reference utilities for producing valid syntax
 
+use std::collections::HashSet;
 use wast::{
     core::{
         ElemPayload, Export, ExportKind, Expression, Func, FuncKind, FunctionType, Global,
@@ -50,8 +51,70 @@ impl From<&ItemKind<'_>> for IndexSpace {
     }
 }
 
+#[derive(Default)]
+pub struct Identifiers {
+    // defined symbolic references in different identifier contexts
+    types: HashSet<String>,
+    globals: HashSet<String>,
+    mems: HashSet<String>,
+    tables: HashSet<String>,
+    funcs: HashSet<String>,
+    datas: HashSet<String>,
+    elems: HashSet<String>,
+    locals: HashSet<String>,
+    labels: HashSet<String>,
+}
+
+impl Identifiers {
+    fn set(&self, space: &IndexSpace) -> Option<&HashSet<String>> {
+        match space {
+            IndexSpace::Type => Some(&self.types),
+            IndexSpace::Global => Some(&self.globals),
+            IndexSpace::Mem => Some(&self.mems),
+            IndexSpace::Table => Some(&self.tables),
+            IndexSpace::Func => Some(&self.funcs),
+            IndexSpace::Data => Some(&self.datas),
+            IndexSpace::Elem => Some(&self.elems),
+            IndexSpace::Local => Some(&self.locals),
+            IndexSpace::Label => Some(&self.labels),
+            IndexSpace::Undefined => None,
+        }
+    }
+
+    fn set_mut(&mut self, space: &IndexSpace) -> Option<&mut HashSet<String>> {
+        match space {
+            IndexSpace::Type => Some(&mut self.types),
+            IndexSpace::Global => Some(&mut self.globals),
+            IndexSpace::Mem => Some(&mut self.mems),
+            IndexSpace::Table => Some(&mut self.tables),
+            IndexSpace::Func => Some(&mut self.funcs),
+            IndexSpace::Data => Some(&mut self.datas),
+            IndexSpace::Elem => Some(&mut self.elems),
+            IndexSpace::Local => Some(&mut self.locals),
+            IndexSpace::Label => Some(&mut self.labels),
+            IndexSpace::Undefined => None,
+        }
+    }
+
+    pub fn push_symbols(&mut self, symbols: Vec<SymbolRef>) {
+        for symbol in symbols {
+            if let Some(set) = self.set_mut(&symbol.space) {
+                set.insert(symbol.name);
+            }
+        }
+    }
+
+    // Return true if all symbols are defined in the corresponding index space.
+    // Symbols with IndexSpace::Undefined are considered undefined.
+    pub fn symbols_defined(&self, symbols: &[SymbolRef]) -> bool {
+        symbols.iter().all(|sym| {
+            self.set(&sym.space)
+                .is_some_and(|set| set.contains(&sym.name))
+        })
+    }
+}
+
 #[derive(Clone)]
-#[allow(dead_code)] // TODO remove this when SymbolRef is read in syntax fixing
 pub struct SymbolRef {
     name: String,
     space: IndexSpace,
