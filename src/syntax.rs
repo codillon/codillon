@@ -17,6 +17,7 @@ use wast::{
 use crate::line::{Activity, LineInfo};
 use crate::symbolic::{
     ModuleIdentifiers, collect_label_symbols, collect_local_symbols, collect_module_symbols,
+    symbols_resolved,
 };
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -693,6 +694,22 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     },
                 ),
                 _ => (),
+            }
+        }
+
+        // Invalidate lines whose consumed symbols are not defined
+        if lines.info(line_no).is_active() {
+            let label_symbols: Vec<String> = frame_stack
+                .iter()
+                .flat_map(|(_, labels)| labels.iter().cloned())
+                .collect();
+            if !symbols_resolved(
+                &lines.info(line_no).symbols,
+                &module_symbols,
+                &local_symbols,
+                &label_symbols,
+            ) {
+                lines.set_active_status(line_no, Inactive("undefined symbolic reference"));
             }
         }
     }
