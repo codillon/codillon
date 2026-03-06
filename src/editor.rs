@@ -136,7 +136,8 @@ impl Editor {
         }
         {
             let editor_ref = Rc::clone(&ret.0);
-            crate::autocomplete::register_dismiss_on_document_mouse_down(move || {
+            let factory = ret.0.borrow().factory.clone();
+            crate::autocomplete::register_dismiss_on_document_mouse_down(&factory, move || {
                 Editor(editor_ref.clone()).hide_autocomplete();
             });
         }
