@@ -1,6 +1,5 @@
 use crate::visited_operators::get_all_instruction_names;
 use crate::{dom_struct::DomStruct, dom_text::DomText, dom_vec::DomVec, jet::ElementFactory};
-use wasm_bindgen::JsCast;
 use web_sys::{HtmlDivElement, MouseEvent};
 
 pub type HintBarStruct = DomVec<DomStruct<(DomText, ()), HtmlDivElement>, HtmlDivElement>;
@@ -21,16 +20,11 @@ pub fn setup_hint_bar(factory: &ElementFactory) -> HintBarStruct {
     bar
 }
 
-pub fn register_dismiss_on_document_mouse_down(on_dismiss: impl Fn() + 'static) {
-    let on_doc_down =
-        wasm_bindgen::closure::Closure::wrap(
-            Box::new(move |_: MouseEvent| on_dismiss()) as Box<dyn FnMut(_)>
-        );
-    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
-        doc.add_event_listener_with_callback("mousedown", on_doc_down.as_ref().unchecked_ref())
-            .ok();
-    }
-    on_doc_down.forget();
+pub fn register_dismiss_on_document_mouse_down(
+    factory: &ElementFactory,
+    on_dismiss: impl Fn() + 'static,
+) {
+    factory.add_document_mousedown_listener(move |_: MouseEvent| on_dismiss());
 }
 
 pub fn update_hint_bar(

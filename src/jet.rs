@@ -117,12 +117,14 @@ impl TextHandle {
 pub struct Handlers {
     beforeinput: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
     keydown: Option<Closure<dyn Fn(web_sys::KeyboardEvent)>>,
+    mousedown: Option<Closure<dyn Fn(web_sys::MouseEvent)>>,
 }
 
 impl Handlers {
     pub fn audit(&self, elem: &impl AsRef<HtmlElement>) {
         audit_handler(&self.beforeinput, elem.as_ref().onbeforeinput());
         audit_handler(&self.keydown, elem.as_ref().onkeydown());
+        audit_handler(&self.mousedown, elem.as_ref().onmousedown());
 
         fn audit_handler<EventType>(
             expected: &Option<Closure<dyn Fn(EventType)>>,
@@ -176,6 +178,25 @@ impl Handlers {
             TOKEN,
         );
     }
+
+    pub fn set_onmousedown<E: WithElement, F: Fn(web_sys::MouseEvent) + 'static>(
+        &mut self,
+        elem: &mut E,
+        handler: F,
+    ) where
+        E::Element: AsRef<HtmlElement>,
+    {
+        self.mousedown = Some(Closure::new(handler));
+        elem.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onmousedown(Some(
+                    self.mousedown.as_ref().unwrap().as_ref().unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
 }
 
 pub struct ReactiveComponent<T: ElementComponent> {
@@ -206,6 +227,7 @@ where
 pub trait ControlHandlers {
     fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
     fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F);
+    fn set_onmousedown<F: Fn(web_sys::MouseEvent) + 'static>(&mut self, handler: F);
 }
 
 impl<T: ElementComponent> ControlHandlers for ReactiveComponent<T>
@@ -237,6 +259,23 @@ where
                 html.set_onkeydown(Some(
                     self.handlers
                         .keydown
+                        .as_ref()
+                        .unwrap()
+                        .as_ref()
+                        .unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
+    fn set_onmousedown<F: Fn(web_sys::MouseEvent) + 'static>(&mut self, handler: F) {
+        self.handlers.mousedown = Some(Closure::new(handler));
+        self.component.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onmousedown(Some(
+                    self.handlers
+                        .mousedown
                         .as_ref()
                         .unwrap()
                         .as_ref()
@@ -359,18 +398,6 @@ impl<T: AnyElement> ElementHandle<T> {
             .scroll_into_view_with_scroll_into_view_options(&opts);
     }
 
-    pub fn set_onwheel<F>(&self, handler: F)
-    where
-        F: 'static + FnMut(web_sys::WheelEvent),
-    {
-        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::WheelEvent)>);
-        self.elem
-            .element()
-            .add_event_listener_with_callback("wheel", closure.as_ref().unchecked_ref())
-            .unwrap();
-        closure.forget();
-    }
-
     pub fn set_onmousedown<F>(&self, handler: F)
     where
         F: 'static + FnMut(web_sys::MouseEvent),
@@ -476,6 +503,17 @@ impl ElementFactory {
             .unwrap()
             .dyn_into::<T>()
             .unwrap_or_else(|_| panic!("expecting {t} element"))
+    }
+
+    pub fn add_document_mousedown_listener<F: FnMut(web_sys::MouseEvent) + 'static>(
+        &self,
+        handler: F,
+    ) {
+        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
+        self.0
+            .add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref())
+            .unwrap();
+        closure.forget();
     }
 
     pub fn div(&self) -> ElementHandle<web_sys::HtmlDivElement> {
