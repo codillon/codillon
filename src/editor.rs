@@ -20,7 +20,7 @@ use crate::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         find_frames, find_function_ranges, find_import_lines, fix_syntax,
     },
-    utils::{CodillonType, FmtError, RawModule, ValidModule, str_to_binary},
+    utils::{FmtError, RawModule, ValidModule, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use itertools::Itertools;
@@ -580,45 +580,8 @@ impl Editor {
         let validized = raw_module.fix_validity(&wasm_bin, self, &find_import_lines(self))?;
         let types = validized.to_types_table(&wasm_bin)?;
 
-        let mut last_line_no = 0;
-        for i in 0..validized.functions.len() {
-            for (op, CodillonType { inputs, outputs }) in
-                std::iter::zip(&validized.functions[i].operators, &types.functions[i].types)
-            {
-                let mut type_str = String::new();
-
-                for t in inputs {
-                    match t {
-                        Some(ty) => type_str.push_str(&ty.instr_type.to_string()),
-                        None => type_str.push('?'),
-                    }
-                    type_str.push(' ');
-                }
-                if inputs.is_empty() {
-                    type_str.push_str("𝜖 ");
-                }
-
-                type_str.push('→');
-                for t in outputs {
-                    type_str.push(' ');
-                    type_str.push_str(&t.to_string());
-                }
-                if outputs.is_empty() {
-                    type_str.push_str(" 𝜖");
-                }
-
-                while last_line_no < op.line_idx {
-                    self.line_mut(last_line_no).set_type_annotation(None);
-                    last_line_no += 1;
-                }
-                last_line_no += 1;
-
-                self.line_mut(op.line_idx)
-                    .set_type_annotation(Some(&type_str));
-            }
-        }
-
-        for i in last_line_no..self.len() {
+        // XXX: render types of operators
+        for i in 0..self.len() {
             self.line_mut(i).set_type_annotation(None);
         }
 
