@@ -549,16 +549,26 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         lines.set_active_status(line_no, Active);
         lines.set_invalid(line_no, None);
 
+        let line_kind = lines.info(line_no).kind.stripped_clone();
+
         // Collect defined local and label symbolic references if there's any
         collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
         let line_label = collect_label_symbol(&lines.info(line_no).symbols);
 
         // Enforce correct symbolic reference consumption
         if lines.info(line_no).is_active() {
-            let label_symbol_defs: Vec<String> = frame_stack
-                .iter()
-                .filter_map(|(_, label)| label.clone())
-                .collect();
+            // end/else must match the label of the frame being closed, not any enclosing frame
+            let label_symbol_defs: Vec<String> = match line_kind {
+                LineKind::Instr(InstrKind::End) | LineKind::Instr(InstrKind::Else) => frame_stack
+                    .last()
+                    .and_then(|(_, label)| label.clone())
+                    .into_iter()
+                    .collect(),
+                _ => frame_stack
+                    .iter()
+                    .filter_map(|(_, label)| label.clone())
+                    .collect(),
+            };
             if !symbols_resolved(
                 &lines.info(line_no).symbols,
                 &module_symbol_defs,
@@ -571,7 +581,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         }
 
         // Enforce no imports after other module fields
-        let line_kind = lines.info(line_no).kind.stripped_clone();
         if let LineKind::Other(parts) = &line_kind {
             let has_import = parts
                 .iter()
