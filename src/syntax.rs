@@ -549,9 +549,31 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         lines.set_active_status(line_no, Active);
         lines.set_invalid(line_no, None);
 
+        // Collect local and label symbolic references if there's any
+        collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
+        let mut line_labels: LabelNames = Vec::new();
+        collect_label_symbols(&lines.info(line_no).symbols, &mut line_labels);
+
+        // Enforce correct symbolic reference consumption
+        if lines.info(line_no).is_active() {
+            let label_symbol_defs: Vec<String> = frame_stack
+                .iter()
+                .flat_map(|(_, labels)| labels.iter().cloned())
+                .collect();
+            if !symbols_resolved(
+                &lines.info(line_no).symbols,
+                &module_symbol_defs,
+                &local_symbol_defs,
+                &label_symbol_defs,
+            ) {
+                lines.set_active_status(line_no, Inactive("undefined symbolic reference"));
+                continue;
+            }
+        }
+
         // Enforce no imports after other module fields
-        let instr_kind = lines.info(line_no).kind.stripped_clone();
-        if let LineKind::Other(parts) = &instr_kind {
+        let line_kind = lines.info(line_no).kind.stripped_clone();
+        if let LineKind::Other(parts) = &line_kind {
             let has_import = parts
                 .iter()
                 .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport));
@@ -658,19 +680,13 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             }
         }
 
-        // Collect local symbolic references if there's any
-        collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
-
         // Enforce syntax requirements of structured instructions
-        if let LineKind::Instr(kind) = instr_kind {
-            let mut labels: LabelNames = Vec::new();
-            collect_label_symbols(&lines.info(line_no).symbols, &mut labels);
-
-            match kind {
+        if let LineKind::Instr(instr_kind) = line_kind {
+            match instr_kind {
                 // For a structured instruction that opens a frame, log this.
                 InstrKind::If | InstrKind::OtherStructured => {
                     lines.set_active_status(line_no, Active);
-                    frame_stack.push((kind, labels));
+                    frame_stack.push((instr_kind, line_labels));
                 }
 
                 // Fix #5: if an `else` appears outside an `if` frame, disable it
@@ -678,7 +694,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     if let Some((InstrKind::If, _)) = frame_stack.last() {
                         frame_stack.pop();
                         lines.set_active_status(line_no, Active);
-                        frame_stack.push((InstrKind::Else, labels));
+                        frame_stack.push((InstrKind::Else, line_labels));
                     } else {
                         lines.set_active_status(line_no, Inactive("’else’ outside ‘if’"));
                     }
@@ -694,22 +710,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     },
                 ),
                 _ => (),
-            }
-        }
-
-        // Invalidate lines whose consumed symbols are not defined
-        if lines.info(line_no).is_active() {
-            let label_symbol_defs: Vec<String> = frame_stack
-                .iter()
-                .flat_map(|(_, labels)| labels.iter().cloned())
-                .collect();
-            if !symbols_resolved(
-                &lines.info(line_no).symbols,
-                &module_symbol_defs,
-                &local_symbol_defs,
-                &label_symbol_defs,
-            ) {
-                lines.set_active_status(line_no, Inactive("undefined symbolic reference"));
             }
         }
     }
