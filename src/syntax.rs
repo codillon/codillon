@@ -534,12 +534,12 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     let mut before_imports = true;
 
     // Structures for symbolic references
-    let mut module_symbols = ModuleIdentifiers::default();
-    let mut local_symbols: HashSet<String> = HashSet::new();
+    let mut module_symbol_defs = ModuleIdentifiers::default();
+    let mut local_symbol_defs: HashSet<String> = HashSet::new();
 
     // Collect module-level defined symbolic references
     for line_no in 0..lines.len() {
-        collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbols);
+        collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
     }
 
     assert!(lines.len() > 0);
@@ -634,7 +634,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.clear();
-                        local_symbols.clear();
+                        local_symbol_defs.clear();
                     }
                     if syntax_after_internal_initial_state {
                         // Fix #4.5: Codiillon only wants one field per line. If this line reached the initial
@@ -659,7 +659,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         }
 
         // Collect local symbolic references if there's any
-        collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbols);
+        collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
 
         // Enforce syntax requirements of structured instructions
         if let LineKind::Instr(kind) = instr_kind {
@@ -699,15 +699,15 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         // Invalidate lines whose consumed symbols are not defined
         if lines.info(line_no).is_active() {
-            let label_symbols: Vec<String> = frame_stack
+            let label_symbol_defs: Vec<String> = frame_stack
                 .iter()
                 .flat_map(|(_, labels)| labels.iter().cloned())
                 .collect();
             if !symbols_resolved(
                 &lines.info(line_no).symbols,
-                &module_symbols,
-                &local_symbols,
-                &label_symbols,
+                &module_symbol_defs,
+                &local_symbol_defs,
+                &label_symbol_defs,
             ) {
                 lines.set_active_status(line_no, Inactive("undefined symbolic reference"));
             }

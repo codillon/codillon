@@ -194,6 +194,17 @@ impl From<Instruction<'_>> for LineSymbols {
                 }
             }
 
+            Instruction::BrTable(i) => {
+                for label in &i.labels {
+                    if let Index::Id(id) = label {
+                        consumes.push(SymbolRef::new(id.name(), IndexSpace::Label));
+                    }
+                }
+                if let Index::Id(id) = i.default {
+                    consumes.push(SymbolRef::new(id.name(), IndexSpace::Label));
+                }
+            }
+
             Instruction::Call(i)
             | Instruction::ReturnCall(i)
             | Instruction::CallRef(i)
@@ -626,6 +637,17 @@ mod tests {
         symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert!(symbols.consumes.is_empty());
+
+        line = "br_table $a $b $default";
+        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        assert!(symbols.defines.is_empty());
+        assert_eq!(symbols.consumes.len(), 3);
+        assert_eq!(symbols.consumes[0].name, "a");
+        assert_eq!(symbols.consumes[0].space, IndexSpace::Label);
+        assert_eq!(symbols.consumes[1].name, "b");
+        assert_eq!(symbols.consumes[1].space, IndexSpace::Label);
+        assert_eq!(symbols.consumes[2].name, "default");
+        assert_eq!(symbols.consumes[2].space, IndexSpace::Label);
 
         line = "local.set $something";
         symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
