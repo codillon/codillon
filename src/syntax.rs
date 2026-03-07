@@ -453,10 +453,7 @@ impl SyntaxState {
                 callback(self);
             }
             LineKind::Other(parts) => {
-                let local_count = parts
-                    .iter()
-                    .filter(|&p| *p == ModulePart::Local)
-                    .count();
+                let local_count = parts.iter().filter(|&p| *p == ModulePart::Local).count();
                 if local_count > 1 || (local_count == 1 && parts.len() > 1) {
                     return Err("local must be on its own line");
                 }
