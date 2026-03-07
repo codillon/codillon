@@ -1,6 +1,7 @@
 // Structures and utilities to support multi-function/multi-module text buffers.
 
 use anyhow::Result;
+use std::collections::HashSet;
 use std::ops::Deref;
 use wast::{
     Error,
@@ -14,6 +15,10 @@ use wast::{
 };
 
 use crate::line::{Activity, LineInfo};
+use crate::symbolic::{
+    ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
+    symbols_resolved,
+};
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum InstrKind {
@@ -522,9 +527,20 @@ impl SyntaxState {
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     use crate::line::Activity::*;
     use SyntaxState::*;
+    type DefinedLabel = Option<String>;
+
     let mut state = Initial;
-    let mut frame_stack: Vec<InstrKind> = Vec::new();
+    let mut frame_stack: Vec<(InstrKind, DefinedLabel)> = Vec::new();
     let mut before_imports = true;
+
+    // Structures for symbolic references
+    let mut module_symbol_defs = ModuleIdentifiers::default();
+    let mut local_symbol_defs: HashSet<String> = HashSet::new();
+
+    // Collect module-level defined symbolic references
+    for line_no in 0..lines.len() {
+        collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
+    }
 
     assert!(lines.len() > 0);
 
@@ -533,9 +549,39 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         lines.set_active_status(line_no, Active);
         lines.set_invalid(line_no, None);
 
+        let line_kind = lines.info(line_no).kind.stripped_clone();
+
+        // Collect defined local and label symbolic references if there's any
+        collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
+        let line_label = collect_label_symbol(&lines.info(line_no).symbols);
+
+        // Enforce correct symbolic reference consumption
+        if lines.info(line_no).is_active() {
+            // end/else must match the label of the frame being closed, not any enclosing frame
+            let label_symbol_defs: Vec<String> = match line_kind {
+                LineKind::Instr(InstrKind::End) | LineKind::Instr(InstrKind::Else) => frame_stack
+                    .last()
+                    .and_then(|(_, label)| label.clone())
+                    .into_iter()
+                    .collect(),
+                _ => frame_stack
+                    .iter()
+                    .filter_map(|(_, label)| label.clone())
+                    .collect(),
+            };
+            if !symbols_resolved(
+                &lines.info(line_no).symbols,
+                &module_symbol_defs,
+                &local_symbol_defs,
+                &label_symbol_defs,
+            ) {
+                lines.set_active_status(line_no, Inactive("undefined symbolic reference"));
+                continue;
+            }
+        }
+
         // Enforce no imports after other module fields
-        let instr_kind = lines.info(line_no).kind.stripped_clone();
-        if let LineKind::Other(parts) = &instr_kind {
+        if let LineKind::Other(parts) = &line_kind {
             let has_import = parts
                 .iter()
                 .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport));
@@ -618,6 +664,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                             },
                         );
                         frame_stack.clear();
+                        local_symbol_defs.clear();
                     }
                     if syntax_after_internal_initial_state {
                         // Fix #4.5: Codiillon only wants one field per line. If this line reached the initial
@@ -642,20 +689,21 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         }
 
         // Enforce syntax requirements of structured instructions
-        if let LineKind::Instr(kind) = instr_kind {
-            match kind {
+        if let LineKind::Instr(instr_kind) = line_kind {
+            match instr_kind {
                 // For a structured instruction that opens a frame, log this.
                 InstrKind::If | InstrKind::OtherStructured => {
                     lines.set_active_status(line_no, Active);
-                    frame_stack.push(kind);
+                    frame_stack.push((instr_kind, line_label));
                 }
 
                 // Fix #5: if an `else` appears outside an `if` frame, disable it
                 InstrKind::Else => {
-                    if let Some(InstrKind::If) = frame_stack.last() {
-                        frame_stack.pop();
+                    if let Some((InstrKind::If, _)) = frame_stack.last() {
                         lines.set_active_status(line_no, Active);
-                        frame_stack.push(InstrKind::Else);
+                        // Carry over labels from If frame
+                        let (_, if_label) = frame_stack.pop().unwrap();
+                        frame_stack.push((InstrKind::Else, if_label));
                     } else {
                         lines.set_active_status(line_no, Inactive("‘else’ outside ‘if’"));
                     }
