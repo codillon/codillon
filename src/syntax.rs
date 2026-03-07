@@ -697,7 +697,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         let (_, if_labels) = frame_stack.pop().unwrap();
                         frame_stack.push((InstrKind::Else, if_labels));
                     } else {
-                        lines.set_active_status(line_no, Inactive("’else’ outside ‘if’"));
+                        lines.set_active_status(line_no, Inactive("‘else’ outside ‘if’"));
                     }
                 }
 
