@@ -121,7 +121,7 @@ pub fn make_imports() -> Result<Object, JsValue> {
             let cur_change = Change {
                 line_number: line_num as usize,
                 stack_pushes: state.stack_pushes.clone(),
-                num_pops: state.num_pops as usize,
+                num_pops: state.num_pops,
             };
             let step_idx = state.changes.len();
             if let Some(locals) = state.locals_change.take() {
