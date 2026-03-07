@@ -273,3 +273,41 @@ span.debug[data-debug]::after {
     margin-left: auto;
     margin-right: auto;
 }
+
+.autocomplete-hint-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 34px;
+    background: #fffff0;
+    border-top: 1px solid burlywood;
+    display: flex;
+    gap: 4px;
+    padding: 0 8px;
+    overflow-x: auto;
+    align-items: center;
+    z-index: 100;
+}
+
+.autocomplete-item {
+    flex-shrink: 0;
+    padding: 3px 10px;
+    background: white;
+    border: 1px solid burlywood;
+    border-radius: 3px;
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 12pt;
+    color: darkred;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.autocomplete-item:hover {
+    background: linen;
+}
+
+.autocomplete-item:first-child {
+    border-color: darkred;
+    font-weight: bold;
+}
