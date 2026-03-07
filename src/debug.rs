@@ -58,13 +58,16 @@ impl From<u128> for WebAssemblyTypes {
 }
 
 pub struct Change {
-    pub line_number: i32,
+    pub line_number: usize,
     pub stack_pushes: Vec<WebAssemblyTypes>,
-    pub locals_change: Option<Vec<(usize, WebAssemblyTypes)>>,
-    pub globals_change: Option<(u32, WebAssemblyTypes)>,
-    pub memory_change: Option<(u32, WebAssemblyTypes)>,
-    pub point: Option<(f64, f64)>,
-    pub num_pops: u32,
+    pub num_pops: usize,
+}
+
+pub enum SparseChange {
+    Locals(Vec<(usize, WebAssemblyTypes)>),
+    Globals(usize, WebAssemblyTypes),
+    Memory(usize, WebAssemblyTypes),
+    Point(f64, f64),
 }
 
 struct DebugState {
@@ -72,12 +75,11 @@ struct DebugState {
     stack_pushes: Vec<WebAssemblyTypes>,
     // Vector of local variable indices and values
     locals_change: Option<Vec<(usize, WebAssemblyTypes)>>,
-    globals_change: Option<(u32, WebAssemblyTypes)>,
-    memory_change: Option<(u32, WebAssemblyTypes)>,
-    num_pops: u32,
-    point: Option<(f64, f64)>,
+    num_pops: usize,
     // Chronological per-step changes
     changes: Vec<Change>,
+    // Sparse changes keyed by step index
+    sparse_changes: Vec<(usize, SparseChange)>,
 }
 
 impl DebugState {
@@ -85,11 +87,9 @@ impl DebugState {
         Self {
             stack_pushes: Vec::new(),
             locals_change: None,
-            globals_change: None,
-            memory_change: None,
-            point: None,
             num_pops: 0,
             changes: Vec::new(),
+            sparse_changes: Vec::new(),
         }
     }
 }
@@ -104,6 +104,7 @@ where
 
 // Constructs the instrumentation functions for import
 pub fn make_imports() -> Result<Object, JsValue> {
+    use SparseChange::*;
     STATE.with(|cur_state| *cur_state.borrow_mut() = DebugState::new());
     let imports = Object::new();
     let debug_numbers = Object::new();
@@ -118,20 +119,17 @@ pub fn make_imports() -> Result<Object, JsValue> {
                 return 0;
             }
             let cur_change = Change {
-                line_number: line_num,
+                line_number: line_num as usize,
                 stack_pushes: state.stack_pushes.clone(),
-                locals_change: state.locals_change.clone(),
-                globals_change: state.globals_change,
-                memory_change: state.memory_change,
-                point: state.point,
-                num_pops: state.num_pops,
+                num_pops: state.num_pops as usize,
             };
+            let step_idx = state.changes.len();
+            if let Some(locals) = state.locals_change.take() {
+                state.sparse_changes.push((step_idx, Locals(locals)));
+            }
             state.changes.push(cur_change);
             state.stack_pushes.clear();
             state.locals_change = None;
-            state.globals_change = None;
-            state.memory_change = None;
-            state.point = None;
             state.num_pops = 0;
             1
         })
@@ -189,7 +187,7 @@ pub fn make_imports() -> Result<Object, JsValue> {
 
     let pop_i = Closure::wrap(Box::new(move |pop_num: i32| {
         STATE.with(|cur_state| {
-            cur_state.borrow_mut().num_pops = pop_num as u32;
+            cur_state.borrow_mut().num_pops = pop_num as usize;
         });
     }) as Box<dyn Fn(i32)>);
     register_closure(&debug_numbers, "pop_i", pop_i);
@@ -206,7 +204,11 @@ pub fn make_imports() -> Result<Object, JsValue> {
 fn create_closure_helpers(import: &Object) {
     let draw_point = Closure::wrap(Box::new(move |x: f64, y: f64| {
         STATE.with(|cur_state| {
-            cur_state.borrow_mut().point = Some((x, y));
+            let mut state = cur_state.borrow_mut();
+            let step_idx = state.changes.len();
+            state
+                .sparse_changes
+                .push((step_idx, SparseChange::Point(x, y)));
         });
     }) as Box<dyn Fn(f64, f64)>);
     let helpers = Object::new();
@@ -217,7 +219,11 @@ fn create_closure_helpers(import: &Object) {
 fn create_closure_global_operations(debug_numbers: &Object) {
     let record_global_change = |idx: i32, value: WebAssemblyTypes| {
         STATE.with(|cur_state| {
-            cur_state.borrow_mut().globals_change = Some((idx as u32, value));
+            let mut state = cur_state.borrow_mut();
+            let step_idx = state.changes.len();
+            state
+                .sparse_changes
+                .push((step_idx, SparseChange::Globals(idx as usize, value)));
         });
     };
     let set_global_i32 = Closure::wrap(Box::new(move |idx: i32, value: i32| {
@@ -274,11 +280,17 @@ fn create_closure_local_operations(debug_numbers: &Object) {
 }
 
 fn create_closure_memory_operations(debug_numbers: &Object) {
-    let set_memory_i32 = Closure::wrap(Box::new(move |addr: i32, value: i32| {
+    let record_memory_change = |addr: usize, value: WebAssemblyTypes| {
         STATE.with(|cur_state| {
-            cur_state.borrow_mut().memory_change =
-                Some((addr as u32, WebAssemblyTypes::I32(value)));
+            let mut state = cur_state.borrow_mut();
+            let step_idx = state.changes.len();
+            state
+                .sparse_changes
+                .push((step_idx, SparseChange::Memory(addr, value)));
         });
+    };
+    let set_memory_i32 = Closure::wrap(Box::new(move |addr: i32, value: i32| {
+        record_memory_change(addr as usize, WebAssemblyTypes::I32(value));
         // Return [addr, value]
         let arr = js_sys::Array::new();
         arr.push(&JsValue::from_f64(addr as f64));
@@ -288,10 +300,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
     register_closure(debug_numbers, "set_memory_i32", set_memory_i32);
 
     let set_memory_f32 = Closure::wrap(Box::new(move |addr: i32, value: f32| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().memory_change =
-                Some((addr as u32, WebAssemblyTypes::F32(value)));
-        });
+        record_memory_change(addr as usize, WebAssemblyTypes::F32(value));
         let arr = js_sys::Array::new();
         arr.push(&JsValue::from_f64(addr as f64));
         arr.push(&JsValue::from_f64(value as f64));
@@ -300,10 +309,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
     register_closure(debug_numbers, "set_memory_f32", set_memory_f32);
 
     let set_memory_i64 = Closure::wrap(Box::new(move |addr: i32, value: i64| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().memory_change =
-                Some((addr as u32, WebAssemblyTypes::I64(value)));
-        });
+        record_memory_change(addr as usize, WebAssemblyTypes::I64(value));
         let arr = js_sys::Array::new();
         arr.push(&JsValue::from_f64(addr as f64));
         arr.push(&JsValue::from_f64(value as f64));
@@ -312,10 +318,7 @@ fn create_closure_memory_operations(debug_numbers: &Object) {
     register_closure(debug_numbers, "set_memory_i64", set_memory_i64);
 
     let set_memory_f64 = Closure::wrap(Box::new(move |addr: i32, value: f64| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().memory_change =
-                Some((addr as u32, WebAssemblyTypes::F64(value)));
-        });
+        record_memory_change(addr as usize, WebAssemblyTypes::F64(value));
         let arr = js_sys::Array::new();
         arr.push(&JsValue::from_f64(addr as f64));
         arr.push(&JsValue::from_f64(value));
@@ -333,6 +336,13 @@ where
     F: FnOnce(std::slice::Iter<'_, Change>) -> T,
 {
     STATE.with(|cur_state| get_iter(cur_state.borrow().changes.iter()))
+}
+
+pub fn with_sparse_changes<T, F>(f: F) -> T
+where
+    F: FnOnce(&Vec<(usize, SparseChange)>) -> T,
+{
+    STATE.with(|cur_state| f(&cur_state.borrow().sparse_changes))
 }
 
 fn type_to_string(value: &WebAssemblyTypes) -> String {

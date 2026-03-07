@@ -2,7 +2,10 @@
 
 use crate::{
     action_history::{ActionHistory, Edit, Selection},
-    debug::{WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes},
+    debug::{
+        SparseChange, WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes,
+        with_sparse_changes,
+    },
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
@@ -50,11 +53,12 @@ const STORAGE_ID: &str = "codillon_content";
 #[derive(Clone, Default)]
 pub struct ProgramState {
     pub step_number: usize,
-    pub line_number: i32,
+    pub line_number: usize,
     pub stack_state: Vec<WebAssemblyTypes>,
     pub locals_state: Vec<WebAssemblyTypes>,
     pub globals_state: Vec<WebAssemblyTypes>,
     pub memory_state: Vec<WebAssemblyTypes>,
+    pub sparse_idx: usize,
 }
 
 struct _Editor {
@@ -621,7 +625,7 @@ impl Editor {
     }
 
     fn execute(&self, binary: &[u8]) {
-        async fn run_binary(binary: &[u8]) -> Result<String> {
+        async fn run_binary(binary: &[u8], args: &js_sys::Array) -> Result<String> {
             use js_sys::{Function, Reflect};
             // Build import objects for the instrumented module.
             let imports = make_imports().fmt_err()?;
@@ -631,17 +635,40 @@ impl Editor {
                 .fmt_err()?;
             let instance = Reflect::get(&js_value, &JsValue::from_str("instance")).fmt_err()?;
             let exports = Reflect::get(&instance, &JsValue::from_str("exports")).fmt_err()?;
-            let main = Reflect::get(&exports, &JsValue::from_str("main")).fmt_err()?;
-            let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
-                .context("main is not an exported function")?;
-            let res = main.apply(&JsValue::null(), &js_sys::Array::new());
-            res.map(|x| format!("{:?}", x)).fmt_err()
+            // Call first function with default values for its params
+            match Reflect::get(&exports, &JsValue::from_str("main")) {
+                Ok(main) => {
+                    let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
+                        .context("main is not an exported function")?;
+                    let res = main.apply(&JsValue::null(), args);
+                    res.map(|x| format!("{:?}", x)).fmt_err()
+                }
+                Err(_) => Ok(String::new()),
+            }
         }
 
         let binary = binary.to_vec();
         let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
-            let _ = run_binary(&binary).await;
+            let first_func_locals: Vec<WebAssemblyTypes> = editor_handle
+                .0
+                .borrow()
+                .function_locals
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            let args = js_sys::Array::new();
+            for val in first_func_locals {
+                let js_val = match val {
+                    WebAssemblyTypes::I32(v) => JsValue::from_f64(v as f64),
+                    WebAssemblyTypes::I64(v) => JsValue::from_f64(v as f64),
+                    WebAssemblyTypes::F32(v) => JsValue::from_f64(v as f64),
+                    WebAssemblyTypes::F64(v) => JsValue::from_f64(v),
+                    WebAssemblyTypes::V128(v) => JsValue::from_f64(v as f64),
+                };
+                args.push(&js_val);
+            }
+            let _ = run_binary(&binary, &args).await;
             // Update slider
             let step = {
                 let mut inner = editor_handle.0.borrow_mut();
@@ -665,7 +692,7 @@ impl Editor {
     fn update_debug_panel(&self, error: Option<String>) {
         let inner = self.0.borrow_mut();
         let step = inner.program_state.step_number;
-        let line_num = inner.program_state.line_number as usize;
+        let line_num = inner.program_state.line_number;
         let saved_states = inner.saved_states.clone();
         let mut textentry: RefMut<ReactiveComponent<TextType>> =
             RefMut::map(inner, |comp| &mut comp.component.get_mut().1.0);
@@ -817,47 +844,55 @@ impl Editor {
             canvas.clear_canvas();
         }
         with_changes(|changes| {
-            for (i, change) in changes.enumerate().skip(start).take(stop - start) {
-                inner.program_state.step_number = i + 1;
-                inner.program_state.line_number = change.line_number;
-                let line_num = change.line_number as usize;
-                let func_idx = inner
-                    .function_ranges
-                    .iter()
-                    .position(|(s, e)| line_num >= *s && line_num <= *e)
-                    .expect("line inside function");
-                let new_length = inner
-                    .program_state
-                    .stack_state
-                    .len()
-                    .saturating_sub(change.num_pops as usize);
-                inner.program_state.stack_state.truncate(new_length);
-                for push in &change.stack_pushes {
-                    inner.program_state.stack_state.push(*push);
-                }
-                if let Some(updates) = &change.locals_change {
-                    for (idx, val) in updates {
-                        inner.function_locals[func_idx][*idx] = *val;
+            with_sparse_changes(|sparse_changes| {
+                let mut sparse_idx = inner.program_state.sparse_idx;
+                for (i, change) in changes.enumerate().skip(start).take(stop - start) {
+                    inner.program_state.step_number = i + 1;
+                    inner.program_state.line_number = change.line_number;
+                    let func_idx = inner
+                        .function_ranges
+                        .iter()
+                        .position(|(s, e)| change.line_number >= *s && change.line_number <= *e)
+                        .expect("line inside function");
+                    let new_length = inner
+                        .program_state
+                        .stack_state
+                        .len()
+                        .saturating_sub(change.num_pops);
+                    inner.program_state.stack_state.truncate(new_length);
+                    for push in &change.stack_pushes {
+                        inner.program_state.stack_state.push(*push);
                     }
-                }
-                inner.program_state.locals_state = inner.function_locals[func_idx].clone();
-                if let Some((idx, val)) = &change.globals_change {
-                    inner.program_state.globals_state[*idx as usize] = *val;
-                }
-                if let Some((idx, val)) = &change.memory_change {
-                    let idx_usize = *idx as usize;
-                    let memory = &mut inner.program_state.memory_state;
-                    if memory.len() <= idx_usize {
-                        memory.resize(idx_usize + 1, WebAssemblyTypes::I32(0));
+                    while sparse_idx < sparse_changes.len() && sparse_changes[sparse_idx].0 == i {
+                        match sparse_changes[sparse_idx].1 {
+                            SparseChange::Locals(ref vec) => {
+                                for (idx, val) in vec.iter() {
+                                    inner.function_locals[func_idx][*idx] = *val;
+                                }
+                                inner.program_state.locals_state =
+                                    inner.function_locals[func_idx].clone();
+                            }
+                            SparseChange::Globals(idx, val) => {
+                                inner.program_state.globals_state[idx] = val;
+                            }
+                            SparseChange::Memory(idx, val) => {
+                                let memory = &mut inner.program_state.memory_state;
+                                if memory.len() <= idx {
+                                    memory.resize(idx + 1, WebAssemblyTypes::I32(0));
+                                }
+                                memory[idx] = val;
+                            }
+                            SparseChange::Point(x, y) => {
+                                let canvas = &inner.component.get_mut().1.1.1.0;
+                                self.draw_point(x, y, canvas);
+                            }
+                        }
+                        sparse_idx += 1;
                     }
-                    memory[idx_usize] = *val;
+                    inner.saved_states[change.line_number] = Some(inner.program_state.clone());
                 }
-                inner.saved_states[change.line_number as usize] = Some(inner.program_state.clone());
-                if let Some((x, y)) = &change.point {
-                    let canvas = &inner.component.get_mut().1.1.1.0;
-                    self.draw_point(*x, *y, canvas);
-                }
-            }
+                inner.program_state.sparse_idx = sparse_idx;
+            });
         });
     }
 
