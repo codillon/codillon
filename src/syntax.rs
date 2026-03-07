@@ -527,10 +527,10 @@ impl SyntaxState {
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     use crate::line::Activity::*;
     use SyntaxState::*;
-    type LabelNames = Vec<String>;
+    type DefinedLabels = Vec<String>;
 
     let mut state = Initial;
-    let mut frame_stack: Vec<(InstrKind, LabelNames)> = Vec::new();
+    let mut frame_stack: Vec<(InstrKind, DefinedLabels)> = Vec::new();
     let mut before_imports = true;
 
     // Structures for symbolic references
@@ -551,7 +551,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         // Collect local and label symbolic references if there's any
         collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
-        let mut line_labels: LabelNames = Vec::new();
+        let mut line_labels: DefinedLabels = Vec::new();
         collect_label_symbols(&lines.info(line_no).symbols, &mut line_labels);
 
         // Enforce correct symbolic reference consumption
@@ -692,9 +692,10 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 // Fix #5: if an `else` appears outside an `if` frame, disable it
                 InstrKind::Else => {
                     if let Some((InstrKind::If, _)) = frame_stack.last() {
-                        frame_stack.pop();
                         lines.set_active_status(line_no, Active);
-                        frame_stack.push((InstrKind::Else, line_labels));
+                        // Carry over labels from If frame
+                        let (_, if_labels) = frame_stack.pop().unwrap();
+                        frame_stack.push((InstrKind::Else, if_labels));
                     } else {
                         lines.set_active_status(line_no, Inactive("’else’ outside ‘if’"));
                     }
