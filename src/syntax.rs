@@ -373,7 +373,7 @@ impl FuncHeader {
         ModulePart::InlineImport, // 3 - Optional
         ModulePart::Param,        // 4 - Optional, Repeatable
         ModulePart::Result,       // 5 - Optional, Repeatable
-        ModulePart::Local,        // 6 - Optional, Repeatable
+        ModulePart::Local,        // 6 - Optional, Repeatable, On individual lines
     ];
 
     fn transit_state(&mut self, part: ModulePart) -> Result<(), &'static str> {
@@ -453,6 +453,13 @@ impl SyntaxState {
                 callback(self);
             }
             LineKind::Other(parts) => {
+                let local_count = parts
+                    .iter()
+                    .filter(|&p| *p == ModulePart::Local)
+                    .count();
+                if local_count > 1 || (local_count == 1 && parts.len() > 1) {
+                    return Err("local must be on its own line");
+                }
                 for part in parts {
                     self.transit_state_from_module_part(*part)?;
                     callback(self);
