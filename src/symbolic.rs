@@ -129,7 +129,7 @@ pub fn collect_module_symbols(line_symbols: &LineSymbols, identifiers: &mut Modu
     }
 }
 
-// Collect function-scoped Local symbols
+// Collect function-scoped defined Local symbols
 pub fn collect_local_symbols(line_symbols: &LineSymbols, locals: &mut HashSet<String>) {
     for symbol in &line_symbols.defines {
         if symbol.space == IndexSpace::Local {
@@ -138,12 +138,14 @@ pub fn collect_local_symbols(line_symbols: &LineSymbols, locals: &mut HashSet<St
     }
 }
 
-// Collect defined labels
-pub fn collect_label_symbols(line_symbols: &LineSymbols, labels: &mut Vec<String>) {
-    for symbol in &line_symbols.defines {
-        if symbol.space == IndexSpace::Label {
-            labels.push(symbol.name.clone());
-        }
+// Return the label defined in the line, if there's any
+pub fn collect_label_symbol(line_symbols: &LineSymbols) -> Option<String> {
+    assert!(line_symbols.defines.len() <= 1);
+
+    if line_symbols.defines.is_empty() {
+        None
+    } else {
+        Some(line_symbols.defines[0].name.clone())
     }
 }
 

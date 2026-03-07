@@ -16,7 +16,7 @@ use wast::{
 
 use crate::line::{Activity, LineInfo};
 use crate::symbolic::{
-    ModuleIdentifiers, collect_label_symbols, collect_local_symbols, collect_module_symbols,
+    ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
     symbols_resolved,
 };
 
@@ -527,10 +527,10 @@ impl SyntaxState {
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     use crate::line::Activity::*;
     use SyntaxState::*;
-    type DefinedLabels = Vec<String>;
+    type DefinedLabel = Option<String>;
 
     let mut state = Initial;
-    let mut frame_stack: Vec<(InstrKind, DefinedLabels)> = Vec::new();
+    let mut frame_stack: Vec<(InstrKind, DefinedLabel)> = Vec::new();
     let mut before_imports = true;
 
     // Structures for symbolic references
@@ -549,16 +549,15 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         lines.set_active_status(line_no, Active);
         lines.set_invalid(line_no, None);
 
-        // Collect local and label symbolic references if there's any
+        // Collect defined local and label symbolic references if there's any
         collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
-        let mut line_labels: DefinedLabels = Vec::new();
-        collect_label_symbols(&lines.info(line_no).symbols, &mut line_labels);
+        let line_label = collect_label_symbol(&lines.info(line_no).symbols);
 
         // Enforce correct symbolic reference consumption
         if lines.info(line_no).is_active() {
             let label_symbol_defs: Vec<String> = frame_stack
                 .iter()
-                .flat_map(|(_, labels)| labels.iter().cloned())
+                .filter_map(|(_, label)| label.clone())
                 .collect();
             if !symbols_resolved(
                 &lines.info(line_no).symbols,
@@ -686,7 +685,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 // For a structured instruction that opens a frame, log this.
                 InstrKind::If | InstrKind::OtherStructured => {
                     lines.set_active_status(line_no, Active);
-                    frame_stack.push((instr_kind, line_labels));
+                    frame_stack.push((instr_kind, line_label));
                 }
 
                 // Fix #5: if an `else` appears outside an `if` frame, disable it
@@ -694,8 +693,8 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     if let Some((InstrKind::If, _)) = frame_stack.last() {
                         lines.set_active_status(line_no, Active);
                         // Carry over labels from If frame
-                        let (_, if_labels) = frame_stack.pop().unwrap();
-                        frame_stack.push((InstrKind::Else, if_labels));
+                        let (_, if_label) = frame_stack.pop().unwrap();
+                        frame_stack.push((InstrKind::Else, if_label));
                     } else {
                         lines.set_active_status(line_no, Inactive("‘else’ outside ‘if’"));
                     }
