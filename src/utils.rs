@@ -1789,8 +1789,8 @@ pub(crate) mod tests {
             Self {
                 instr_text: String::from(s),
                 info: LineInfo {
-                    kind: kind,
-                    symbols: symbols,
+                    kind,
+                    symbols,
                     ..Default::default()
                 },
             }
