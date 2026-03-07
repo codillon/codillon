@@ -455,7 +455,7 @@ impl SyntaxState {
             LineKind::Other(parts) => {
                 let local_count = parts.iter().filter(|&p| *p == ModulePart::Local).count();
                 if local_count > 1 || (local_count == 1 && parts.len() > 1) {
-                    return Err("local must be on its own line");
+                    return Err("locals must be declared on their own line");
                 }
                 for part in parts {
                     self.transit_state_from_module_part(*part)?;
