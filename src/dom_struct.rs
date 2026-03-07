@@ -76,7 +76,6 @@ impl<Child: Structure, Element: AnyElement> DomStruct<Child, Element> {
     pub fn remove_attribute(&mut self, name: &str);
     pub fn get_attribute(&self, name: &str) -> Option<&String>;
     pub fn scroll_into_view(&self);
-    pub fn set_onmousedown<F>(&self, handler: F) where F: 'static + FnMut(web_sys::MouseEvent);
     }
     }
 }

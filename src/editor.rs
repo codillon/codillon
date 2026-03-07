@@ -11,7 +11,7 @@ use crate::{
     graphics::DomImage,
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
-        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
+        NodeRef, RangeLike, ReactiveComponent, StorageHandle, WithElement,
         compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
@@ -139,13 +139,6 @@ impl Editor {
             });
         }
         {
-            let editor_ref = Rc::clone(&ret.0);
-            let factory = ret.0.borrow().factory.clone();
-            crate::autocomplete::register_dismiss_on_document_mouse_down(&factory, move || {
-                Editor(editor_ref.clone()).hide_autocomplete();
-            });
-        }
-        {
             let mut binding = ret.0.borrow_mut();
             let slider = &mut binding.component.get_mut().1.1.0;
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
@@ -206,7 +199,7 @@ impl Editor {
     }
 
     // Replace a given range (currently within a single line) with new text
-    fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
+    fn replace_range(&mut self, target_range: &impl RangeLike, new_str: &str) -> Result<()> {
         if new_str.chars().any(|x| x.is_control() && x != '\n') {
             bail!("unhandled control char in input");
         }
@@ -214,7 +207,7 @@ impl Editor {
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
 
         let (start_line, start_pos, end_line, end_pos) =
-            self.get_lines_and_positions(&target_range)?;
+            self.get_lines_and_positions(target_range)?;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -395,20 +388,18 @@ impl Editor {
         let target_range = ev.get_first_target_range()?;
 
         match &ev.input_type() as &str {
-            "insertText" => {
-                self.replace_range(target_range.clone(), &ev.data().context("no data")?)
-            }
+            "insertText" => self.replace_range(&target_range, &ev.data().context("no data")?),
             "insertFromPaste" => self.replace_range(
-                target_range.clone(),
+                &target_range,
                 &ev.data_transfer()
                     .context("no data_transfer")?
                     .get_data("text/plain")
                     .fmt_err()?,
             ),
             "deleteContentBackward" | "deleteContentForward" | "deleteByCut" => {
-                self.replace_range(target_range.clone(), "")
+                self.replace_range(&target_range, "")
             }
-            "insertParagraph" | "insertLineBreak" => self.replace_range(target_range, "\n"),
+            "insertParagraph" | "insertLineBreak" => self.replace_range(&target_range, "\n"),
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
@@ -426,16 +417,10 @@ impl Editor {
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
     fn handle_keydown(&mut self, ev: web_sys::KeyboardEvent) -> Result<()> {
         if ev.key() == "Enter" {
-            let (prefix, accepted) = {
-                let editor = self.0.borrow();
-                (
-                    editor.current_prefix.clone(),
-                    editor.current_suggestions.first().cloned(),
-                )
-            };
+            let accepted = self.0.borrow().current_suggestions.first().cloned();
             if let Some(accepted) = accepted {
                 ev.prevent_default();
-                self.accept_autocomplete(&prefix, &accepted);
+                self.accept_autocomplete(&accepted);
                 return Ok(());
             }
         }
@@ -508,32 +493,28 @@ impl Editor {
         Ok(())
     }
 
-    fn set_hint_bar(
-        editor: &mut _Editor,
-        suggestions: &[String],
-        on_accept: impl Fn(String) + 'static,
-    ) {
+    fn set_hint_bar(editor: &mut _Editor, suggestions: &[String], editor_handle: &Editor) {
         let factory = editor.factory.clone();
         let bar = &mut editor.component.get_mut().1.1.1.1.0.get_mut().0;
-        crate::autocomplete::update_hint_bar(&factory, bar, suggestions, on_accept);
+        crate::autocomplete::update_hint_bar(&factory, bar, suggestions, editor_handle);
     }
 
-    fn hide_autocomplete(&self) {
+    pub fn hide_autocomplete(&self) {
+        let editor_handle = self.clone();
         let Ok(mut editor) = self.0.try_borrow_mut() else {
             return;
         };
         editor.current_suggestions.clear();
         editor.current_prefix.clear();
-        Self::set_hint_bar(&mut editor, &[], |_| {});
+        Self::set_hint_bar(&mut editor, &[], &editor_handle);
     }
 
-    fn accept_autocomplete(&self, prefix: &str, accepted: &str) {
+    pub(crate) fn accept_autocomplete(&self, accepted: &str) {
+        let prefix = self.0.borrow().current_prefix.clone();
         let suffix = &accepted[prefix.trim_start().len()..];
         let selection = crate::jet::get_selection();
-        if !suffix.is_empty()
-            && let Ok(range) = selection.get_range_at(0)
-        {
-            let _ = self.clone().replace_range(range, suffix);
+        if !suffix.is_empty() && selection.is_collapsed() {
+            let _ = self.clone().replace_range(&selection, suffix);
         }
         self.hide_autocomplete();
     }
@@ -562,15 +543,13 @@ impl Editor {
         })();
 
         if let Some((last_word, suggestions)) = suggestions {
-            let editor_clone = self.clone();
+            let editor_handle = self.clone();
             let Ok(mut editor) = self.0.try_borrow_mut() else {
                 return;
             };
             editor.current_prefix = last_word.clone();
             editor.current_suggestions = suggestions.clone();
-            Self::set_hint_bar(&mut editor, &suggestions, move |accepted| {
-                editor_clone.accept_autocomplete(&last_word, &accepted);
-            });
+            Self::set_hint_bar(&mut editor, &suggestions, &editor_handle);
         } else {
             self.hide_autocomplete();
         }

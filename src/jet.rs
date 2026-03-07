@@ -397,18 +397,6 @@ impl<T: AnyElement> ElementHandle<T> {
             .element()
             .scroll_into_view_with_scroll_into_view_options(&opts);
     }
-
-    pub fn set_onmousedown<F>(&self, handler: F)
-    where
-        F: 'static + FnMut(web_sys::MouseEvent),
-    {
-        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
-        self.elem
-            .element()
-            .add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref())
-            .unwrap();
-        closure.forget();
-    }
 }
 
 impl<T: AnyElement> Component for ElementHandle<T> {
@@ -503,17 +491,6 @@ impl ElementFactory {
             .unwrap()
             .dyn_into::<T>()
             .unwrap_or_else(|_| panic!("expecting {t} element"))
-    }
-
-    pub fn add_document_mousedown_listener<F: FnMut(web_sys::MouseEvent) + 'static>(
-        &self,
-        handler: F,
-    ) {
-        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::MouseEvent)>);
-        self.0
-            .add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref())
-            .unwrap();
-        closure.forget();
     }
 
     pub fn div(&self) -> ElementHandle<web_sys::HtmlDivElement> {
@@ -699,7 +676,6 @@ impl From<web_sys::Node> for NodeRef {
 }
 
 // Wrapper for a StaticRange (giving access to its start and end nodes as NodeRefs)
-#[derive(Clone)]
 pub struct StaticRangeHandle(web_sys::Range);
 
 impl StaticRangeHandle {
@@ -818,8 +794,6 @@ impl SelectionHandle {
         pub fn anchor_offset(&self) -> u32;
         pub fn focus_offset(&self) -> u32;
         pub fn is_collapsed(&self) -> bool;
-        #[expr(Ok(StaticRangeHandle($.fmt_err()?)))]
-        pub fn get_range_at(&self, index: u32) -> Result<StaticRangeHandle>;
         #[expr($.map(From::from))]
         pub fn anchor_node(&self) -> Option<NodeRef>;
         #[expr($.map(From::from))]
