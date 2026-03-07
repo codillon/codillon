@@ -2233,6 +2233,24 @@ pub(crate) mod tests {
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
+        // local declaration mixed with other module parts
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("(param i32) (local i32)"); // not allowed
+            editor.push_line("(local i32 i32 i32)"); // allowed
+            editor.push_line("(local f64)"); // also allowed
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    (local i32 i32 i32 f64)
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
         Ok(())
     }
 
