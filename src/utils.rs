@@ -2352,9 +2352,10 @@ pub(crate) mod tests {
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 13)
+                + r#"  (func (;22;) (type 16)
     (local i32 i32 i32 f64)
   )
+  (func (;23;) (type 17))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
