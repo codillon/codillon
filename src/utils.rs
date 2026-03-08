@@ -1785,7 +1785,7 @@ pub(crate) mod tests {
     impl FakeTextLine {
         fn new(s: &str) -> Self {
             let kind = parse_line(s);
-            let symbols = parse_line_symbols(s, kind.clone());
+            let symbols = parse_line_symbols(s, &kind);
             Self {
                 instr_text: String::from(s),
                 info: LineInfo {

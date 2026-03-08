@@ -529,7 +529,7 @@ impl<'a> From<Memory<'a>> for LineSymbols {
 }
 
 // Assume kind correctly reflects the line's kind
-pub fn parse_line_symbols(s: &str, kind: LineKind) -> LineSymbols {
+pub fn parse_line_symbols(s: &str, kind: &LineKind) -> LineSymbols {
     match kind {
         LineKind::Instr(_) => {
             let Ok(buf) = ParseBuffer::new(s) else {
@@ -608,19 +608,19 @@ mod tests {
     #[test]
     fn test_parse_line_symbols() -> Result<()> {
         let mut line = "";
-        let mut symbols = parse_line_symbols(line, LineKind::Empty);
+        let mut symbols = parse_line_symbols(line, &LineKind::Empty);
         assert!(symbols.defines.is_empty());
         assert!(symbols.consumes.is_empty());
 
         line = "block $label";
-        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::OtherStructured));
+        symbols = parse_line_symbols(line, &LineKind::Instr(InstrKind::OtherStructured));
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "label");
         assert_eq!(symbols.defines[0].space, IndexSpace::Label);
         assert!(symbols.consumes.is_empty());
 
         line = "block $label (type $x) (param i32)";
-        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::OtherStructured));
+        symbols = parse_line_symbols(line, &LineKind::Instr(InstrKind::OtherStructured));
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "label");
         assert_eq!(symbols.defines[0].space, IndexSpace::Label);
@@ -629,19 +629,19 @@ mod tests {
         assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = " br $label";
-        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        symbols = parse_line_symbols(line, &LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "label");
         assert_eq!(symbols.consumes[0].space, IndexSpace::Label);
 
         line = "br 1";
-        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        symbols = parse_line_symbols(line, &LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert!(symbols.consumes.is_empty());
 
         line = "br_table $a $b $default";
-        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        symbols = parse_line_symbols(line, &LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 3);
         assert_eq!(symbols.consumes[0].name, "a");
@@ -652,14 +652,14 @@ mod tests {
         assert_eq!(symbols.consumes[2].space, IndexSpace::Label);
 
         line = "local.set $something";
-        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        symbols = parse_line_symbols(line, &LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "something");
         assert_eq!(symbols.consumes[0].space, IndexSpace::Local);
 
         line = "memory.copy $x $y";
-        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        symbols = parse_line_symbols(line, &LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 2);
         assert_eq!(symbols.consumes[0].name, "x");
@@ -668,26 +668,26 @@ mod tests {
         assert_eq!(symbols.consumes[1].space, IndexSpace::Mem);
 
         line = "memory.copy 10 $y";
-        symbols = parse_line_symbols(line, LineKind::Instr(InstrKind::Other));
+        symbols = parse_line_symbols(line, &LineKind::Instr(InstrKind::Other));
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "y");
         assert_eq!(symbols.consumes[0].space, IndexSpace::Mem);
 
         line = "(global i32 (i32.const 0))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert!(symbols.defines.is_empty());
         assert!(symbols.consumes.is_empty());
 
         line = "(global $x i32 (i32.const 0))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "x");
         assert_eq!(symbols.defines[0].space, IndexSpace::Global);
         assert!(symbols.consumes.is_empty());
 
         line = "(global $x i32 (global.get $y))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "x");
         assert_eq!(symbols.defines[0].space, IndexSpace::Global);
@@ -696,7 +696,7 @@ mod tests {
         assert_eq!(symbols.consumes[0].space, IndexSpace::Global);
 
         line = "(table $t 1 (ref $ft))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "t");
         assert_eq!(symbols.defines[0].space, IndexSpace::Table);
@@ -705,7 +705,7 @@ mod tests {
         assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = "(table funcref (elem $f1 $f2))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 2);
         assert_eq!(symbols.consumes[0].name, "f1");
@@ -714,26 +714,26 @@ mod tests {
         assert_eq!(symbols.consumes[1].space, IndexSpace::Func);
 
         line = "(memory $mem 1 2)";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "mem");
         assert_eq!(symbols.defines[0].space, IndexSpace::Mem);
         assert!(symbols.consumes.is_empty());
 
         line = "(memory $mem 1 2) (func)";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert!(symbols.defines.is_empty());
         assert!(symbols.consumes.is_empty());
 
         line = "(export \"foo\" (func $myfunc))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert!(symbols.defines.is_empty());
         assert_eq!(symbols.consumes.len(), 1);
         assert_eq!(symbols.consumes[0].name, "myfunc");
         assert_eq!(symbols.consumes[0].space, IndexSpace::Func);
 
         line = "(import \"env\" \"fn\"  (func $f (param $p i32)))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 2);
         assert_eq!(symbols.defines[0].name, "f");
         assert_eq!(symbols.defines[0].space, IndexSpace::Func);
@@ -742,7 +742,7 @@ mod tests {
         assert!(symbols.consumes.is_empty());
 
         line = "(import \"env\" \"fn\"  (func $f (type $t)))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 1);
         assert_eq!(symbols.defines[0].name, "f");
         assert_eq!(symbols.defines[0].space, IndexSpace::Func);
@@ -751,7 +751,7 @@ mod tests {
         assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = "(func $f (param $p i32) (result (ref $ft)) (local $l i64))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 3);
         assert_eq!(symbols.defines[0].name, "f");
         assert_eq!(symbols.defines[0].space, IndexSpace::Func);
@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = " func  (local $l1 i64) (local $l2 (ref $ft))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 2);
         assert_eq!(symbols.defines[0].name, "l1");
         assert_eq!(symbols.defines[0].space, IndexSpace::Local);
@@ -775,7 +775,7 @@ mod tests {
         assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
 
         line = "  (export \"\") (param $x i32) (param $y i64))";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 2);
         assert_eq!(symbols.defines[0].name, "x");
         assert_eq!(symbols.defines[0].space, IndexSpace::Local);
@@ -784,7 +784,7 @@ mod tests {
         assert!(symbols.consumes.is_empty());
 
         line = "(import \"\" \"\") (local $l f32)";
-        symbols = parse_line_symbols(line, parse::<LineKind>(&ParseBuffer::new(line)?)?);
+        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert!(symbols.defines.is_empty());
         assert!(symbols.consumes.is_empty());
 
