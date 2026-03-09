@@ -149,8 +149,6 @@ impl Editor {
             ret.set_default_contents();
         }
 
-        ret.on_change().expect("well-formed initial contents");
-
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
 
@@ -604,7 +602,7 @@ impl Editor {
         // instrumentation
         self.initialize_globals(&validized);
         self.initialize_locals(&validized);
-        self.execute(&validized.build_executable_binary(&types)?);
+        self.execute(&validized.build_executable_binary(&types, &self.0.borrow().function_ranges)?);
 
         // save to local storage
         {
@@ -642,7 +640,6 @@ impl Editor {
                 Err(_) => Ok(String::new()),
             }
         }
-
         let binary = binary.to_vec();
         let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
@@ -681,6 +678,58 @@ impl Editor {
                 step
             };
             editor_handle.build_program_state(0, step);
+        });
+    }
+
+    fn update_debug_panel(&self, error: Option<String>) {
+        let inner = self.0.borrow_mut();
+        let step = inner.program_state.step_number;
+        let line_num = inner.program_state.line_number;
+        let saved_states = inner.saved_states.clone();
+        let mut textentry: RefMut<ReactiveComponent<TextType>> =
+            RefMut::map(inner, |comp| &mut comp.component.get_mut().1.0);
+        let lines: &mut TextType = textentry.inner_mut();
+        if let Some(message) = error {
+            lines[0].set_debug_annotation(Some(&message));
+            for i in 1..lines.len() {
+                lines[i].set_debug_annotation(None);
+                lines[i].set_highlight(false);
+            }
+            return;
+        }
+        for i in 0..lines.len() {
+            lines[i].set_highlight(false);
+            if let Some(cur_state) = saved_states.get(i)
+                && let Some(program_state) = &cur_state
+                && program_state.step_number <= step
+            {
+                lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
+            } else {
+                lines[i].set_debug_annotation(None);
+            }
+        }
+
+        lines[line_num].set_highlight(true);
+    }
+
+    fn setup_canvas(&self, canvas: &mut ElementHandle<HtmlCanvasElement>) {
+        canvas.set_attribute("class", "graph-canvas");
+        canvas.set_size_pixels(500, 500);
+        canvas.clear_canvas();
+    }
+
+    fn draw_point(&self, x: f64, y: f64, canvas: &ElementHandle<HtmlCanvasElement>) {
+        canvas.with_2d_context_and_size(|context, width, height| {
+            let w = width as f64 / 2.0;
+            let h = height as f64 / 2.0;
+
+            // map to pixel space. y is inverted because (0, 0) is top left corner of HTML canvas
+            let px = w + x * w;
+            let py = h - y * h;
+
+            context.begin_path();
+            let _ = context.arc(px, py, 3.0, 0.0, std::f64::consts::PI * 2.0);
+            context.fill();
         });
     }
 

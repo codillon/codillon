@@ -915,7 +915,11 @@ impl<'a> ValidModule<'a> {
         memory
     }
 
-    pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
+    pub fn build_executable_binary(
+        &self,
+        types: &TypesTable,
+        function_ranges: &[(usize, usize)],
+    ) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
         // Maps ouputs (list of ValTypes) to dynamic_func_idx
         let mut types_map: IndexMap<Vec<ValType>, usize> =
@@ -967,8 +971,8 @@ impl<'a> ValidModule<'a> {
         module.section(&exports);
         // Encode the code section.
         let mut codes = CodeSection::new();
-        for func_idx in 0..self.functions.len() {
-            self.build_function(func_idx, &mut codes, types, &types_map)?;
+        for (func_idx, start_line) in function_ranges.iter().enumerate() {
+            self.build_function(func_idx, &mut codes, types, &types_map, start_line.0)?;
         }
         for outputs in types_map.keys() {
             self.dynamically_generate_function(outputs, &mut codes)?;
@@ -985,6 +989,7 @@ impl<'a> ValidModule<'a> {
         codes: &mut CodeSection,
         types: &TypesTable,
         types_map: &IndexMap<Vec<ValType>, usize>,
+        start_line: usize,
     ) -> Result<(), anyhow::Error> {
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
         let function = self.functions.get(func_idx).expect("valid func idx");
@@ -1005,7 +1010,10 @@ impl<'a> ValidModule<'a> {
             }
             f.instruction(&Call(types_map[outputs] as u32));
         };
-        self.record_params(func_idx, &mut f);
+        let params = self.get_func_type(func_idx).params();
+        if !params.is_empty() {
+            self.record_params(params, &mut f, start_line);
+        }
         let mut unreachable = false;
         for (i, codillon_instruction) in function.operators.iter().enumerate() {
             // Skip unreachable operators until end of frame.
@@ -1063,15 +1071,7 @@ impl<'a> ValidModule<'a> {
                 unreachable = true;
                 continue;
             }
-
-            // Step after each instruction evaluation
-            f.instruction(&I32Const(line_idx));
-            f.instruction(&Call(InstrImports::Step as u32));
-            f.instruction(&I32Eqz);
-            f.instruction(&If(wasm_encoder::BlockType::Empty));
-            // Trap when run out of steps
-            f.instruction(&Unreachable);
-            f.instruction(&End);
+            Self::step_debug(&mut f, line_idx)
         }
         codes.function(&f);
         Ok(())
@@ -1113,8 +1113,8 @@ impl<'a> ValidModule<'a> {
         Ok(())
     }
 
-    fn record_params(&self, func_idx: usize, f: &mut wasm_encoder::Function) {
-        for (param_idx, param) in self.get_func_type(func_idx).params().iter().enumerate() {
+    fn record_params(&self, params: &[ValType], f: &mut wasm_encoder::Function, start_line: usize) {
+        for (param_idx, param) in params.iter().enumerate() {
             f.instruction(&I32Const(param_idx as i32));
             f.instruction(&LocalGet(param_idx as u32));
             match param {
@@ -1133,6 +1133,7 @@ impl<'a> ValidModule<'a> {
                 _ => {}
             }
         }
+        Self::step_debug(f, start_line as i32);
     }
 
     fn instrument_memory_ops(
@@ -1211,6 +1212,17 @@ impl<'a> ValidModule<'a> {
 
     pub fn get_func_type(&self, func_idx: usize) -> &wasmparser::FuncType {
         &self.types[self.functions[func_idx].type_idx]
+    }
+
+    fn step_debug(f: &mut wasm_encoder::Function, line_number: i32) {
+        // Step after each instruction evaluation
+        f.instruction(&I32Const(line_number));
+        f.instruction(&Call(InstrImports::Step as u32));
+        f.instruction(&I32Eqz);
+        f.instruction(&If(wasm_encoder::BlockType::Empty));
+        // Trap when run out of steps
+        f.instruction(&Unreachable);
+        f.instruction(&End);
     }
 }
 
@@ -1819,7 +1831,9 @@ pub(crate) mod tests {
             functions: vec![],
             num_func_imports: 0,
         };
-        let wasm_bin = valid_module.build_executable_binary(&TypesTable { functions: vec![] })?;
+        let function_ranges: Vec<(usize, usize)> = Vec::new();
+        let wasm_bin = valid_module
+            .build_executable_binary(&TypesTable { functions: vec![] }, &function_ranges)?;
         let mem_payload = wasmparser::Parser::new(0)
             .parse_all(&wasm_bin)
             .nth(4)
@@ -1934,7 +1948,7 @@ pub(crate) mod tests {
             .to_types_table(&wasm_bin)
             .context("to_types_table")?;
         let runnable = validized
-            .build_executable_binary(&types)
+            .build_executable_binary(&types, &function_ranges)
             .context("build_executable_binary")?;
         wasmparser::validate(&runnable).context("validate")?;
 
