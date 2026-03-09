@@ -139,7 +139,6 @@ pub fn make_imports() -> Result<Object, JsValue> {
     create_closure_local_operations(&debug_numbers);
     create_closure_global_operations(&debug_numbers);
     create_closure_memory_operations(&debug_numbers);
-    create_closure_push_operations(&debug_numbers);
     create_closure_record_operations(&debug_numbers);
 
     let pop_i = Closure::wrap(Box::new(move |pop_num: i32| {
@@ -198,37 +197,6 @@ fn create_closure_record_operations(debug_numbers: &Object) {
         record(WebAssemblyTypes::F64(value));
     }) as Box<dyn Fn(f64)>);
     register_closure(debug_numbers, "record_f64", record_f64);
-}
-
-fn create_closure_push_operations(debug_numbers: &Object) {
-    let record_push = |value: WebAssemblyTypes| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().stack_pushes.push(value);
-        });
-    };
-    let push_i32 = Closure::wrap(Box::new(move |value: i32| {
-        record_push(WebAssemblyTypes::I32(value));
-        value
-    }) as Box<dyn Fn(i32) -> i32>);
-    register_closure(debug_numbers, "push_i32", push_i32);
-
-    let push_f32 = Closure::wrap(Box::new(move |value: f32| {
-        record_push(WebAssemblyTypes::F32(value));
-        value
-    }) as Box<dyn Fn(f32) -> f32>);
-    register_closure(debug_numbers, "push_f32", push_f32);
-
-    let push_i64 = Closure::wrap(Box::new(move |value: i64| {
-        record_push(WebAssemblyTypes::I64(value));
-        value
-    }) as Box<dyn Fn(i64) -> i64>);
-    register_closure(debug_numbers, "push_i64", push_i64);
-
-    let push_f64 = Closure::wrap(Box::new(move |value: f64| {
-        record_push(WebAssemblyTypes::F64(value));
-        value
-    }) as Box<dyn Fn(f64) -> f64>);
-    register_closure(debug_numbers, "push_f64", push_f64);
 }
 
 fn create_closure_global_operations(debug_numbers: &Object) {

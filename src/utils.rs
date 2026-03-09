@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use indexmap::IndexMap;
 use wasm_encoder::{
     CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
     TypeSection, ValType as EncoderValType,
@@ -30,10 +31,6 @@ enum InstrumentationFuncs {
     SetMemoryF32,
     SetMemoryI64,
     SetMemoryF64,
-    PushI32,
-    PushF32,
-    PushI64,
-    PushF64,
     CallFunc(u32),
     Other,
 }
@@ -53,10 +50,6 @@ enum InstrImports {
     SetMemoryF32,
     SetMemoryI64,
     SetMemoryF64,
-    PushI32,
-    PushF32,
-    PushI64,
-    PushF64,
     RecordI32,
     RecordF32,
     RecordI64,
@@ -66,71 +59,61 @@ impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
         ("step", 1),
         ("pop_i", 0),
-        ("set_local_i32", 5),
-        ("set_local_f32", 10),
-        ("set_local_i64", 11),
-        ("set_local_f64", 12),
-        ("set_global_i32", 5),
-        ("set_global_f32", 10),
-        ("set_global_i64", 11),
-        ("set_global_f64", 12),
-        ("set_memory_i32", 6),
-        ("set_memory_f32", 7),
-        ("set_memory_i64", 8),
-        ("set_memory_f64", 9),
-        ("push_i32", 1),
-        ("push_f32", 2),
-        ("push_i64", 3),
-        ("push_f64", 4),
+        ("set_local_i32", 2),
+        ("set_local_f32", 7),
+        ("set_local_i64", 8),
+        ("set_local_f64", 9),
+        ("set_global_i32", 2),
+        ("set_global_f32", 7),
+        ("set_global_i64", 8),
+        ("set_global_f64", 9),
+        ("set_memory_i32", 3),
+        ("set_memory_f32", 4),
+        ("set_memory_i64", 5),
+        ("set_memory_f64", 6),
         ("record_i32", 0),
-        ("record_f32", 13),
-        ("record_i64", 14),
-        ("record_f64", 15),
+        ("record_f32", 10),
+        ("record_i64", 11),
+        ("record_f64", 12),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: (i32) -> ()
         (&[EncoderValType::I32], &[]),
         // 1: (i32) -> (i32)
         (&[EncoderValType::I32], &[EncoderValType::I32]),
-        // 2: (f32) -> (f32)
-        (&[EncoderValType::F32], &[EncoderValType::F32]),
-        // 3: (i64) -> (i64)
-        (&[EncoderValType::I64], &[EncoderValType::I64]),
-        // 4: (f64) -> (f64)
-        (&[EncoderValType::F64], &[EncoderValType::F64]),
-        // 5: (i32, i32) -> ()
+        // 2: (i32, i32) -> ()
         (&[EncoderValType::I32, EncoderValType::I32], &[]),
-        // 6: (i32, i32) -> (i32, i32)
+        // 3: (i32, i32) -> (i32, i32)
         (
             &[EncoderValType::I32, EncoderValType::I32],
             &[EncoderValType::I32, EncoderValType::I32],
         ),
-        // 7: (i32, f32) -> (i32, f32)
+        // 4: (i32, f32) -> (i32, f32)
         (
             &[EncoderValType::I32, EncoderValType::F32],
             &[EncoderValType::I32, EncoderValType::F32],
         ),
-        // 8: (i32, i64) -> (i32, i64)
+        // 5: (i32, i64) -> (i32, i64)
         (
             &[EncoderValType::I32, EncoderValType::I64],
             &[EncoderValType::I32, EncoderValType::I64],
         ),
-        // 9: (i32, f64) -> (i32, f64)
+        // 6: (i32, f64) -> (i32, f64)
         (
             &[EncoderValType::I32, EncoderValType::F64],
             &[EncoderValType::I32, EncoderValType::F64],
         ),
-        // 10: (i32, f32) -> ()
+        // 7: (i32, f32) -> ()
         (&[EncoderValType::I32, EncoderValType::F32], &[]),
-        // 11: (i32, i64) -> ()
+        // 8: (i32, i64) -> ()
         (&[EncoderValType::I32, EncoderValType::I64], &[]),
-        // 12: (i32, f64) -> ()
+        // 9: (i32, f64) -> ()
         (&[EncoderValType::I32, EncoderValType::F64], &[]),
-        // 13: (f32) -> ()
+        // 10: (f32) -> ()
         (&[EncoderValType::F32], &[]),
-        // 14: (i64) -> ()
+        // 11: (i64) -> ()
         (&[EncoderValType::I64], &[]),
-        // 15: (f64) -> ()
+        // 12: (f64) -> ()
         (&[EncoderValType::F64], &[]),
     ];
 }
@@ -762,7 +745,6 @@ impl<'a> ValidModule<'a> {
         valid_func: &ValidFunction<'_>,
     ) -> Result<TypedFunction> {
         let mut stack = SimulatedStack::default();
-
         let mut types = Vec::with_capacity(valid_func.operators.len());
 
         for (count, ty) in &valid_func.locals {
@@ -835,27 +817,20 @@ impl<'a> ValidModule<'a> {
             F32Store { .. } => SetMemoryF32,
             I64Store { .. } | I64Store8 { .. } | I64Store16 { .. } => SetMemoryI64,
             F64Store { .. } => SetMemoryF64,
-            // Match based on outputs
-            _ => match op_type.outputs.as_slice() {
-                [wasmparser::ValType::I32] => PushI32,
-                [wasmparser::ValType::I64] => PushI64,
-                [wasmparser::ValType::F32] => PushF32,
-                [wasmparser::ValType::F64] => PushF64,
-                _ => Other,
-            },
+            _ => Other,
         }
     }
-
-    fn instr_func_types(&self) -> TypeSection {
-        // Encode the type section.
-        let mut types = TypeSection::new();
+    fn build_type_section(&self) -> TypeSection {
+        let mut type_section = TypeSection::new();
+        // Instrumentation function types
         for (params_slice, results_slice) in InstrImports::FUNC_SIGS.iter() {
-            types
+            type_section
                 .ty()
                 .function(params_slice.to_vec(), results_slice.to_vec());
         }
+        // User-defined types
         for ty in &self.types {
-            types.ty().function(
+            type_section.ty().function(
                 ty.params()
                     .iter()
                     .map(parser_to_encoder)
@@ -868,22 +843,7 @@ impl<'a> ValidModule<'a> {
                     .clone(),
             );
         }
-        // Dynamically generated functions to record returns
-        for ty in &self.types {
-            types.ty().function(
-                ty.results()
-                    .iter()
-                    .map(parser_to_encoder)
-                    .collect::<Vec<_>>()
-                    .clone(),
-                ty.results()
-                    .iter()
-                    .map(parser_to_encoder)
-                    .collect::<Vec<_>>()
-                    .clone(),
-            );
-        }
-        types
+        type_section
     }
 
     fn build_globals(&self) -> wasm_encoder::GlobalSection {
@@ -937,22 +897,36 @@ impl<'a> ValidModule<'a> {
 
     pub fn build_executable_binary(&self, types: &TypesTable) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
-        module.section(&self.instr_func_types());
-        module.section(&self.imports);
-
-        // Encode the function section.
-        let mut functions = FunctionSection::new();
-        let func_type_offset = InstrImports::FUNC_SIGS.len();
+        // Maps ouputs (list of ValTypes) to (dynamic_type_idx, dynamic_func_idx)
+        let mut types_map: IndexMap<Vec<ValType>, usize> =
+            IndexMap::with_capacity(self.functions.len());
+        let mut type_section = self.build_type_section();
+        let mut dynamic_type_idx = (InstrImports::FUNC_SIGS.len() + self.types.len()) as u32;
+        let mut function_section = FunctionSection::new();
         for func in &self.functions {
-            functions.function((func.type_idx + func_type_offset) as u32);
+            function_section.function((func.type_idx + InstrImports::FUNC_SIGS.len()) as u32);
         }
-        // Dynamically generated function type indexes
-        for func in &self.functions {
-            functions.function((self.types.len() + func.type_idx + func_type_offset) as u32);
+        let mut dynamic_func_idx = InstrImports::TYPE_INDICES.len()
+            + self.num_func_imports as usize
+            + self.functions.len();
+        for func in &types.functions {
+            for CodillonType { outputs, .. } in &func.types {
+                if !outputs.is_empty() && !types_map.contains_key(outputs) {
+                    type_section.ty().function(
+                        outputs
+                            .iter()
+                            .map(parser_to_encoder)
+                            .collect::<Vec<_>>()
+                            .clone(),
+                        outputs.iter().map(parser_to_encoder).collect::<Vec<_>>(),
+                    );
+                    function_section.function(dynamic_type_idx);
+                    types_map.insert(outputs.clone(), dynamic_func_idx);
+                    dynamic_type_idx += 1;
+                    dynamic_func_idx += 1;
+                }
+            }
         }
-        module.section(&functions);
-        module.section(&self.build_memory());
-        module.section(&self.build_globals());
 
         // Encode the export section.
         let mut exports = ExportSection::new();
@@ -964,15 +938,19 @@ impl<'a> ValidModule<'a> {
                 num_instr_imports + self.num_func_imports,
             );
         }
+        module.section(&type_section);
+        module.section(&self.imports);
+        module.section(&function_section);
+        module.section(&self.build_memory());
+        module.section(&self.build_globals());
         module.section(&exports);
-
         // Encode the code section.
         let mut codes = CodeSection::new();
         for func_idx in 0..self.functions.len() {
-            self.build_function(func_idx, &mut codes, types)?;
+            self.build_function(func_idx, &mut codes, types, &types_map)?;
         }
-        for func_idx in 0..self.functions.len() {
-            self.dynamically_generate_function(func_idx, &mut codes)?;
+        for outputs in types_map.keys() {
+            self.dynamically_generate_function(outputs, &mut codes)?;
         }
         module.section(&codes);
 
@@ -985,6 +963,7 @@ impl<'a> ValidModule<'a> {
         func_idx: usize,
         codes: &mut CodeSection,
         types: &TypesTable,
+        types_map: &IndexMap<Vec<ValType>, usize>,
     ) -> Result<(), anyhow::Error> {
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
         let function = self.functions.get(func_idx).expect("valid func idx");
@@ -1029,13 +1008,8 @@ impl<'a> ValidModule<'a> {
                 || codillon_instruction.op.op == Operator::Return
             {
                 // Call dynamically generated type to record return values
-                if !self.get_func_type(func_idx).results().is_empty() {
-                    // Ordering is instr imports, user imports, user funcs, and corresponding dynamically generated functions for user funcs
-                    f.instruction(&Call(
-                        num_instr_imports
-                            + self.num_func_imports
-                            + (self.functions.len() + func_idx) as u32,
-                    ));
+                if !value_type.outputs.is_empty() {
+                    f.instruction(&Call(types_map[&value_type.outputs] as u32));
                 }
                 f.instruction(&instruction);
                 continue;
@@ -1052,7 +1026,11 @@ impl<'a> ValidModule<'a> {
                 // Instrumentation that needs to occur after execution
                 Self::instrument_local_ops(&mut f, &operation_type);
                 Self::instrument_global_ops(&mut f, &operation_type);
-                Self::instrument_push_ops(&mut f, &operation_type);
+                if let Other = operation_type
+                    && !value_type.outputs.is_empty()
+                {
+                    f.instruction(&Call(types_map[&value_type.outputs] as u32));
+                }
             }
 
             if is_unreachable_op(&codillon_instruction.op.op) {
@@ -1076,11 +1054,11 @@ impl<'a> ValidModule<'a> {
 
     fn dynamically_generate_function(
         &self,
-        func_idx: usize,
+        outputs: &[ValType],
         codes: &mut CodeSection,
     ) -> Result<(), anyhow::Error> {
         let mut f = wasm_encoder::Function::new(vec![]);
-        for (result_idx, result) in self.get_func_type(func_idx).results().iter().enumerate() {
+        for (result_idx, result) in outputs.iter().enumerate() {
             f.instruction(&LocalGet(result_idx as u32));
             match result {
                 ValType::I32 => {
@@ -1098,7 +1076,7 @@ impl<'a> ValidModule<'a> {
                 _ => {}
             }
         }
-        for result_idx in 0..self.get_func_type(func_idx).results().len() {
+        for result_idx in 0..outputs.len() {
             f.instruction(&LocalGet(result_idx as u32));
         }
         f.instruction(&End);
@@ -1197,23 +1175,6 @@ impl<'a> ValidModule<'a> {
                 f.instruction(&I32Const(global_index as i32));
                 f.instruction(&GlobalGet(global_index));
                 f.instruction(&Call(InstrImports::SetGlobalF64 as u32));
-            }
-            _ => {}
-        }
-    }
-    fn instrument_push_ops(f: &mut wasm_encoder::Function, operation_type: &InstrumentationFuncs) {
-        match operation_type {
-            PushI32 => {
-                f.instruction(&Call(InstrImports::PushI32 as u32));
-            }
-            PushF32 => {
-                f.instruction(&Call(InstrImports::PushF32 as u32));
-            }
-            PushI64 => {
-                f.instruction(&Call(InstrImports::PushI64 as u32));
-            }
-            PushF64 => {
-                f.instruction(&Call(InstrImports::PushF64 as u32));
             }
             _ => {}
         }
@@ -1953,45 +1914,37 @@ pub(crate) mod tests {
 
     const EXPECTED_FIELDS: &str = r#"  (type (;0;) (func (param i32)))
   (type (;1;) (func (param i32) (result i32)))
-  (type (;2;) (func (param f32) (result f32)))
-  (type (;3;) (func (param i64) (result i64)))
-  (type (;4;) (func (param f64) (result f64)))
-  (type (;5;) (func (param i32 i32)))
-  (type (;6;) (func (param i32 i32) (result i32 i32)))
-  (type (;7;) (func (param i32 f32) (result i32 f32)))
-  (type (;8;) (func (param i32 i64) (result i32 i64)))
-  (type (;9;) (func (param i32 f64) (result i32 f64)))
-  (type (;10;) (func (param i32 f32)))
-  (type (;11;) (func (param i32 i64)))
-  (type (;12;) (func (param i32 f64)))
-  (type (;13;) (func (param f32)))
-  (type (;14;) (func (param i64)))
-  (type (;15;) (func (param f64)))
-  (type (;16;) (func))
-  (type (;17;) (func))
+  (type (;2;) (func (param i32 i32)))
+  (type (;3;) (func (param i32 i32) (result i32 i32)))
+  (type (;4;) (func (param i32 f32) (result i32 f32)))
+  (type (;5;) (func (param i32 i64) (result i32 i64)))
+  (type (;6;) (func (param i32 f64) (result i32 f64)))
+  (type (;7;) (func (param i32 f32)))
+  (type (;8;) (func (param i32 i64)))
+  (type (;9;) (func (param i32 f64)))
+  (type (;10;) (func (param f32)))
+  (type (;11;) (func (param i64)))
+  (type (;12;) (func (param f64)))
+  (type (;13;) (func))
   (import "codillon_debug" "step" (func (;0;) (type 1)))
   (import "codillon_debug" "pop_i" (func (;1;) (type 0)))
-  (import "codillon_debug" "set_local_i32" (func (;2;) (type 5)))
-  (import "codillon_debug" "set_local_f32" (func (;3;) (type 10)))
-  (import "codillon_debug" "set_local_i64" (func (;4;) (type 11)))
-  (import "codillon_debug" "set_local_f64" (func (;5;) (type 12)))
-  (import "codillon_debug" "set_global_i32" (func (;6;) (type 5)))
-  (import "codillon_debug" "set_global_f32" (func (;7;) (type 10)))
-  (import "codillon_debug" "set_global_i64" (func (;8;) (type 11)))
-  (import "codillon_debug" "set_global_f64" (func (;9;) (type 12)))
-  (import "codillon_debug" "set_memory_i32" (func (;10;) (type 6)))
-  (import "codillon_debug" "set_memory_f32" (func (;11;) (type 7)))
-  (import "codillon_debug" "set_memory_i64" (func (;12;) (type 8)))
-  (import "codillon_debug" "set_memory_f64" (func (;13;) (type 9)))
-  (import "codillon_debug" "push_i32" (func (;14;) (type 1)))
-  (import "codillon_debug" "push_f32" (func (;15;) (type 2)))
-  (import "codillon_debug" "push_i64" (func (;16;) (type 3)))
-  (import "codillon_debug" "push_f64" (func (;17;) (type 4)))
-  (import "codillon_debug" "record_i32" (func (;18;) (type 0)))
-  (import "codillon_debug" "record_f32" (func (;19;) (type 13)))
-  (import "codillon_debug" "record_i64" (func (;20;) (type 14)))
-  (import "codillon_debug" "record_f64" (func (;21;) (type 15)))
-  (export "main" (func 22))
+  (import "codillon_debug" "set_local_i32" (func (;2;) (type 2)))
+  (import "codillon_debug" "set_local_f32" (func (;3;) (type 7)))
+  (import "codillon_debug" "set_local_i64" (func (;4;) (type 8)))
+  (import "codillon_debug" "set_local_f64" (func (;5;) (type 9)))
+  (import "codillon_debug" "set_global_i32" (func (;6;) (type 2)))
+  (import "codillon_debug" "set_global_f32" (func (;7;) (type 7)))
+  (import "codillon_debug" "set_global_i64" (func (;8;) (type 8)))
+  (import "codillon_debug" "set_global_f64" (func (;9;) (type 9)))
+  (import "codillon_debug" "set_memory_i32" (func (;10;) (type 3)))
+  (import "codillon_debug" "set_memory_f32" (func (;11;) (type 4)))
+  (import "codillon_debug" "set_memory_i64" (func (;12;) (type 5)))
+  (import "codillon_debug" "set_memory_f64" (func (;13;) (type 6)))
+  (import "codillon_debug" "record_i32" (func (;14;) (type 0)))
+  (import "codillon_debug" "record_f32" (func (;15;) (type 10)))
+  (import "codillon_debug" "record_i64" (func (;16;) (type 11)))
+  (import "codillon_debug" "record_f64" (func (;17;) (type 12)))
+  (export "main" (func 18))
 "#;
 
     use pretty_assertions::assert_eq;
@@ -2004,8 +1957,7 @@ pub(crate) mod tests {
             editor.push_line("(func)");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16))
-  (func (;23;) (type 17))
+                + r#"  (func (;18;) (type 13))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -2017,8 +1969,7 @@ pub(crate) mod tests {
             editor.push_line("(func");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16))
-  (func (;23;) (type 17))
+                + r#"  (func (;18;) (type 13))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -2030,8 +1981,7 @@ pub(crate) mod tests {
             editor.push_line("(");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16))
-  (func (;23;) (type 17))
+                + r#"  (func (;18;) (type 13))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -2044,9 +1994,9 @@ pub(crate) mod tests {
             editor.push_line("drop");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16)
+                + r#"  (func (;18;) (type 13)
     i64.const 17
-    call 16
+    call 19
     i32.const 0
     call 0
     i32.eqz
@@ -2063,9 +2013,17 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (;23;) (type 17))
+  (func (;19;) (type 14) (param i64) (result i64)
+    local.get 0
+    call 16
+    local.get 0
+  )
 )
 "#;
+            let expected = expected.replace(
+                "  (type (;13;) (func))\n",
+                "  (type (;13;) (func))\n  (type (;14;) (func (param i64) (result i64)))\n",
+            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2079,7 +2037,6 @@ pub(crate) mod tests {
       end
     end
   )
-  (func (;23;) (type 17))
 )
 "#;
         {
@@ -2090,7 +2047,7 @@ pub(crate) mod tests {
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + "  (func (;22;) (type 16)\n"
+                + "  (func (;18;) (type 13)\n"
                 + JUST_BLOCK_END;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
@@ -2103,7 +2060,7 @@ pub(crate) mod tests {
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + "  (func (;22;) (type 16)\n"
+                + "  (func (;18;) (type 13)\n"
                 + JUST_BLOCK_END;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
@@ -2118,9 +2075,9 @@ pub(crate) mod tests {
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16)
+                + r#"  (func (;18;) (type 13)
     i32.const 137
-    call 14
+    call 19
     i32.const 1
     call 0
     i32.eqz
@@ -2129,9 +2086,17 @@ pub(crate) mod tests {
     end
     unreachable
   )
-  (func (;23;) (type 17))
+  (func (;19;) (type 14) (param i32) (result i32)
+    local.get 0
+    call 14
+    local.get 0
+  )
 )
 "#;
+            let expected = expected.replace(
+                "  (type (;13;) (func))\n",
+                "  (type (;13;) (func))\n  (type (;14;) (func (param i32) (result i32)))\n",
+            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2147,13 +2112,12 @@ pub(crate) mod tests {
             editor.push_line("(func)");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (import "hello" "goodbye" (func (;22;) (type 16)))
-  (export "main" (func 23))
-  (func (;23;) (type 16))
-  (func (;24;) (type 17))
+                + r#"  (import "hello" "goodbye" (func (;18;) (type 13)))
+  (export "main" (func 19))
+  (func (;19;) (type 13))
 )
 "#;
-            let expected = expected.replace("  (export \"main\" (func 22))\n", "");
+            let expected = expected.replace("  (export \"main\" (func 18))\n", "");
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2217,7 +2181,7 @@ pub(crate) mod tests {
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16)
+                + r#"  (func (;18;) (type 13)
     nop
     i32.const 1
     call 0
@@ -2226,7 +2190,6 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (;23;) (type 17))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -2242,7 +2205,7 @@ pub(crate) mod tests {
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16)
+                + r#"  (func (;18;) (type 13)
     nop
     i32.const 2
     call 0
@@ -2252,12 +2215,11 @@ pub(crate) mod tests {
     end
     unreachable
   )
-  (func (;23;) (type 17))
 )
 "#;
             let expected = expected.replace(
-                "  (export \"main\" (func 22))",
-                "  (memory (;0;) 0)\n  (export \"main\" (func 22))",
+                "  (export \"main\" (func 18))",
+                "  (memory (;0;) 0)\n  (export \"main\" (func 18))",
             );
 
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -2272,7 +2234,7 @@ pub(crate) mod tests {
             editor.push_line("end");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16)
+                + r#"  (func (;18;) (type 13)
     loop ;; label = @1
       i32.const 0
       call 0
@@ -2281,7 +2243,7 @@ pub(crate) mod tests {
         unreachable
       end
       i32.const 5
-      call 14
+      call 19
       i32.const 1
       call 0
       i32.eqz
@@ -2293,10 +2255,17 @@ pub(crate) mod tests {
       br 0 (;@1;)
     end
   )
-  (func (;23;) (type 17))
+  (func (;19;) (type 14) (param i32) (result i32)
+    local.get 0
+    call 14
+    local.get 0
+  )
 )
 "#;
-
+            let expected = expected.replace(
+                "  (type (;13;) (func))\n",
+                "  (type (;13;) (func))\n  (type (;14;) (func (param i32) (result i32)))\n",
+            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2308,9 +2277,9 @@ pub(crate) mod tests {
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16)
+                + r#"  (func (;18;) (type 13)
     i32.const 4
-    call 14
+    call 19
     i32.const 1
     call 0
     i32.eqz
@@ -2319,9 +2288,17 @@ pub(crate) mod tests {
     end
     unreachable
   )
-  (func (;23;) (type 17))
+  (func (;19;) (type 14) (param i32) (result i32)
+    local.get 0
+    call 14
+    local.get 0
+  )
 )
 "#;
+            let expected = expected.replace(
+                "  (type (;13;) (func))\n",
+                "  (type (;13;) (func))\n  (type (;14;) (func (param i32) (result i32)))\n",
+            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2337,8 +2314,8 @@ pub(crate) mod tests {
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16)
-    call 23
+                + r#"  (func (;18;) (type 13)
+    call 19
     i32.const 1
     call 0
     i32.eqz
@@ -2348,7 +2325,7 @@ pub(crate) mod tests {
     i32.const 2
     call 1
     i32.add
-    call 14
+    call 21
     i32.const 2
     call 0
     i32.eqz
@@ -2357,9 +2334,9 @@ pub(crate) mod tests {
     end
     unreachable
   )
-  (func (;23;) (type 17) (result i32 i32)
+  (func (;19;) (type 14) (result i32 i32)
     i32.const 9
-    call 14
+    call 21
     i32.const 5
     call 0
     i32.eqz
@@ -2367,7 +2344,7 @@ pub(crate) mod tests {
       unreachable
     end
     i32.const 10
-    call 14
+    call 21
     i32.const 6
     call 0
     i32.eqz
@@ -2376,25 +2353,27 @@ pub(crate) mod tests {
     end
     i32.const 2
     call 1
-    call 25
+    call 20
   )
-  (func (;24;) (type 18))
-  (func (;25;) (type 19) (param i32 i32) (result i32 i32)
+  (func (;20;) (type 15) (param i32 i32) (result i32 i32)
     local.get 0
-    call 18
+    call 14
     local.get 1
-    call 18
+    call 14
     local.get 0
     local.get 1
+  )
+  (func (;21;) (type 16) (param i32) (result i32)
+    local.get 0
+    call 14
+    local.get 0
   )
 )
 "#;
-
             let expected = expected.replace(
-                "  (type (;17;) (func))",
-                "  (type (;17;) (func (result i32 i32)))\n  (type (;18;) (func))\n  (type (;19;) (func (param i32 i32) (result i32 i32)))",
+                "  (type (;13;) (func))\n",
+                "  (type (;13;) (func))\n  (type (;14;) (func (result i32 i32)))\n  (type (;15;) (func (param i32 i32) (result i32 i32)))\n  (type (;16;) (func (param i32) (result i32)))\n",
             );
-
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2408,10 +2387,9 @@ pub(crate) mod tests {
             editor.push_line(")");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (func (;22;) (type 16)
+                + r#"  (func (;18;) (type 13)
     (local i32 i32 i32 f64)
   )
-  (func (;23;) (type 17))
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
