@@ -1766,6 +1766,7 @@ pub(crate) mod tests {
     }
 
     use crate::line::{Activity, LineInfo};
+    use crate::symbolic::parse_line_symbols;
     use crate::syntax::{
         SyntheticWasm, find_function_ranges, find_import_lines, fix_syntax, parse_line,
     };
@@ -1783,10 +1784,13 @@ pub(crate) mod tests {
 
     impl FakeTextLine {
         fn new(s: &str) -> Self {
+            let kind = parse_line(s);
+            let symbols = parse_line_symbols(s, &kind);
             Self {
                 instr_text: String::from(s),
                 info: LineInfo {
-                    kind: parse_line(s),
+                    kind,
+                    symbols,
                     ..Default::default()
                 },
             }
@@ -2055,6 +2059,58 @@ pub(crate) mod tests {
 )
 "#;
             let expected = expected.replace("  (export \"main\" (func 18))\n", "");
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // syntax error (consumed symbolic reference no defined - module-level, local, label)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("block $b");
+            editor.push_line("local.get $x"); // invalid local
+            editor.push_line("call $b"); // invalid module-level
+            editor.push_line("br $l"); // invalid label
+            editor.push_line("end");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + "  (func (;18;) (type 13)\n"
+                + JUST_BLOCK_END;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // syntax error (label on "end"/"else" doesn't match that introduced by the frame)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("block $y");
+            editor.push_line("loop $x");
+            editor.push_line("end $y"); // mismatched frame: dropped
+            editor.push_line("end $x");
+            editor.push_line("end $y");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_FIELDS
+                + r#"  (func (;18;) (type 13)
+    block ;; label = @1
+      i32.const 1
+      call 0
+      i32.eqz
+      if ;; label = @2
+        unreachable
+      end
+      loop ;; label = @2
+        i32.const 2
+        call 0
+        i32.eqz
+        if ;; label = @3
+          unreachable
+        end
+      end
+    end
+  )
+)
+"#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 

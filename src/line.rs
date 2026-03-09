@@ -422,7 +422,7 @@ impl CodeLine {
         }
         // Update kind, symbols, commentary, and active status
         self.info.kind = parse_line(self.instr().get());
-        self.info.symbols = parse_line_symbols(self.instr().get(), self.info.kind.clone());
+        self.info.symbols = parse_line_symbols(self.instr().get(), &self.info.kind);
         self.conform();
         Ok(ws_bytes)
     }
