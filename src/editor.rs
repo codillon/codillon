@@ -557,10 +557,6 @@ impl Editor {
         let validized = raw_module.fix_validity(&wasm_bin, self, &find_import_lines(self))?;
         let types = validized.to_types_table(&wasm_bin)?;
 
-        for (start, end) in &self.0.borrow().function_ranges {
-            log_1(&format!("function ranges start: {start}, end {end}").into());
-        }
-
         let mut last_line_no = 0;
         for i in 0..validized.functions.len() {
             for (op, CodillonType { inputs, outputs }) in
