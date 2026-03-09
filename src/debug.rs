@@ -173,29 +173,29 @@ fn create_closure_helpers(import: &Object) {
 }
 
 fn create_closure_record_operations(debug_numbers: &Object) {
-    let record = |value: WebAssemblyTypes| {
+    let record = |_slot: usize, value: WebAssemblyTypes| {
         STATE.with(|cur_state| {
             cur_state.borrow_mut().stack_pushes.push(value);
         });
     };
-    let record_i32 = Closure::wrap(Box::new(move |value: i32| {
-        record(WebAssemblyTypes::I32(value));
-    }) as Box<dyn Fn(i32)>);
+    let record_i32 = Closure::wrap(Box::new(move |slot: i32, value: i32| {
+        record(slot as usize, WebAssemblyTypes::I32(value));
+    }) as Box<dyn Fn(i32, i32)>);
     register_closure(debug_numbers, "record_i32", record_i32);
 
-    let record_f32 = Closure::wrap(Box::new(move |value: f32| {
-        record(WebAssemblyTypes::F32(value));
-    }) as Box<dyn Fn(f32)>);
+    let record_f32 = Closure::wrap(Box::new(move |slot: i32, value: f32| {
+        record(slot as usize, WebAssemblyTypes::F32(value));
+    }) as Box<dyn Fn(i32, f32)>);
     register_closure(debug_numbers, "record_f32", record_f32);
 
-    let record_i64 = Closure::wrap(Box::new(move |value: i64| {
-        record(WebAssemblyTypes::I64(value));
-    }) as Box<dyn Fn(i64)>);
+    let record_i64 = Closure::wrap(Box::new(move |slot: i32, value: i64| {
+        record(slot as usize, WebAssemblyTypes::I64(value));
+    }) as Box<dyn Fn(i32, i64)>);
     register_closure(debug_numbers, "record_i64", record_i64);
 
-    let record_f64 = Closure::wrap(Box::new(move |value: f64| {
-        record(WebAssemblyTypes::F64(value));
-    }) as Box<dyn Fn(f64)>);
+    let record_f64 = Closure::wrap(Box::new(move |slot: i32, value: f64| {
+        record(slot as usize, WebAssemblyTypes::F64(value));
+    }) as Box<dyn Fn(i32, f64)>);
     register_closure(debug_numbers, "record_f64", record_f64);
 }
 
