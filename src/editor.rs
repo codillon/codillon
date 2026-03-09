@@ -557,6 +557,10 @@ impl Editor {
         let validized = raw_module.fix_validity(&wasm_bin, self, &find_import_lines(self))?;
         let types = validized.to_types_table(&wasm_bin)?;
 
+        for (start, end) in &self.0.borrow().function_ranges {
+            log_1(&format!("function ranges start: {start}, end {end}").into());
+        }
+
         let mut last_line_no = 0;
         for i in 0..validized.functions.len() {
             for (op, CodillonType { inputs, outputs }) in
@@ -863,8 +867,6 @@ impl Editor {
                                 for (idx, val) in vec.iter() {
                                     inner.function_locals[func_idx][*idx] = *val;
                                 }
-                                inner.program_state.locals_state =
-                                    inner.function_locals[func_idx].clone();
                             }
                             SparseChange::Globals(idx, val) => {
                                 inner.program_state.globals_state[idx] = val;
@@ -894,6 +896,7 @@ impl Editor {
                         }
                         sparse_idx += 1;
                     }
+                    inner.program_state.locals_state = inner.function_locals[func_idx].clone();
                     inner.saved_states[change.line_number] = Some(inner.program_state.clone());
                 }
                 inner.program_state.sparse_idx = sparse_idx;
