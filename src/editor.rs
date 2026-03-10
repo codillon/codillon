@@ -142,12 +142,13 @@ impl Editor {
             for line_str in content.lines() {
                 ret.push_line(line_str);
             }
-            if ret.on_change().is_err() {
-                ret.set_default_contents()
-            };
         } else {
             ret.set_default_contents();
         }
+        if ret.on_change().is_err() {
+            ret.set_default_contents();
+            ret.on_change().expect("default contents should be valid");
+        };
 
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
