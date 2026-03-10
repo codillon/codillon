@@ -544,10 +544,7 @@ impl Editor {
             let (line_idx, pos) = self
                 .find_idx_and_utf16_pos(selection.focus_node()?, selection.focus_offset())
                 .ok()?;
-            let line_text = self
-                .line(line_idx)
-                .suffix(Position::begin())
-                .ok()?;
+            let line_text = self.line(line_idx).suffix(Position::begin()).ok()?;
             let prefix = line_text.get(..pos.offset)?;
             let last_word = prefix.split_whitespace().last()?;
             let suggestions = suggest(last_word, AUTOCOMPLETE_LIMIT);

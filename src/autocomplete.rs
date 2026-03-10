@@ -15,7 +15,9 @@ pub type HintBarStruct = DomVec<HintItem, HtmlDivElement>;
 
 fn all_instruction_names() -> &'static [String] {
     static INSTRUCTION_NAMES: OnceLock<Vec<String>> = OnceLock::new();
-    INSTRUCTION_NAMES.get_or_init(get_all_instruction_names).as_slice()
+    INSTRUCTION_NAMES
+        .get_or_init(get_all_instruction_names)
+        .as_slice()
 }
 
 pub fn suggest(prefix: &str, limit: usize) -> Vec<String> {

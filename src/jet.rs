@@ -145,10 +145,7 @@ impl Handlers {
     where
         E::Element: AsRef<HtmlElement>,
     {
-        elem.with_element(
-            |elem| self.audit(elem),
-            TOKEN,
-        );
+        elem.with_element(|elem| self.audit(elem), TOKEN);
     }
 
     pub fn set_onbeforeinput<E: WithElement, F: Fn(InputEventHandle) + 'static>(
