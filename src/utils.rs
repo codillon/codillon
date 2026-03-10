@@ -129,12 +129,38 @@ struct HelperFunc {
 }
 const HELPER_IMPORTS: &[(&str, &[HelperFunc])] = &[(
     "helpers",
-    &[HelperFunc {
-        name: "draw_point",
-        params: &[ValType::F64, ValType::F64],
-        results: &[],
-        reason: "expected type (f64, f64) -> ()",
-    }],
+    &[
+        HelperFunc {
+            name: "draw_point",
+            params: &[ValType::F64, ValType::F64],
+            results: &[],
+            reason: "expected type (f64, f64) -> ()",
+        },
+        HelperFunc {
+            name: "clear_canvas",
+            params: &[],
+            results: &[],
+            reason: "expected type () -> ()",
+        },
+        HelperFunc {
+            name: "set_color",
+            params: &[ValType::I32, ValType::I32, ValType::I32],
+            results: &[],
+            reason: "expected type (i32, i32, i32) -> ()",
+        },
+        HelperFunc {
+            name: "set_extent",
+            params: &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
+            results: &[],
+            reason: "expected type (f64, f64, f64, f64) -> ()",
+        },
+        HelperFunc {
+            name: "set_radius",
+            params: &[ValType::F64],
+            results: &[],
+            reason: "expected type (f64) -> ()",
+        },
+    ],
 )];
 
 pub struct GeneralOperator<'a> {
