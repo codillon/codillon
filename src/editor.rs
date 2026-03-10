@@ -13,8 +13,8 @@ use crate::{
     graphics::DomImage,
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, Handlers,
-        InputEventHandle, NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
-        compare_document_position, get_selection, now_ms,  render_canvas, set_selection_range,
+        InputEventHandle, NodeRef, RangeLike, ReactiveComponent, StorageHandle, WithElement,
+        compare_document_position, get_selection, now_ms, render_canvas, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
@@ -43,9 +43,8 @@ type ComponentType = DomStruct<
             ReactiveComponent<TextType>,
             (
                 ElementHandle<HtmlInputElement>,
-                (ElementHandle<HtmlCanvasElement>, (OverlayType, ())),
+                (DomCanvas, (OverlayType, ())),
             ),
-            (ElementHandle<HtmlInputElement>, (DomCanvas, ())),
         ),
     ),
     HtmlDivElement,
@@ -100,7 +99,10 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), (DomCanvas::new(factory.canvas()), (overlay, ()))),  
+                        (
+                            (factory.input()),
+                            (DomCanvas::new(factory.canvas()), (overlay, ())),
+                        ),
                     ),
                 ),
                 factory.div(),
