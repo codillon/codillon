@@ -20,6 +20,7 @@ web-sys = { version = "0.3.85", features = ["Text", "Element", "HtmlDivElement",
 wasm-bindgen-futures = "0.4.58"
 wasm-encoder = { version = "0.245.0", features = ["wasmparser"] }
 itertools = "0.14.0"
+indexmap = "2.13.0"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
