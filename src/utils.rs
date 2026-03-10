@@ -915,6 +915,8 @@ impl<'a> ValidModule<'a> {
                     );
                     function_section.function(dynamic_type_idx);
                     types_map.insert(outputs.clone(), dynamic_func_idx);
+                    // The type and function indices of the dynamically generated functions
+                    // They are incremented after being encoded in the TypeSection and FunctionSection, and they have different initial offsets
                     dynamic_type_idx += 1;
                     dynamic_func_idx += 1;
                 }
@@ -1003,9 +1005,7 @@ impl<'a> ValidModule<'a> {
                 pop_debug(&mut f, value_type.inputs.len() as i32);
             }
 
-            if codillon_instruction.op.op == Operator::End
-                || codillon_instruction.op.op == Operator::Return
-            {
+            if codillon_instruction.op.op == Operator::End {
                 // Call dynamically generated type to record return values
                 if !value_type.outputs.is_empty() {
                     record(&mut f, &value_type.outputs);
@@ -1074,7 +1074,9 @@ impl<'a> ValidModule<'a> {
                 ValType::F64 => {
                     f.instruction(&Call(InstrImports::RecordF64 as u32));
                 }
-                _ => {}
+                _ => {
+                    panic!("unexpected output type")
+                }
             }
         }
         for output_idx in 0..outputs.len() {
