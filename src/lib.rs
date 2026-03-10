@@ -6,9 +6,11 @@ pub mod jet;
 pub mod utils;
 
 pub mod action_history;
+pub mod autocomplete;
 pub mod debug;
 pub mod editor;
 pub mod graphics;
 pub mod line;
 pub mod symbolic;
 pub mod syntax;
+pub mod visited_operators;

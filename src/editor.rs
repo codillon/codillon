@@ -2,6 +2,7 @@
 
 use crate::{
     action_history::{ActionHistory, Edit, Selection},
+    autocomplete::{HintBarStruct, setup_hint_bar, suggest, update_hint_bar},
     debug::{
         SparseChange, WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes,
         with_sparse_changes,
@@ -11,8 +12,8 @@ use crate::{
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
-        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
-        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
+        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, Handlers,
+        InputEventHandle, NodeRef, RangeLike, ReactiveComponent, StorageHandle, WithElement,
         compare_document_position, get_selection, now_ms, render_canvas, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
@@ -34,12 +35,16 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
+type OverlayType = DomStruct<(HintBarStruct, ()), HtmlDivElement>;
 type ComponentType = DomStruct<
     (
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, (DomCanvas, ())),
+            (
+                ElementHandle<HtmlInputElement>,
+                (DomCanvas, (OverlayType, ())),
+            ),
         ),
     ),
     HtmlDivElement,
@@ -47,6 +52,7 @@ type ComponentType = DomStruct<
 
 pub const LINE_SPACING: usize = 40;
 const STORAGE_ID: &str = "codillon_content";
+const AUTOCOMPLETE_LIMIT: usize = 10;
 
 #[derive(Clone, Default)]
 pub struct ProgramState {
@@ -61,6 +67,7 @@ pub struct ProgramState {
 
 struct _Editor {
     component: ComponentType,
+    handlers: Handlers,
     factory: ElementFactory,
     action_history: ActionHistory,
     storage: Option<StorageHandle>,
@@ -70,6 +77,8 @@ struct _Editor {
     globals: Vec<WebAssemblyTypes>,
     saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
+    current_suggestions: Vec<String>,
+    current_prefix: String,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -82,17 +91,23 @@ impl Clone for Editor {
 
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
+        let hint_bar = setup_hint_bar(&factory);
+        let overlay = DomStruct::new((hint_bar, ()), factory.div());
         let inner = _Editor {
             component: DomStruct::new(
                 (
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), (DomCanvas::new(factory.canvas()), ())),
+                        (
+                            (factory.input()),
+                            (DomCanvas::new(factory.canvas()), (overlay, ())),
+                        ),
                     ),
                 ),
                 factory.div(),
             ),
+            handlers: Handlers::default(),
             factory,
             action_history: ActionHistory::default(),
             storage: StorageHandle::new(),
@@ -101,6 +116,8 @@ impl Editor {
             globals: Vec::new(),
             saved_states: Vec::new(),
             function_ranges: Vec::new(),
+            current_suggestions: Vec::new(),
+            current_prefix: String::new(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -127,6 +144,15 @@ impl Editor {
                     .handle_keydown(ev)
                     .expect("keydown handler")
             });
+        }
+        {
+            let editor_handle = ret.clone();
+            let mut editor = ret.0.borrow_mut();
+            let mut handlers = std::mem::take(&mut editor.handlers);
+            handlers.set_onmousedown(&mut editor.component, move |_| {
+                editor_handle.hide_autocomplete();
+            });
+            editor.handlers = handlers;
         }
         {
             let mut binding = ret.0.borrow_mut();
@@ -187,7 +213,7 @@ impl Editor {
     }
 
     // Replace a given range (currently within a single line) with new text
-    fn replace_range(&mut self, target_range: StaticRangeHandle, new_str: &str) -> Result<()> {
+    fn replace_range(&mut self, target_range: &impl RangeLike, new_str: &str) -> Result<()> {
         if new_str.chars().any(|x| x.is_control() && x != '\n') {
             bail!("unhandled control char in input");
         }
@@ -195,7 +221,7 @@ impl Editor {
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
 
         let (start_line, start_pos, end_line, end_pos) =
-            self.get_lines_and_positions(&target_range)?;
+            self.get_lines_and_positions(target_range)?;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -376,24 +402,26 @@ impl Editor {
         let target_range = ev.get_first_target_range()?;
 
         match &ev.input_type() as &str {
-            "insertText" => self.replace_range(target_range, &ev.data().context("no data")?),
+            "insertText" => self.replace_range(&target_range, &ev.data().context("no data")?),
             "insertFromPaste" => self.replace_range(
-                target_range,
+                &target_range,
                 &ev.data_transfer()
                     .context("no data_transfer")?
                     .get_data("text/plain")
                     .fmt_err()?,
             ),
             "deleteContentBackward" | "deleteContentForward" | "deleteByCut" => {
-                self.replace_range(target_range, "")
+                self.replace_range(&target_range, "")
             }
-            "insertParagraph" | "insertLineBreak" => self.replace_range(target_range, "\n"),
+            "insertParagraph" | "insertLineBreak" => self.replace_range(&target_range, "\n"),
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
                 ev.data()
             )),
         }?;
+
+        self.show_autocomplete();
 
         Ok(())
     }
@@ -402,6 +430,19 @@ impl Editor {
     // later in the line. It also has trouble deleting if the cursor position is at the end of the surrounding
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
     fn handle_keydown(&mut self, ev: web_sys::KeyboardEvent) -> Result<()> {
+        if ev.key() == "Enter" {
+            let accepted = self.0.borrow().current_suggestions.first().cloned();
+            if let Some(accepted) = accepted {
+                ev.prevent_default();
+                self.accept_autocomplete(&accepted);
+                return Ok(());
+            }
+        }
+
+        if ev.key().starts_with("Arrow") || ev.key() == "Escape" || ev.key() == "Enter" {
+            self.hide_autocomplete();
+        }
+
         match ev.key().as_str() {
             "ArrowRight" => {
                 let selection = get_selection();
@@ -464,6 +505,70 @@ impl Editor {
         }
 
         Ok(())
+    }
+
+    fn set_hint_bar(&self, suggestions: &[String]) {
+        let Ok(mut editor) = self.0.try_borrow_mut() else {
+            return;
+        };
+        let factory = editor.factory.clone();
+        let bar = &mut editor.component.get_mut().1.1.1.1.0.get_mut().0;
+        update_hint_bar(&factory, bar, suggestions, self);
+    }
+
+    pub fn hide_autocomplete(&self) {
+        {
+            let Ok(mut editor) = self.0.try_borrow_mut() else {
+                return;
+            };
+            editor.current_suggestions.clear();
+            editor.current_prefix.clear();
+        }
+        self.set_hint_bar(&[]);
+    }
+
+    pub(crate) fn accept_autocomplete(&self, accepted: &str) {
+        let prefix = self.0.borrow().current_prefix.clone();
+        let suffix = &accepted[prefix.trim_start().len()..];
+        let selection = get_selection();
+        if !suffix.is_empty() && selection.is_collapsed() {
+            let _ = self.clone().replace_range(&selection, suffix);
+        }
+        self.hide_autocomplete();
+    }
+
+    fn show_autocomplete(&self) {
+        let suggestions = (|| {
+            let selection = get_selection();
+            if !selection.is_collapsed() {
+                return None;
+            }
+            let (line_idx, pos) = self
+                .find_idx_and_utf16_pos(selection.focus_node()?, selection.focus_offset())
+                .ok()?;
+            let line_text = self.line(line_idx).suffix(Position::begin()).ok()?;
+            let prefix = line_text.get(..pos.offset)?;
+            let last_word = prefix.split_whitespace().last()?;
+            let suggestions = suggest(last_word, AUTOCOMPLETE_LIMIT);
+            if suggestions.is_empty() {
+                None
+            } else {
+                Some((last_word.to_string(), suggestions))
+            }
+        })();
+
+        if let Some((last_word, suggestions)) = suggestions {
+            {
+                let Ok(mut editor) = self.0.try_borrow_mut() else {
+                    return;
+                };
+                editor.current_prefix = last_word.clone();
+                editor.current_suggestions = suggestions.clone();
+            }
+            self.set_hint_bar(&suggestions);
+        } else {
+            self.hide_autocomplete();
+        }
     }
 
     // Given a node and offset, find the line index and (UTF-16) position within that line.
@@ -1083,6 +1188,8 @@ impl WithElement for Editor {
 
 impl Component for Editor {
     fn audit(&self) {
-        self.0.borrow().component.audit()
+        let editor = self.0.borrow();
+        editor.handlers.audit_with(&editor.component);
+        editor.component.audit();
     }
 }
