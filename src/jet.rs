@@ -38,6 +38,14 @@ pub trait WithElement {
     fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken);
 }
 
+pub trait RenderWithToken {
+    fn render(&mut self, token: AccessToken, actions: &[crate::dom_canvas::Action]);
+}
+
+pub fn render_canvas<R: RenderWithToken>(r: &mut R, actions: &[crate::dom_canvas::Action]) {
+    r.render(TOKEN, actions);
+}
+
 impl<T: WithElement> WithNode for T {
     fn with_node(&self, mut f: impl FnMut(&web_sys::Node), g: AccessToken) {
         self.with_element(|elem| f(elem.as_ref()), g);
@@ -528,36 +536,6 @@ impl ElementHandle<web_sys::HtmlInputElement> {
             TOKEN,
         );
         closure.forget();
-    }
-}
-
-impl ElementHandle<web_sys::HtmlCanvasElement> {
-    pub fn set_size_pixels(&mut self, width: u32, height: u32) {
-        self.set_attribute("width", &width.to_string());
-        self.set_attribute("height", &height.to_string());
-    }
-    pub fn with_2d_context_and_size<R>(
-        &self,
-        mut function: impl FnMut(&web_sys::CanvasRenderingContext2d, u32, u32) -> R,
-    ) {
-        self.with_element(
-            |canvas| {
-                let width = canvas.width();
-                let height = canvas.height();
-                // get_context returns Result<Option<JsValue>, JsValue>
-                if let Ok(Some(contex_val)) = canvas.get_context("2d")
-                    && let Ok(context) = contex_val.dyn_into::<web_sys::CanvasRenderingContext2d>()
-                {
-                    function(&context, width, height);
-                }
-            },
-            TOKEN,
-        );
-    }
-    pub fn clear_canvas(&self) {
-        self.with_2d_context_and_size(|context, width, height| {
-            context.clear_rect(0.0, 0.0, width as f64, height as f64);
-        });
     }
 }
 

@@ -6,13 +6,14 @@ use crate::{
         SparseChange, WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes,
         with_sparse_changes,
     },
+    dom_canvas::{Action, DomCanvas},
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
         NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
-        compare_document_position, get_selection, now_ms, set_selection_range,
+        compare_document_position, get_selection, now_ms, render_canvas, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
@@ -30,7 +31,7 @@ use std::{
     rc::{Rc, Weak},
 };
 use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{HtmlCanvasElement, HtmlDivElement, HtmlInputElement, console::log_1};
+use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<
@@ -38,10 +39,7 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (
-                ElementHandle<HtmlInputElement>,
-                (ElementHandle<HtmlCanvasElement>, ()),
-            ),
+            (ElementHandle<HtmlInputElement>, (DomCanvas, ())),
         ),
     ),
     HtmlDivElement,
@@ -90,7 +88,7 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), ((factory.canvas()), ())),
+                        ((factory.input()), (DomCanvas::new(factory.canvas()), ())),
                     ),
                 ),
                 factory.div(),
@@ -134,8 +132,6 @@ impl Editor {
             let mut binding = ret.0.borrow_mut();
             let slider = &mut binding.component.get_mut().1.1.0;
             ret.setup_slider(Rc::downgrade(&ret.0), slider);
-            let canvas = &mut binding.component.get_mut().1.1.1.0;
-            ret.setup_canvas(canvas);
         }
         ret.image_mut().set_attribute("class", "annotations");
 
@@ -685,59 +681,6 @@ impl Editor {
                 step
             };
             editor_handle.build_program_state(0, step);
-            editor_handle.update_debug_panel(None);
-        });
-    }
-
-    fn update_debug_panel(&self, error: Option<String>) {
-        let inner = self.0.borrow_mut();
-        let step = inner.program_state.step_number;
-        let line_num = inner.program_state.line_number;
-        let saved_states = inner.saved_states.clone();
-        let mut textentry: RefMut<ReactiveComponent<TextType>> =
-            RefMut::map(inner, |comp| &mut comp.component.get_mut().1.0);
-        let lines: &mut TextType = textentry.inner_mut();
-        if let Some(message) = error {
-            lines[0].set_debug_annotation(Some(&message));
-            for i in 1..lines.len() {
-                lines[i].set_debug_annotation(None);
-                lines[i].set_highlight(false);
-            }
-            return;
-        }
-        for i in 0..lines.len() {
-            lines[i].set_highlight(false);
-            if let Some(cur_state) = saved_states.get(i)
-                && let Some(program_state) = &cur_state
-                && program_state.step_number <= step
-            {
-                lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
-            } else {
-                lines[i].set_debug_annotation(None);
-            }
-        }
-
-        lines[line_num].set_highlight(true);
-    }
-
-    fn setup_canvas(&self, canvas: &mut ElementHandle<HtmlCanvasElement>) {
-        canvas.set_attribute("class", "graph-canvas");
-        canvas.set_size_pixels(500, 500);
-        canvas.clear_canvas();
-    }
-
-    fn draw_point(&self, x: f64, y: f64, canvas: &ElementHandle<HtmlCanvasElement>) {
-        canvas.with_2d_context_and_size(|context, width, height| {
-            let w = width as f64 / 2.0;
-            let h = height as f64 / 2.0;
-
-            // map to pixel space. y is inverted because (0, 0) is top left corner of HTML canvas
-            let px = w + x * w;
-            let py = h - y * h;
-
-            context.begin_path();
-            let _ = context.arc(px, py, 3.0, 0.0, std::f64::consts::PI * 2.0);
-            context.fill();
         });
     }
 
@@ -779,7 +722,6 @@ impl Editor {
         };
         // Reconstruct up to slider_step
         self.build_program_state(program_step, slider_step);
-        self.update_debug_panel(None);
     }
 
     fn valtype_default_editor(ty: &wasmparser::ValType) -> WebAssemblyTypes {
@@ -832,6 +774,7 @@ impl Editor {
     }
 
     fn build_program_state(&self, start: usize, stop: usize) {
+        let mut actions: Vec<Action> = Vec::new();
         let mut inner = self.0.borrow_mut();
         let line_count = inner.component.get().1.0.inner().len();
         inner.saved_states.resize_with(line_count, || None);
@@ -840,8 +783,10 @@ impl Editor {
             if let Some((first_start, _first_end)) = inner.function_ranges.first().cloned() {
                 inner.saved_states[first_start] = Some(inner.program_state.clone());
             }
-            let canvas = &inner.component.get_mut().1.1.1.0;
-            canvas.clear_canvas();
+            actions.push(Action::Clear);
+            actions.push(Action::Color(0, 0, 0));
+            actions.push(Action::Radius(3.0));
+            actions.push(Action::Extent(-1.0, 1.0, -1.0, 1.0));
         }
         with_changes(|changes| {
             with_sparse_changes(|sparse_changes| {
@@ -883,8 +828,19 @@ impl Editor {
                                 memory[idx] = val;
                             }
                             SparseChange::Point(x, y) => {
-                                let canvas = &inner.component.get_mut().1.1.1.0;
-                                self.draw_point(x, y, canvas);
+                                actions.push(Action::Point(x, y));
+                            }
+                            SparseChange::Clear() => {
+                                actions.push(Action::Clear);
+                            }
+                            SparseChange::Color(r, g, b) => {
+                                actions.push(Action::Color(r, g, b));
+                            }
+                            SparseChange::Extent(xmin, xmax, ymin, ymax) => {
+                                actions.push(Action::Extent(xmin, xmax, ymin, ymax));
+                            }
+                            SparseChange::Radius(radius) => {
+                                actions.push(Action::Radius(radius));
                             }
                         }
                         sparse_idx += 1;
@@ -894,6 +850,35 @@ impl Editor {
                 inner.program_state.sparse_idx = sparse_idx;
             });
         });
+        drop(inner);
+        self.update_debug_panel(&actions);
+    }
+
+    fn update_debug_panel(&self, actions: &[Action]) {
+        {
+            let inner = &mut self.0.borrow_mut();
+            let step = inner.program_state.step_number;
+            let line_num = inner.program_state.line_number;
+            let saved_states = inner.saved_states.clone();
+            let textentry = &mut inner.component.get_mut().1.0;
+            let lines: &mut TextType = textentry.inner_mut();
+            for i in 0..lines.len() {
+                lines[i].set_highlight(false);
+                if let Some(cur_state) = saved_states.get(i)
+                    && let Some(program_state) = &cur_state
+                    && program_state.step_number <= step
+                {
+                    lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
+                } else {
+                    lines[i].set_debug_annotation(None);
+                }
+            }
+            lines[line_num].set_highlight(true);
+        }
+        render_canvas(
+            &mut self.0.borrow_mut().component.get_mut().1.1.1.0,
+            actions,
+        );
     }
 
     fn apply_selection(
