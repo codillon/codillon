@@ -604,7 +604,7 @@ impl Editor {
         // instrumentation
         self.initialize_globals(&validized);
         self.initialize_locals(&validized);
-        self.execute(&validized.build_executable_binary(&types)?);
+        self.execute(&validized.build_executable_binary(&types, &self.0.borrow().function_ranges)?);
 
         // save to local storage
         {
@@ -642,7 +642,6 @@ impl Editor {
                 Err(_) => Ok(String::new()),
             }
         }
-
         let binary = binary.to_vec();
         let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
@@ -814,8 +813,6 @@ impl Editor {
                                 for (idx, val) in vec.iter() {
                                     inner.function_locals[func_idx][*idx] = *val;
                                 }
-                                inner.program_state.locals_state =
-                                    inner.function_locals[func_idx].clone();
                             }
                             SparseChange::Globals(idx, val) => {
                                 inner.program_state.globals_state[idx] = val;
@@ -845,6 +842,7 @@ impl Editor {
                         }
                         sparse_idx += 1;
                     }
+                    inner.program_state.locals_state = inner.function_locals[func_idx].clone();
                     inner.saved_states[change.line_number] = Some(inner.program_state.clone());
                 }
                 inner.program_state.sparse_idx = sparse_idx;
