@@ -141,6 +141,16 @@ impl Handlers {
         }
     }
 
+    pub fn audit_with<E: WithElement>(&self, elem: &E)
+    where
+        E::Element: AsRef<HtmlElement>,
+    {
+        elem.with_element(
+            |elem| self.audit(elem),
+            TOKEN,
+        );
+    }
+
     pub fn set_onbeforeinput<E: WithElement, F: Fn(InputEventHandle) + 'static>(
         &mut self,
         elem: &mut E,

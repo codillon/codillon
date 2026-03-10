@@ -2,6 +2,7 @@
 
 use crate::{
     action_history::{ActionHistory, Edit, Selection},
+    autocomplete::{HintBarStruct, setup_hint_bar, suggest, update_hint_bar},
     debug::{
         SparseChange, WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes,
         with_sparse_changes,
@@ -10,8 +11,8 @@ use crate::{
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
-        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
-        NodeRef, RangeLike, ReactiveComponent, StorageHandle, WithElement,
+        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, Handlers,
+        InputEventHandle, NodeRef, RangeLike, ReactiveComponent, StorageHandle, WithElement,
         compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
@@ -33,7 +34,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::{HtmlCanvasElement, HtmlDivElement, HtmlInputElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
-type OverlayType = DomStruct<(crate::autocomplete::HintBarStruct, ()), HtmlDivElement>;
+type OverlayType = DomStruct<(HintBarStruct, ()), HtmlDivElement>;
 type ComponentType = DomStruct<
     (
         DomImage,
@@ -65,6 +66,7 @@ pub struct ProgramState {
 
 struct _Editor {
     component: ComponentType,
+    handlers: Handlers,
     factory: ElementFactory,
     action_history: ActionHistory,
     storage: Option<StorageHandle>,
@@ -88,7 +90,7 @@ impl Clone for Editor {
 
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
-        let hint_bar = crate::autocomplete::setup_hint_bar(&factory);
+        let hint_bar = setup_hint_bar(&factory);
         let overlay = DomStruct::new((hint_bar, ()), factory.div());
         let inner = _Editor {
             component: DomStruct::new(
@@ -101,6 +103,7 @@ impl Editor {
                 ),
                 factory.div(),
             ),
+            handlers: Handlers::default(),
             factory,
             action_history: ActionHistory::default(),
             storage: StorageHandle::new(),
@@ -137,6 +140,15 @@ impl Editor {
                     .handle_keydown(ev)
                     .expect("keydown handler")
             });
+        }
+        {
+            let editor_handle = ret.clone();
+            let mut editor = ret.0.borrow_mut();
+            let mut handlers = std::mem::take(&mut editor.handlers);
+            handlers.set_onmousedown(&mut editor.component, move |_| {
+                editor_handle.hide_autocomplete();
+            });
+            editor.handlers = handlers;
         }
         {
             let mut binding = ret.0.borrow_mut();
@@ -493,26 +505,30 @@ impl Editor {
         Ok(())
     }
 
-    fn set_hint_bar(editor: &mut _Editor, suggestions: &[String], editor_handle: &Editor) {
-        let factory = editor.factory.clone();
-        let bar = &mut editor.component.get_mut().1.1.1.1.0.get_mut().0;
-        crate::autocomplete::update_hint_bar(&factory, bar, suggestions, editor_handle);
-    }
-
-    pub fn hide_autocomplete(&self) {
-        let editor_handle = self.clone();
+    fn set_hint_bar(&self, suggestions: &[String]) {
         let Ok(mut editor) = self.0.try_borrow_mut() else {
             return;
         };
-        editor.current_suggestions.clear();
-        editor.current_prefix.clear();
-        Self::set_hint_bar(&mut editor, &[], &editor_handle);
+        let factory = editor.factory.clone();
+        let bar = &mut editor.component.get_mut().1.1.1.1.0.get_mut().0;
+        update_hint_bar(&factory, bar, suggestions, self);
+    }
+
+    pub fn hide_autocomplete(&self) {
+        {
+            let Ok(mut editor) = self.0.try_borrow_mut() else {
+                return;
+            };
+            editor.current_suggestions.clear();
+            editor.current_prefix.clear();
+        }
+        self.set_hint_bar(&[]);
     }
 
     pub(crate) fn accept_autocomplete(&self, accepted: &str) {
         let prefix = self.0.borrow().current_prefix.clone();
         let suffix = &accepted[prefix.trim_start().len()..];
-        let selection = crate::jet::get_selection();
+        let selection = get_selection();
         if !suffix.is_empty() && selection.is_collapsed() {
             let _ = self.clone().replace_range(&selection, suffix);
         }
@@ -521,7 +537,7 @@ impl Editor {
 
     fn show_autocomplete(&self) {
         let suggestions = (|| {
-            let selection = crate::jet::get_selection();
+            let selection = get_selection();
             if !selection.is_collapsed() {
                 return None;
             }
@@ -530,11 +546,11 @@ impl Editor {
                 .ok()?;
             let line_text = self
                 .line(line_idx)
-                .suffix(crate::line::Position::begin())
+                .suffix(Position::begin())
                 .ok()?;
             let prefix = line_text.get(..pos.offset)?;
             let last_word = prefix.split_whitespace().last()?;
-            let suggestions = crate::autocomplete::suggest(last_word, AUTOCOMPLETE_LIMIT);
+            let suggestions = suggest(last_word, AUTOCOMPLETE_LIMIT);
             if suggestions.is_empty() {
                 None
             } else {
@@ -543,13 +559,14 @@ impl Editor {
         })();
 
         if let Some((last_word, suggestions)) = suggestions {
-            let editor_handle = self.clone();
-            let Ok(mut editor) = self.0.try_borrow_mut() else {
-                return;
-            };
-            editor.current_prefix = last_word.clone();
-            editor.current_suggestions = suggestions.clone();
-            Self::set_hint_bar(&mut editor, &suggestions, &editor_handle);
+            {
+                let Ok(mut editor) = self.0.try_borrow_mut() else {
+                    return;
+                };
+                editor.current_prefix = last_word.clone();
+                editor.current_suggestions = suggestions.clone();
+            }
+            self.set_hint_bar(&suggestions);
         } else {
             self.hide_autocomplete();
         }
@@ -1185,6 +1202,8 @@ impl WithElement for Editor {
 
 impl Component for Editor {
     fn audit(&self) {
-        self.0.borrow().component.audit()
+        let editor = self.0.borrow();
+        editor.handlers.audit_with(&editor.component);
+        editor.component.audit();
     }
 }

@@ -7,18 +7,24 @@ use crate::{
     dom_vec::DomVec,
     jet::{ControlHandlers, ElementFactory, ReactiveComponent},
 };
+use std::sync::OnceLock;
 use web_sys::{HtmlDivElement, MouseEvent};
 
 type HintItem = ReactiveComponent<DomStruct<(DomText, ()), HtmlDivElement>>;
 pub type HintBarStruct = DomVec<HintItem, HtmlDivElement>;
 
+fn all_instruction_names() -> &'static [String] {
+    static INSTRUCTION_NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    INSTRUCTION_NAMES.get_or_init(get_all_instruction_names).as_slice()
+}
+
 pub fn suggest(prefix: &str, limit: usize) -> Vec<String> {
-    let mut names = get_all_instruction_names();
-    if !prefix.is_empty() {
-        names.retain(|s| s.starts_with(prefix) && s != prefix);
-    }
-    names.truncate(limit);
-    names
+    all_instruction_names()
+        .iter()
+        .filter(|name| prefix.is_empty() || (name.starts_with(prefix) && name.as_str() != prefix))
+        .take(limit)
+        .cloned()
+        .collect()
 }
 
 pub fn setup_hint_bar(factory: &ElementFactory) -> HintBarStruct {

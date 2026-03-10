@@ -2,7 +2,7 @@ use anyhow::Result;
 use codillon::{
     dom_struct::DomStruct,
     editor::Editor,
-    jet::{ControlHandlers, DocumentHandle, ReactiveComponent},
+    jet::{DocumentHandle, ReactiveComponent},
 };
 use std::cell::RefCell;
 
@@ -19,13 +19,6 @@ fn setup() -> Result<()> {
         let body_elem = factory.body();
         let editor = Editor::new(factory);
         doc.set_body(Body::new(DomStruct::new((editor, ()), body_elem)));
-        doc.body_mut().unwrap().set_onmousedown(move |_| {
-            DOCUMENT.with_borrow(|doc| {
-                if let Some(body) = doc.body() {
-                    body.inner().get().0.hide_autocomplete();
-                }
-            });
-        });
         doc.audit();
     });
 
