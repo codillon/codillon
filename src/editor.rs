@@ -141,7 +141,7 @@ impl Editor {
         ret.image_mut().set_attribute("class", "annotations");
         ret.slider_mut().inner_mut().set_attribute("type", "range");
         ret.slider_mut().inner_mut().set_attribute("min", "0");
-        ret.slider_mut().inner_mut().set_attribute("value", "0");
+        ret.slider_mut().inner_mut().set_value_as_number(0f64);
         ret.slider_mut()
             .inner_mut()
             .set_attribute("class", "step-slider");
@@ -692,18 +692,17 @@ impl Editor {
             }
             let _ = run_binary(&binary, &args).await;
             // Update slider
-            let step = {
-                editor_handle
-                    .slider_mut()
-                    .inner_mut()
-                    .set_attribute("max", &(last_step() + 1).to_string());
-                let mut inner = editor_handle.0.borrow_mut();
-                let step = inner.program_state.step_number;
-                inner.program_state = ProgramState::default();
-                inner.saved_states = Vec::new();
-                step
-            };
-            editor_handle.build_program_state(step);
+            editor_handle
+                .slider_mut()
+                .inner_mut()
+                .set_attribute("max", &(last_step() + 1).to_string());
+            editor_handle
+                .slider_mut()
+                .inner_mut()
+                .set_value_as_number((last_step() + 1) as f64);
+            *editor_handle.program_state_mut() = ProgramState::default();
+            editor_handle.0.borrow_mut().saved_states = Vec::new();
+            editor_handle.build_program_state(last_step() + 1);
         });
     }
 

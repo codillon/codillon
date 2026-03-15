@@ -370,6 +370,7 @@ impl ElementHandle<HtmlInputElement> {
     delegate! {
     to self.elem {
         pub fn value_as_number(&self) -> f64;
+        pub fn set_value_as_number(&self, value: f64);
     }
     }
 }
