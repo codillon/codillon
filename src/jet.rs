@@ -12,7 +12,9 @@ use std::{
     ops::{Deref, DerefMut},
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::{Element, HtmlBodyElement, HtmlElement, KeyboardEvent, wasm_bindgen::JsCast};
+use web_sys::{
+    Element, HtmlBodyElement, HtmlElement, HtmlInputElement, KeyboardEvent, wasm_bindgen::JsCast,
+};
 
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the jet (web support) module.
@@ -124,12 +126,14 @@ impl TextHandle {
 #[derive(Default)]
 pub struct Handlers {
     beforeinput: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
+    input: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
     keydown: Option<Closure<dyn Fn(web_sys::KeyboardEvent)>>,
 }
 
 impl Handlers {
     pub fn audit(&self, elem: &impl AsRef<HtmlElement>) {
         audit_handler(&self.beforeinput, elem.as_ref().onbeforeinput());
+        audit_handler(&self.input, elem.as_ref().oninput());
         audit_handler(&self.keydown, elem.as_ref().onkeydown());
 
         fn audit_handler<EventType>(
@@ -161,6 +165,23 @@ impl Handlers {
                 html.set_onbeforeinput(Some(
                     self.beforeinput.as_ref().unwrap().as_ref().unchecked_ref(),
                 ))
+            },
+            TOKEN,
+        );
+    }
+
+    pub fn set_oninput<E: WithElement, F: Fn(InputEventHandle) + 'static>(
+        &mut self,
+        elem: &mut E,
+        handler: F,
+    ) where
+        E::Element: AsRef<HtmlElement>,
+    {
+        self.input = Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
+        elem.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_oninput(Some(self.input.as_ref().unwrap().as_ref().unchecked_ref()))
             },
             TOKEN,
         );
@@ -213,6 +234,7 @@ where
 
 pub trait ControlHandlers {
     fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
+    fn set_oninput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
     fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F);
 }
 
@@ -221,38 +243,14 @@ where
     T::Element: AsRef<HtmlElement>,
 {
     fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F) {
-        self.handlers.beforeinput = Some(Closure::new(move |ev| handler(InputEventHandle(ev))));
-        self.component.with_element(
-            |elem| {
-                let html: &HtmlElement = elem.as_ref();
-                html.set_onbeforeinput(Some(
-                    self.handlers
-                        .beforeinput
-                        .as_ref()
-                        .unwrap()
-                        .as_ref()
-                        .unchecked_ref(),
-                ))
-            },
-            TOKEN,
-        );
+        self.handlers
+            .set_onbeforeinput(&mut self.component, handler);
+    }
+    fn set_oninput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F) {
+        self.handlers.set_oninput(&mut self.component, handler);
     }
     fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F) {
-        self.handlers.keydown = Some(Closure::new(handler));
-        self.component.with_element(
-            |elem| {
-                let html: &HtmlElement = elem.as_ref();
-                html.set_onkeydown(Some(
-                    self.handlers
-                        .keydown
-                        .as_ref()
-                        .unwrap()
-                        .as_ref()
-                        .unchecked_ref(),
-                ))
-            },
-            TOKEN,
-        );
+        self.handlers.set_onkeydown(&mut self.component, handler);
     }
 }
 
@@ -365,6 +363,14 @@ impl<T: AnyElement> ElementHandle<T> {
         self.elem
             .element()
             .scroll_into_view_with_scroll_into_view_options(&opts);
+    }
+}
+
+impl ElementHandle<HtmlInputElement> {
+    delegate! {
+    to self.elem {
+        pub fn value_as_number(&self) -> f64;
+    }
     }
 }
 
@@ -520,22 +526,6 @@ impl ElementFactory {
 
     pub fn canvas(&self) -> ElementHandle<web_sys::HtmlCanvasElement> {
         ElementHandle::new(self.create_element("canvas"))
-    }
-}
-
-impl ElementHandle<web_sys::HtmlInputElement> {
-    pub fn set_oninput<F>(&mut self, handler: F)
-    where
-        F: 'static + FnMut(web_sys::Event),
-    {
-        let closure = Closure::wrap(Box::new(handler) as Box<dyn FnMut(web_sys::Event)>);
-        self.with_element(
-            |elem| {
-                elem.set_oninput(Some(closure.as_ref().unchecked_ref()));
-            },
-            TOKEN,
-        );
-        closure.forget();
     }
 }
 
