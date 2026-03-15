@@ -28,19 +28,17 @@ use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
     ops::Deref,
-    rc::{Rc, Weak},
+    rc::Rc,
 };
-use wasm_bindgen::{JsCast, JsValue};
-use web_sys::{HtmlDivElement, HtmlInputElement, console::log_1};
+use wasm_bindgen::JsValue;
+use web_sys::{HtmlDivElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
+type Slider = ReactiveComponent<ElementHandle<web_sys::HtmlInputElement>>;
 type ComponentType = DomStruct<
     (
         DomImage,
-        (
-            ReactiveComponent<TextType>,
-            (ElementHandle<HtmlInputElement>, (DomCanvas, ())),
-        ),
+        (ReactiveComponent<TextType>, (Slider, (DomCanvas, ()))),
     ),
     HtmlDivElement,
 >;
@@ -74,12 +72,6 @@ struct _Editor {
 
 pub struct Editor(Rc<RefCell<_Editor>>);
 
-impl Clone for Editor {
-    fn clone(&self) -> Self {
-        Editor(Rc::clone(&self.0))
-    }
-}
-
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
         let inner = _Editor {
@@ -88,7 +80,10 @@ impl Editor {
                     DomImage::new(factory.clone()),
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
-                        ((factory.input()), (DomCanvas::new(factory.canvas()), ())),
+                        (
+                            (Slider::new(factory.input())),
+                            (DomCanvas::new(factory.canvas()), ()),
+                        ),
                     ),
                 ),
                 factory.div(),
@@ -129,11 +124,21 @@ impl Editor {
             });
         }
         {
-            let mut binding = ret.0.borrow_mut();
-            let slider = &mut binding.component.get_mut().1.1.0;
-            ret.setup_slider(Rc::downgrade(&ret.0), slider);
+            let editor_ref = Rc::clone(&ret.0);
+            ret.slider_mut().set_oninput(move |_| {
+                let editor = Editor(editor_ref.clone());
+                let step = editor.slider().inner().value_as_number().round() as usize;
+                editor.build_program_state(step);
+            });
         }
+
         ret.image_mut().set_attribute("class", "annotations");
+        ret.slider_mut().inner_mut().set_attribute("type", "range");
+        ret.slider_mut().inner_mut().set_attribute("min", "0");
+        ret.slider_mut().inner_mut().set_value_as_number(0f64);
+        ret.slider_mut()
+            .inner_mut()
+            .set_attribute("class", "step-slider");
 
         // Restore from localStorage, or use default content
         if let Some(storage) = StorageHandle::new()
@@ -498,7 +503,7 @@ impl Editor {
         Ok((line_idx, self.line(line_idx).get_position(node, offset)?))
     }
 
-    // Accessors for the component and for a particular line of code
+    // Accessors
     fn textbox(&self) -> Ref<'_, ReactiveComponent<TextType>> {
         Ref::map(self.0.borrow(), |c| &c.component.get().1.0)
     }
@@ -525,6 +530,22 @@ impl Editor {
 
     fn line_mut(&mut self, idx: usize) -> RefMut<'_, CodeLine> {
         RefMut::map(self.text_mut(), |c| &mut c[idx])
+    }
+
+    fn program_state(&self) -> Ref<'_, ProgramState> {
+        Ref::map(self.0.borrow(), |c| &c.program_state)
+    }
+
+    fn program_state_mut(&self) -> RefMut<'_, ProgramState> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.program_state)
+    }
+
+    fn slider(&self) -> Ref<'_, Slider> {
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
+    }
+
+    fn slider_mut(&self) -> RefMut<'_, Slider> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
     }
 
     // get the user-entered text buffer (doesn't include synthetic Wasm)
@@ -665,62 +686,18 @@ impl Editor {
             }
             let _ = run_binary(&binary, &args).await;
             // Update slider
-            let step = {
-                let mut inner = editor_handle.0.borrow_mut();
-                inner
-                    .component
-                    .get_mut()
-                    .1
-                    .1
-                    .0
-                    .set_attribute("max", &(last_step() + 1).to_string());
-                let step = inner.program_state.step_number;
-                inner.program_state = ProgramState::default();
-                inner.saved_states = Vec::new();
-                step
-            };
-            editor_handle.build_program_state(0, step);
+            editor_handle
+                .slider_mut()
+                .inner_mut()
+                .set_attribute("max", &(last_step() + 1).to_string());
+            editor_handle
+                .slider_mut()
+                .inner_mut()
+                .set_value_as_number((last_step() + 1) as f64);
+            *editor_handle.program_state_mut() = ProgramState::default();
+            editor_handle.0.borrow_mut().saved_states = Vec::new();
+            editor_handle.build_program_state(last_step() + 1);
         });
-    }
-
-    fn setup_slider(
-        &self,
-        editor: Weak<RefCell<_Editor>>,
-        slider: &mut ElementHandle<HtmlInputElement>,
-    ) {
-        slider.set_attribute("type", "range");
-        slider.set_attribute("min", "0");
-        slider.set_attribute("value", "0");
-        slider.set_attribute("class", "step-slider");
-
-        // Slider closure for updating program state.
-        slider.set_oninput(move |event: web_sys::Event| {
-            if let Some(input) = event
-                .target()
-                .and_then(|t| t.dyn_into::<web_sys::HtmlInputElement>().ok())
-            {
-                let value = input.value().parse::<usize>().unwrap_or(0);
-                if let Some(rc) = editor.upgrade() {
-                    Editor(rc).slider_change(value);
-                }
-            }
-        });
-    }
-
-    fn slider_change(&self, slider_step: usize) {
-        let program_step = {
-            let mut inner = self.0.borrow_mut();
-            if inner.program_state.step_number == slider_step {
-                return;
-            }
-            // For backwards steps, reset program state
-            if slider_step < inner.program_state.step_number {
-                inner.program_state = ProgramState::default();
-            }
-            inner.program_state.step_number
-        };
-        // Reconstruct up to slider_step
-        self.build_program_state(program_step, slider_step);
     }
 
     fn valtype_default_editor(ty: &wasmparser::ValType) -> WebAssemblyTypes {
@@ -772,11 +749,16 @@ impl Editor {
         self.0.borrow_mut().function_locals = function_locals;
     }
 
-    fn build_program_state(&self, start: usize, stop: usize) {
+    fn build_program_state(&self, stop: usize) {
         let mut actions: Vec<Action> = Vec::new();
+        // For backwards steps, reset program state
+        if stop < self.program_state().step_number {
+            *self.program_state_mut() = ProgramState::default();
+        }
+        let start = self.program_state().step_number;
         let mut inner = self.0.borrow_mut();
         let line_count = inner.component.get().1.0.inner().len();
-        inner.saved_states.resize_with(line_count, || None);
+        inner.saved_states.resize(line_count, None);
         if start == 0 {
             inner.program_state.globals_state = inner.globals.clone();
             if let Some((first_start, _first_end)) = inner.function_ranges.first().cloned() {
