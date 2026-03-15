@@ -72,12 +72,6 @@ struct _Editor {
 
 pub struct Editor(Rc<RefCell<_Editor>>);
 
-impl Clone for Editor {
-    fn clone(&self) -> Self {
-        Editor(Rc::clone(&self.0))
-    }
-}
-
 impl Editor {
     pub fn new(factory: ElementFactory) -> Self {
         let inner = _Editor {
