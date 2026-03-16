@@ -7,7 +7,8 @@ use wasm_encoder::{
 };
 use wasm_tools::parse_binary_wasm;
 use wasmparser::{
-    FuncValidator, HeapType, Operator, ValType, ValidPayload, Validator, WasmModuleResources,
+    FuncValidator, Global, GlobalType, HeapType, Operator, ValType, ValidPayload, Validator,
+    WasmModuleResources,
 };
 use wast::{
     core::Module,
@@ -646,7 +647,7 @@ impl<'a> RawModule<'a> {
 
 #[derive(Default)]
 struct SimulatedStack {
-    idx_stack: Vec<(usize, usize)>,
+    slot_idx_stack: Vec<usize>,
 }
 
 // Opcodes that make the rest of the frame unreachable and pop all accessible operands.
@@ -670,9 +671,9 @@ impl SimulatedStack {
         &mut self,
         op: &Operator<'_>,
         validator: &mut wasmparser::FuncValidator<wasmparser::ValidatorResources>,
-        line_idx: usize,
+        slot_idx_counter: &mut usize,
         untyped: bool,
-    ) -> Result<CodillonType> {
+    ) -> Result<OperatorType> {
         let (pop_count, push_count) = op
             .operator_arity(&validator.visitor(DUMMY_OFFSET))
             .expect("arity");
@@ -693,19 +694,19 @@ impl SimulatedStack {
                 if untyped || (pop_count - i - 1) >= accessible_operands {
                     None
                 } else {
-                    Some(InputType {
-                        instr_type: validator
+                    Some(Slot {
+                        ty: validator
                             .get_operand_type(pop_count - i - 1)
                             .flatten()
                             .unwrap(),
-                        origin: self.idx_stack[pre_instr_height + i - pop_count],
+                        idx: self.slot_idx_stack[pre_instr_height + i - pop_count],
                     })
                 }
             })
             .collect::<Vec<_>>();
 
         for _ in 0..std::cmp::min(pop_count, accessible_operands) {
-            self.idx_stack.pop();
+            self.slot_idx_stack.pop();
         }
 
         validator.op(DUMMY_OFFSET, op)?;
@@ -721,29 +722,50 @@ impl SimulatedStack {
 
         let outputs = (0..push_count)
             .map(|i| {
-                self.idx_stack.push((line_idx, i));
-                validator
-                    .get_operand_type(push_count - i - 1)
-                    .flatten()
-                    .expect("result operand")
+                let new_slot_idx = *slot_idx_counter + i; // new slot created by this pushed operand
+                self.slot_idx_stack.push(new_slot_idx);
+                Slot {
+                    ty: validator
+                        .get_operand_type(push_count - i - 1)
+                        .flatten()
+                        .expect("result operand"),
+                    idx: new_slot_idx,
+                }
             })
             .collect::<Vec<_>>();
 
-        Ok(CodillonType { inputs, outputs })
+        *slot_idx_counter += push_count;
+
+        Ok(OperatorType { inputs, outputs })
     }
 }
 
 impl<'a> ValidModule<'a> {
     /// Computes the param and result types for each operator in the module.
     ///
-    pub fn to_types_table(&self, wasm_bin: &[u8]) -> Result<TypesTable> {
+    pub fn to_types_table(&self, wasm_bin: &[u8]) -> Result<TypedModule> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = Validator::new();
-        let mut ret = TypesTable {
-            functions: Vec::with_capacity(self.functions.len()),
+        let mut ret = TypedModule {
+            globals: Vec::with_capacity(self.globals.len()),
+            funcs: Vec::with_capacity(self.functions.len()),
         };
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
         let mut function_index = 0;
+
+        let mut slot_idx_counter = 0;
+
+        for Global {
+            ty: GlobalType { content_type, .. },
+            ..
+        } in &self.globals
+        {
+            ret.globals.push(Slot {
+                ty: *content_type,
+                idx: slot_idx_counter,
+            });
+            slot_idx_counter += 1;
+        }
 
         for payload in parser.parse_all(wasm_bin) {
             if let ValidPayload::Func(func, _) = validator.payload(&payload?)? {
@@ -751,8 +773,9 @@ impl<'a> ValidModule<'a> {
                 let types = Self::function_into_types_table(
                     &mut validator,
                     self.functions.get(function_index).unwrap(),
+                    &mut slot_idx_counter,
                 )?;
-                ret.functions.push(types);
+                ret.funcs.push(types);
                 allocs = validator.into_allocations();
                 function_index += 1;
             }
@@ -763,26 +786,37 @@ impl<'a> ValidModule<'a> {
     fn function_into_types_table(
         func_validator: &mut wasmparser::FuncValidator<wasmparser::ValidatorResources>,
         valid_func: &ValidFunction<'_>,
+        slot_idx_counter: &mut usize,
     ) -> Result<TypedFunction> {
         let mut stack = SimulatedStack::default();
-        let mut types = Vec::with_capacity(valid_func.operators.len());
+
+        let mut ret = TypedFunction {
+            locals: Vec::with_capacity(valid_func.locals.len()),
+            ops: Vec::with_capacity(valid_func.operators.len()),
+        };
 
         for (count, ty) in &valid_func.locals {
             func_validator.define_locals(DUMMY_OFFSET, *count, *ty)?;
+            ret.locals.push(Slot {
+                ty: *ty,
+                idx: *slot_idx_counter,
+            });
+            *slot_idx_counter += 1;
         }
 
         for op in &valid_func.operators {
             for pre in &op.op.prepended {
-                stack.op(pre, func_validator, op.line_idx, false)?;
+                stack.op(pre, func_validator, slot_idx_counter, false)?;
             }
 
-            types.push(stack.op(&op.op.op, func_validator, op.line_idx, op.op.untyped)?);
+            ret.ops
+                .push(stack.op(&op.op.op, func_validator, slot_idx_counter, op.op.untyped)?);
         }
 
-        Ok(TypedFunction { types })
+        Ok(ret)
     }
 
-    fn classify(operation: &wasmparser::Operator, op_type: &CodillonType) -> InstrumentationFuncs {
+    fn classify(operation: &wasmparser::Operator, op_type: &OperatorType) -> InstrumentationFuncs {
         use wasmparser::Operator::*;
         match operation {
             // Special Functions
@@ -790,21 +824,17 @@ impl<'a> ValidModule<'a> {
             LocalSet { local_index } | LocalTee { local_index } => {
                 match op_type.inputs.first().expect("local op type") {
                     Some(ty) => match ty {
-                        InputType {
-                            instr_type: ValType::I32,
-                            ..
+                        Slot {
+                            ty: ValType::I32, ..
                         } => SetLocalI32(*local_index),
-                        InputType {
-                            instr_type: ValType::F32,
-                            ..
+                        Slot {
+                            ty: ValType::F32, ..
                         } => SetLocalF32(*local_index),
-                        InputType {
-                            instr_type: ValType::I64,
-                            ..
+                        Slot {
+                            ty: ValType::I64, ..
                         } => SetLocalI64(*local_index),
-                        InputType {
-                            instr_type: ValType::F64,
-                            ..
+                        Slot {
+                            ty: ValType::F64, ..
                         } => SetLocalF64(*local_index),
                         _ => Other,
                     },
@@ -813,21 +843,17 @@ impl<'a> ValidModule<'a> {
             }
             GlobalSet { global_index } => match op_type.inputs.first().expect("global op type") {
                 Some(ty) => match ty {
-                    InputType {
-                        instr_type: ValType::I32,
-                        ..
+                    Slot {
+                        ty: ValType::I32, ..
                     } => SetGlobalI32(*global_index),
-                    InputType {
-                        instr_type: ValType::F32,
-                        ..
+                    Slot {
+                        ty: ValType::F32, ..
                     } => SetGlobalF32(*global_index),
-                    InputType {
-                        instr_type: ValType::I64,
-                        ..
+                    Slot {
+                        ty: ValType::I64, ..
                     } => SetGlobalI64(*global_index),
-                    InputType {
-                        instr_type: ValType::F64,
-                        ..
+                    Slot {
+                        ty: ValType::F64, ..
                     } => SetGlobalF64(*global_index),
                     _ => Other,
                 },
@@ -917,7 +943,7 @@ impl<'a> ValidModule<'a> {
 
     pub fn build_executable_binary(
         &self,
-        types: &TypesTable,
+        types: &TypedModule,
         function_ranges: &[(usize, usize)],
     ) -> Result<Vec<u8>> {
         let mut module: wasm_encoder::Module = Default::default();
@@ -933,18 +959,19 @@ impl<'a> ValidModule<'a> {
         let mut dynamic_func_idx = InstrImports::TYPE_INDICES.len()
             + self.num_func_imports as usize
             + self.functions.len();
-        for func in &types.functions {
-            for CodillonType { outputs, .. } in &func.types {
-                if !outputs.is_empty() && !types_map.contains_key(outputs) {
+        for func in &types.funcs {
+            for OperatorType { outputs, .. } in &func.ops {
+                let results = outputs.iter().map(|ty| ty.ty).collect::<Vec<_>>();
+                if !results.is_empty() && !types_map.contains_key(&results) {
                     let mut outputs_params =
-                        outputs.iter().map(parser_to_encoder).collect::<Vec<_>>();
+                        results.iter().map(parser_to_encoder).collect::<Vec<_>>();
                     outputs_params.append(&mut vec![EncoderValType::I32; outputs.len()]);
                     type_section.ty().function(
                         outputs_params,
-                        outputs.iter().map(parser_to_encoder).collect::<Vec<_>>(),
+                        results.iter().map(parser_to_encoder).collect::<Vec<_>>(),
                     );
                     function_section.function(dynamic_type_idx);
-                    types_map.insert(outputs.clone(), dynamic_func_idx);
+                    types_map.insert(results.clone(), dynamic_func_idx);
                     // The type and function indices of the dynamically generated functions
                     // They are incremented after being encoded in the TypeSection and FunctionSection, and they have different initial offsets
                     dynamic_type_idx += 1;
@@ -987,10 +1014,10 @@ impl<'a> ValidModule<'a> {
         &self,
         func_idx: usize,
         codes: &mut CodeSection,
-        types: &TypesTable,
+        types: &TypedModule,
         types_map: &IndexMap<Vec<ValType>, usize>,
         start_line: usize,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<()> {
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
         let function = self.functions.get(func_idx).expect("valid func idx");
         let mut f = wasm_encoder::Function::new(
@@ -1027,7 +1054,7 @@ impl<'a> ValidModule<'a> {
 
             let line_idx = codillon_instruction.line_idx as i32;
             let instruction = RoundtripReencoder.instruction(codillon_instruction.op.op.clone())?;
-            let value_type = &types.functions.get(func_idx).unwrap().types[i];
+            let value_type = &types.funcs.get(func_idx).unwrap().ops[i];
             let operation_type = Self::classify(&codillon_instruction.op.op, value_type);
 
             if !codillon_instruction.op.prepended.is_empty() {
@@ -1042,7 +1069,12 @@ impl<'a> ValidModule<'a> {
             if codillon_instruction.op.op == Operator::End {
                 // Call dynamically generated type to record return values
                 if !value_type.outputs.is_empty() {
-                    record(&mut f, &value_type.outputs);
+                    let results = value_type
+                        .outputs
+                        .iter()
+                        .map(|ty| ty.ty)
+                        .collect::<Vec<_>>(); // XXX provide slot indices for recording properly
+                    record(&mut f, &results);
                 }
                 f.instruction(&instruction);
                 continue;
@@ -1062,7 +1094,12 @@ impl<'a> ValidModule<'a> {
                 if let Other = operation_type
                     && !value_type.outputs.is_empty()
                 {
-                    record(&mut f, &value_type.outputs);
+                    let results = value_type
+                        .outputs
+                        .iter()
+                        .map(|ty| ty.ty)
+                        .collect::<Vec<_>>(); // XXX provide slot indices for recording properly
+                    record(&mut f, &results);
                 }
             }
 
@@ -1238,26 +1275,29 @@ fn parser_to_encoder(value: &wasmparser::ValType) -> EncoderValType {
     }
 }
 
+// Slot represents anywhere that a value can go, e.g. a global, local, or stack operand.
 #[derive(Debug, PartialEq, Eq)]
-pub struct InputType {
-    pub instr_type: ValType,
-    pub origin: (usize, usize), // line index + push# within the line
+pub struct Slot {
+    pub ty: ValType,
+    pub idx: usize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct CodillonType {
-    pub inputs: Vec<Option<InputType>>,
-    pub outputs: Vec<ValType>,
+pub struct OperatorType {
+    pub inputs: Vec<Option<Slot>>,
+    pub outputs: Vec<Slot>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypedFunction {
-    pub types: Vec<CodillonType>,
+    pub locals: Vec<Slot>,
+    pub ops: Vec<OperatorType>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct TypesTable {
-    pub functions: Vec<TypedFunction>,
+pub struct TypedModule {
+    pub globals: Vec<Slot>,
+    pub funcs: Vec<TypedFunction>,
 }
 
 pub fn str_to_binary(mut txt: String) -> Result<Vec<u8>> {
@@ -1330,26 +1370,31 @@ pub(crate) mod tests {
     #[test]
     fn test_types_table() -> Result<()> {
         type CodillonInstruction<'a> = Aligned<Operator<'a>>;
+        use ValType::*;
 
-        fn ins(inputs: Vec<InputType>) -> CodillonType {
-            CodillonType {
+        fn ins(inputs: Vec<Slot>) -> OperatorType {
+            OperatorType {
                 inputs: inputs.into_iter().map(Some).collect(),
                 outputs: Vec::new(),
             }
         }
 
-        fn outs(outputs: Vec<ValType>) -> CodillonType {
-            CodillonType {
+        fn outs(outputs: Vec<Slot>) -> OperatorType {
+            OperatorType {
                 inputs: Vec::new(),
                 outputs,
             }
         }
 
-        fn inout(inputs: Vec<InputType>, outputs: Vec<ValType>) -> CodillonType {
-            CodillonType {
+        fn inout(inputs: Vec<Slot>, outputs: Vec<Slot>) -> OperatorType {
+            OperatorType {
                 inputs: inputs.into_iter().map(Some).collect(),
                 outputs,
             }
+        }
+
+        fn slot(ty: ValType, idx: usize) -> Slot {
+            Slot { ty, idx }
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
@@ -1378,48 +1423,20 @@ pub(crate) mod tests {
         }
 
         //block instruction with params and results
-        let output = TypesTable {
-            functions: vec![TypedFunction {
-                types: vec![
-                    outs(vec![ValType::I32]),
-                    outs(vec![ValType::I32]),
+        let output = TypedModule {
+            globals: vec![],
+            funcs: vec![TypedFunction {
+                locals: vec![],
+                ops: vec![
+                    outs(vec![slot(I32, 0)]),
+                    outs(vec![slot(I32, 1)]),
                     inout(
-                        vec![
-                            InputType {
-                                instr_type: ValType::I32,
-                                origin: (0, 0),
-                            },
-                            InputType {
-                                instr_type: ValType::I32,
-                                origin: (1, 0),
-                            },
-                        ],
-                        vec![ValType::I32, ValType::I32],
+                        vec![slot(I32, 0), slot(I32, 1)],
+                        vec![slot(I32, 2), slot(I32, 3)],
                     ),
-                    inout(
-                        vec![
-                            InputType {
-                                instr_type: ValType::I32,
-                                origin: (2, 0),
-                            },
-                            InputType {
-                                instr_type: ValType::I32,
-                                origin: (2, 1),
-                            },
-                        ],
-                        vec![ValType::I32],
-                    ),
-                    inout(
-                        vec![InputType {
-                            instr_type: ValType::I32,
-                            origin: (3, 0),
-                        }],
-                        vec![ValType::I32],
-                    ),
-                    ins(vec![InputType {
-                        instr_type: ValType::I32,
-                        origin: (4, 0),
-                    }]),
+                    inout(vec![slot(I32, 2), slot(I32, 3)], vec![slot(I32, 4)]),
+                    inout(vec![slot(I32, 4)], vec![slot(I32, 5)]),
+                    ins(vec![slot(I32, 5)]),
                     ins(vec![]),
                 ],
             }],
@@ -1476,31 +1493,18 @@ pub(crate) mod tests {
         );
 
         //if else with params and results
-        let output = TypesTable {
-            functions: vec![TypedFunction {
-                types: vec![
-                    outs(vec![ValType::I32]),
-                    ins(vec![InputType {
-                        instr_type: ValType::I32,
-                        origin: (0, 0),
-                    }]),
-                    outs(vec![ValType::I32]),
-                    ins(vec![InputType {
-                        instr_type: ValType::I32,
-                        origin: (2, 0),
-                    }]),
-                    outs(vec![ValType::I32]),
-                    inout(
-                        vec![InputType {
-                            instr_type: ValType::I32,
-                            origin: (4, 0),
-                        }],
-                        vec![ValType::I32],
-                    ),
-                    ins(vec![InputType {
-                        instr_type: ValType::I32,
-                        origin: (5, 0),
-                    }]),
+        let output = TypedModule {
+            globals: vec![],
+            funcs: vec![TypedFunction {
+                locals: vec![],
+                ops: vec![
+                    outs(vec![slot(I32, 0)]),
+                    ins(vec![slot(I32, 0)]),
+                    outs(vec![slot(I32, 1)]),
+                    ins(vec![slot(I32, 1)]),
+                    outs(vec![slot(I32, 2)]),
+                    inout(vec![slot(I32, 2)], vec![slot(I32, 3)]),
+                    ins(vec![slot(I32, 3)]),
                     ins(vec![]),
                 ],
             }],
@@ -1523,7 +1527,7 @@ pub(crate) mod tests {
                     },
                     CodillonInstruction {
                         op: Operator::If {
-                            blockty: BlockType::Type(ValType::I32),
+                            blockty: BlockType::Type(I32),
                         },
                         line_idx: 1,
                     },
@@ -1560,47 +1564,19 @@ pub(crate) mod tests {
         );
 
         //loop with param and return
-        let output = TypesTable {
-            functions: vec![TypedFunction {
-                types: vec![
-                    outs(vec![ValType::I32]),
-                    inout(
-                        vec![InputType {
-                            instr_type: ValType::I32,
-                            origin: (0, 0),
-                        }],
-                        vec![ValType::I32],
-                    ),
-                    outs(vec![ValType::I32]),
-                    inout(
-                        vec![
-                            InputType {
-                                instr_type: ValType::I32,
-                                origin: (1, 0),
-                            },
-                            InputType {
-                                instr_type: ValType::I32,
-                                origin: (2, 0),
-                            },
-                        ],
-                        vec![ValType::I32],
-                    ),
-                    ins(vec![InputType {
-                        instr_type: ValType::I32,
-                        origin: (3, 0),
-                    }]),
-                    outs(vec![ValType::I32]),
-                    inout(
-                        vec![InputType {
-                            instr_type: ValType::I32,
-                            origin: (5, 0),
-                        }],
-                        vec![ValType::I32],
-                    ),
-                    ins(vec![InputType {
-                        instr_type: ValType::I32,
-                        origin: (6, 0),
-                    }]),
+        let output = TypedModule {
+            globals: vec![],
+            funcs: vec![TypedFunction {
+                locals: vec![],
+                ops: vec![
+                    outs(vec![slot(I32, 0)]),
+                    inout(vec![slot(I32, 0)], vec![slot(I32, 1)]),
+                    outs(vec![slot(I32, 2)]),
+                    inout(vec![slot(I32, 1), slot(I32, 2)], vec![slot(I32, 3)]),
+                    ins(vec![slot(I32, 3)]),
+                    outs(vec![slot(I32, 4)]),
+                    inout(vec![slot(I32, 4)], vec![slot(I32, 5)]),
+                    ins(vec![slot(I32, 5)]),
                     ins(vec![]),
                 ],
             }],
@@ -1664,45 +1640,20 @@ pub(crate) mod tests {
         );
 
         //nested block and if
-        let output = TypesTable {
-            functions: vec![TypedFunction {
-                types: vec![
-                    outs(vec![ValType::I32]),
-                    inout(
-                        vec![InputType {
-                            instr_type: ValType::I32,
-                            origin: (0, 0),
-                        }],
-                        vec![ValType::I32],
-                    ),
-                    ins(vec![InputType {
-                        instr_type: ValType::I32,
-                        origin: (1, 0),
-                    }]),
-                    outs(vec![ValType::I32]),
-                    ins(vec![InputType {
-                        instr_type: ValType::I32,
-                        origin: (3, 0),
-                    }]),
-                    outs(vec![ValType::I32]),
-                    inout(
-                        vec![InputType {
-                            instr_type: ValType::I32,
-                            origin: (5, 0),
-                        }],
-                        vec![ValType::I32],
-                    ),
-                    inout(
-                        vec![InputType {
-                            instr_type: ValType::I32,
-                            origin: (6, 0),
-                        }],
-                        vec![ValType::I32],
-                    ),
-                    ins(vec![InputType {
-                        instr_type: ValType::I32,
-                        origin: (7, 0),
-                    }]),
+        let output = TypedModule {
+            globals: vec![],
+            funcs: vec![TypedFunction {
+                locals: vec![],
+                ops: vec![
+                    outs(vec![slot(I32, 0)]),
+                    inout(vec![slot(I32, 0)], vec![slot(I32, 1)]),
+                    ins(vec![slot(I32, 1)]),
+                    outs(vec![slot(I32, 2)]),
+                    ins(vec![slot(I32, 2)]),
+                    outs(vec![slot(I32, 3)]),
+                    inout(vec![slot(I32, 3)], vec![slot(I32, 4)]),
+                    inout(vec![slot(I32, 4)], vec![slot(I32, 5)]),
+                    ins(vec![slot(I32, 5)]),
                     ins(vec![]),
                 ],
             }],
@@ -1731,7 +1682,7 @@ pub(crate) mod tests {
                     },
                     CodillonInstruction {
                         op: Operator::If {
-                            blockty: BlockType::Type(ValType::I32),
+                            blockty: BlockType::Type(I32),
                         },
                         line_idx: 2,
                     },
@@ -1772,9 +1723,11 @@ pub(crate) mod tests {
         );
 
         //empty block
-        let output = TypesTable {
-            functions: vec![TypedFunction {
-                types: vec![ins(vec![]), ins(vec![]), ins(vec![])],
+        let output = TypedModule {
+            globals: vec![],
+            funcs: vec![TypedFunction {
+                locals: vec![],
+                ops: vec![ins(vec![]), ins(vec![]), ins(vec![])],
             }],
         };
         let lines = "block\nend";
@@ -1832,8 +1785,13 @@ pub(crate) mod tests {
             num_func_imports: 0,
         };
         let function_ranges: Vec<(usize, usize)> = Vec::new();
-        let wasm_bin = valid_module
-            .build_executable_binary(&TypesTable { functions: vec![] }, &function_ranges)?;
+        let wasm_bin = valid_module.build_executable_binary(
+            &TypedModule {
+                globals: vec![],
+                funcs: vec![],
+            },
+            &function_ranges,
+        )?;
         let mem_payload = wasmparser::Parser::new(0)
             .parse_all(&wasm_bin)
             .nth(4)
