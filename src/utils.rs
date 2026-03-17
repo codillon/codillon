@@ -8,7 +8,7 @@ use wasm_encoder::{
 use wasm_tools::parse_binary_wasm;
 use wasmparser::{
     FuncValidator, Global, GlobalType, HeapType, Operator, ValType, ValidPayload, Validator,
-    WasmModuleResources,
+    WasmFeatures, WasmModuleResources,
 };
 use wast::{
     core::Module,
@@ -210,6 +210,22 @@ impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
 
 const DUMMY_OFFSET: usize = 1; // no need to track offsets, but validator has safety checks against 0
 
+// current features (notable exceptions: SIMD, GC, function references, exceptions)
+const CODILLON_WASM_FEATURES: WasmFeatures = WasmFeatures::WASM1
+    .union(WasmFeatures::BULK_MEMORY)
+    .union(WasmFeatures::REFERENCE_TYPES)
+    .union(WasmFeatures::SIGN_EXTENSION)
+    .union(WasmFeatures::SATURATING_FLOAT_TO_INT)
+    .union(WasmFeatures::MULTI_VALUE)
+    .union(WasmFeatures::CUSTOM_PAGE_SIZES)
+    .union(WasmFeatures::EXTENDED_CONST)
+    .union(WasmFeatures::MEMORY64)
+    .union(WasmFeatures::MULTI_MEMORY)
+    .union(WasmFeatures::RELAXED_SIMD)
+    .union(WasmFeatures::TAIL_CALL)
+    .union(WasmFeatures::THREADS)
+    .union(WasmFeatures::WIDE_ARITHMETIC);
+
 impl<'a> RawModule<'a> {
     pub fn new(
         editor: &impl LineInfos,
@@ -319,7 +335,7 @@ impl<'a> RawModule<'a> {
         import_lines: &[usize],
     ) -> Result<ValidModule<'a>> {
         let parser = wasmparser::Parser::new(0);
-        let mut validator = Validator::new();
+        let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
         let (imports, num_func_imports) = self.instr_imports(import_lines, editor);
 
@@ -745,7 +761,7 @@ impl<'a> ValidModule<'a> {
     ///
     pub fn to_types_table(&self, wasm_bin: &[u8]) -> Result<TypedModule> {
         let parser = wasmparser::Parser::new(0);
-        let mut validator = Validator::new();
+        let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
         let mut ret = TypedModule {
             globals: Vec::with_capacity(self.globals.len()),
             funcs: Vec::with_capacity(self.functions.len()),
