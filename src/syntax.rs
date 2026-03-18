@@ -199,7 +199,24 @@ impl<'a> Parse<'a> for ModulePart {
         } else if parser.peek::<InlineImport>()? {
             Ok(parser.parse::<InlineImport<'a>>()?.into())
         } else if parser.peek2::<kw::import>()? {
-            parser.parens(|p| Ok(p.parse::<Imports<'a>>()?.into()))
+            parser.parens(|p| {
+                let imports = p.parse::<Imports<'a>>()?;
+                match imports {
+                    Imports {
+                        items:
+                            wast::core::ImportItems::Single {
+                                sig:
+                                    wast::core::ItemSig {
+                                        kind: wast::core::ItemKind::Func { .. },
+                                        ..
+                                    },
+                                ..
+                            },
+                        ..
+                    } => Ok(imports.into()),
+                    _ => Err(parser.error("unsupported import kind")),
+                }
+            })
         } else if parser.peek2::<kw::param>()? {
             // Modified from FunctionType parser
             parser.parens(|p| {
@@ -231,19 +248,28 @@ impl<'a> Parse<'a> for ModulePart {
             // Modified from Local parse_remainder
             parser.parens(|_| Ok(parser.parse::<LocalParser<'a>>()?.into()))
         } else if parser.peek2::<kw::memory>()? {
-            parser.parens(|p| {
-                p.parse::<Memory<'a>>()?;
-                Ok(ModulePart::Memory)
+            parser.parens(|p| match p.parse::<Memory<'a>>()? {
+                Memory {
+                    kind: wast::core::MemoryKind::Import { .. },
+                    ..
+                } => Err(parser.error("unsupported import kind")),
+                _ => Ok(ModulePart::Memory),
             })
         } else if parser.peek2::<kw::table>()? {
-            parser.parens(|p| {
-                p.parse::<Table<'a>>()?;
-                Ok(ModulePart::Table)
+            parser.parens(|p| match p.parse::<Table<'a>>()? {
+                Table {
+                    kind: wast::core::TableKind::Import { .. },
+                    ..
+                } => Err(parser.error("unsupported import kind")),
+                _ => Ok(ModulePart::Table),
             })
         } else if parser.peek2::<kw::global>()? {
-            parser.parens(|p| {
-                p.parse::<Global<'a>>()?;
-                Ok(ModulePart::Global)
+            parser.parens(|p| match p.parse::<Global<'a>>()? {
+                Global {
+                    kind: wast::core::GlobalKind::Import { .. },
+                    ..
+                } => Err(parser.error("unsupported import kind")),
+                _ => Ok(ModulePart::Global),
             })
         } else if parser.step(|cursor| match cursor.lparen()? {
             Some(rest) => Ok((true, rest)),

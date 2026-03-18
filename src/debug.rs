@@ -58,6 +58,7 @@ pub enum TerminationType {
     Running,
     TooManySteps,
     HitInvalid(u32),
+    HitBadImport,
     Error(String),
     Success,
 }
@@ -111,6 +112,7 @@ fn make_imports() -> Result<Object, JsValue> {
 
     // Updating the debug state at every step. Returns whether execution should continue.
     let step_closure = Closure::wrap(Box::new(move |line_num: u32| -> bool {
+        use TerminationType::*;
         STATE.with_borrow_mut(|state| {
             state.current_step.line_idx = line_num;
 
@@ -118,21 +120,35 @@ fn make_imports() -> Result<Object, JsValue> {
                 .completed_steps
                 .push(std::mem::take(&mut state.current_step));
 
+            match state.termination {
+                Running => (),
+                TooManySteps => panic!("execution unexpectedly continued after TooManySteps"),
+                HitInvalid(_) => panic!("execution unexpectedly continued after HitInvalid"),
+                HitBadImport => return false,
+                Error(..) => panic!("execution unexpectedly continued after Error"),
+                Success => panic!("execution unexpectedly continued after Success"),
+            }
+
             // Signal halt
             if state.completed_steps.len() >= MAX_STEP_COUNT {
                 state.termination = TerminationType::TooManySteps;
-                false
-            } else {
-                true
+                return false;
             }
+
+            true
         })
     }) as Box<dyn Fn(u32) -> bool>);
     register_closure(&debug_numbers, "record_step", step_closure);
 
     let record_invalid = Closure::wrap(Box::new(move |line_num: u32| {
-        STATE.with_borrow_mut(|state| state.termination = TerminationType::HitInvalid(line_num));
+        STATE.with_borrow_mut(|state| state.termination = TerminationType::HitInvalid(line_num))
     }) as Box<dyn Fn(u32)>);
     register_closure(&debug_numbers, "record_invalid", record_invalid);
+
+    let func_placeholder = Closure::wrap(Box::new(move || {
+        STATE.with_borrow_mut(|state| state.termination = TerminationType::HitBadImport)
+    }) as Box<dyn Fn()>);
+    register_closure(&debug_numbers, "func_placeholder", func_placeholder);
 
     create_closure_record_operations(&debug_numbers);
 
@@ -226,8 +242,9 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
                         TerminationType::Running => state.termination = TerminationType::Success,
                         TerminationType::TooManySteps
                         | TerminationType::HitInvalid(_)
+                        | TerminationType::HitBadImport
                         | TerminationType::Success
-                        | TerminationType::Error(_) => {
+                        | TerminationType::Error(..) => {
                             unreachable!("success after other result");
                         }
                     });
@@ -243,9 +260,10 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
                             TerminationType::Running => {
                                 state.termination = TerminationType::Error(reason)
                             }
-                            TerminationType::HitInvalid(_) => {} // error is expected
-                            TerminationType::TooManySteps => {}
-                            TerminationType::Success | TerminationType::Error(_) => {
+                            TerminationType::HitInvalid(_)
+                            | TerminationType::HitBadImport
+                            | TerminationType::TooManySteps => {} // error is expected
+                            TerminationType::Success | TerminationType::Error(..) => {
                                 unreachable!("error after other result");
                             }
                         });
