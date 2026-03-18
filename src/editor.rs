@@ -14,8 +14,7 @@ use crate::{
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
         RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
-        compare_document_position, get_selection, now_ms, render_canvas,
-        set_selection_range,
+        compare_document_position, get_selection, now_ms, render_canvas, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
@@ -654,7 +653,10 @@ impl Editor {
                 .await
                 .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
             // Update slider
-            editor_handle.slider_mut().inner_mut().build_ticks(last_step() + 1);
+            editor_handle
+                .slider_mut()
+                .inner_mut()
+                .build_ticks(last_step() + 1);
             *editor_handle.program_state_mut() = ProgramState::default();
             editor_handle.0.borrow_mut().saved_states = Vec::new();
             editor_handle.build_program_state(last_step() + 1);

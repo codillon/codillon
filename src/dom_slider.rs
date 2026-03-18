@@ -2,9 +2,7 @@ use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
     dom_vec::DomVec,
-    jet::{
-        AccessToken, Component, ElementFactory, ElementHandle, WithElement,
-    },
+    jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement},
 };
 use web_sys::{HtmlDivElement, HtmlInputElement, HtmlSpanElement};
 
