@@ -273,3 +273,27 @@ span.debug[data-debug]::after {
     margin-left: auto;
     margin-right: auto;
 }
+
+.slider-ticks {
+    position: relative;
+    height: 40px;
+    margin: 0 10px;
+}
+
+.slider-tick {
+    position: absolute;
+    transform: translateX(-25%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    color: darkred;
+    font-size: 12pt;
+}
+
+.slider-tick::before {
+    content: '';
+    display: block;
+    width: 1px;
+    height: 10px;
+    background: darkred;
+}

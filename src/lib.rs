@@ -1,4 +1,5 @@
 pub mod dom_canvas;
+pub mod dom_slider;
 pub mod dom_struct;
 pub mod dom_text;
 pub mod dom_vec;
