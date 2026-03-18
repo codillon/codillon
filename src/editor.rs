@@ -11,8 +11,7 @@ use crate::{
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
         RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
-        compare_document_position, get_selection, now_ms,
-        set_selection_range,
+        compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
@@ -573,7 +572,10 @@ impl Editor {
                 .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
             let max_step = with_debug_state(|state| state.completed_steps.len()).saturating_sub(1);
             // Update slider
-            editor_handle.slider_mut().inner_mut().build_ticks(last_step() + 1);
+            editor_handle
+                .slider_mut()
+                .inner_mut()
+                .build_ticks(last_step() + 1);
 
             // print out steps for debugging
             // XXX: render in UI
