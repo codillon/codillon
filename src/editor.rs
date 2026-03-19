@@ -605,7 +605,7 @@ impl Editor {
     }
 
     fn execute(&self, binary: &[u8]) {
-        async fn run_binary(binary: &[u8], args: &js_sys::Array) -> Result<String> {
+        async fn run_binary(binary: &[u8], args: &js_sys::Array) -> Result<()> {
             use js_sys::{Function, Reflect};
             // Build import objects for the instrumented module.
             let imports = make_imports().fmt_err()?;
@@ -620,10 +620,15 @@ impl Editor {
                 Ok(main) => {
                     let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
                         .context("main is not an exported function")?;
-                    let res = main.apply(&JsValue::null(), args);
-                    res.map(|x| format!("{:?}", x)).fmt_err()
+                    match main.apply(&JsValue::null(), args) {
+                        Ok(val) if val.is_undefined() => Ok(()),
+                        Ok(val) => {
+                            bail!("unhandled return value from function: {:?}", val)
+                        }
+                        Err(e) => bail!("execution failure: {:?}", e),
+                    }
                 }
-                Err(_) => Ok(String::new()),
+                Err(e) => bail!("reflection failure: {:?}", e),
             }
         }
         let binary = binary.to_vec();
@@ -647,7 +652,9 @@ impl Editor {
                 };
                 args.push(&js_val);
             }
-            let _ = run_binary(&binary, &args).await;
+            run_binary(&binary, &args)
+                .await
+                .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
             // Update slider
             editor_handle
                 .slider_mut()
