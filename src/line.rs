@@ -280,7 +280,7 @@ impl CodeLine {
         let prefix = if !self.info.is_active() {
             "line malformed-line"
         } else if self.info.invalid.is_some() {
-            "line instr-line invalid-line"
+            "line invalid-line"
         } else {
             match self.info.kind {
                 LineKind::Malformed(_) => "line malformed-line",
