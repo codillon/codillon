@@ -337,7 +337,7 @@ impl<'a> RawModule<'a> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
-        let (imports, num_func_imports) = self.instr_imports(import_lines, editor);
+        let (imports, num_func_imports, invalid_imports) = self.instr_imports(import_lines, editor);
 
         let mut ret = ValidModule {
             types: self.types,
@@ -374,6 +374,12 @@ impl<'a> RawModule<'a> {
                 };
 
                 for op in operators {
+                    if let Operator::Call { function_index } = op.op
+                        && invalid_imports.contains(&function_index)
+                    {
+                        editor.set_invalid(op.line_idx, Some("call to invalid import".to_string()));
+                        continue;
+                    }
                     match func_validator.try_op(DUMMY_OFFSET, &op.op) {
                         Ok(()) => valid_function.operators.push(op.into()),
                         Err(e) => {
@@ -596,7 +602,7 @@ impl<'a> RawModule<'a> {
         &self,
         import_lines: &[usize],
         editor: &mut impl LineInfosMut,
-    ) -> (wasm_encoder::ImportSection, u32) {
+    ) -> (wasm_encoder::ImportSection, u32, Vec<u32>) {
         use wasm_encoder::EntityType;
         use wasmparser::*;
         use web_sys::console::log_1;
@@ -606,16 +612,27 @@ impl<'a> RawModule<'a> {
             imports.import("codillon_debug", name, EntityType::Function(*type_idx));
         }
         let mut num_func_imports = 0;
+        let mut invalid_imports: Vec<u32> = Vec::new();
         for (import_idx, Import { module, name, ty }) in self.imports.iter().enumerate() {
             match *ty {
                 TypeRef::Func(type_idx) | TypeRef::FuncExact(type_idx) => {
-                    let reason = Self::check_import(module, name, &self.types[type_idx as usize]);
-                    editor.set_invalid(import_lines[import_idx], reason);
-                    imports.import(
-                        module,
-                        name,
-                        EntityType::Function(type_idx + InstrImports::FUNC_SIGS.len() as u32),
-                    );
+                    if let Some(reason) =
+                        Self::check_import(module, name, &self.types[type_idx as usize])
+                    {
+                        editor.set_invalid(import_lines[import_idx], Some(reason));
+                        imports.import(
+                            "codillon_debug",
+                            "invalid_import_placeholder",
+                            EntityType::Function(type_idx + InstrImports::FUNC_SIGS.len() as u32),
+                        );
+                        invalid_imports.push(num_func_imports);
+                    } else {
+                        imports.import(
+                            module,
+                            name,
+                            EntityType::Function(type_idx + InstrImports::FUNC_SIGS.len() as u32),
+                        );
+                    }
                     num_func_imports += 1;
                 }
                 TypeRef::Memory(MemoryType {
@@ -657,7 +674,7 @@ impl<'a> RawModule<'a> {
                 }
             };
         }
-        (imports, num_func_imports)
+        (imports, num_func_imports, invalid_imports)
     }
 }
 
@@ -1099,7 +1116,7 @@ impl<'a> ValidModule<'a> {
             }
 
             if let CallFunc(function_idx) = operation_type {
-                f.instruction(&Call(function_idx + num_instr_imports));
+                f.instruction(&Call(num_instr_imports + function_idx));
             } else {
                 // Instrumentation that needs to occur before execution
                 Self::instrument_memory_ops(&mut f, &operation_type);
@@ -2122,7 +2139,7 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
-            editor.push_line("(import \"hello\" \"goodbye\")");
+            editor.push_line("(import \"helpers\" \"clear_canvas\")");
             editor.push_line("i32.const 7");
             editor.push_line("i32.const 8");
             editor.push_line("i32.const 9");
@@ -2130,7 +2147,7 @@ pub(crate) mod tests {
             editor.push_line("(func)");
             let expected = String::from("(module\n")
                 + EXPECTED_FIELDS
-                + r#"  (import "hello" "goodbye" (func (;18;) (type 10)))
+                + r#"  (import "helpers" "clear_canvas" (func (;18;) (type 10)))
   (export "main" (func 19))
   (func (;19;) (type 10))
 )
@@ -2486,6 +2503,78 @@ pub(crate) mod tests {
             );
         }
 
+        //Test case 5: interleave valid and invalid imports
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"a\" \"b\" (func $fake_func1))");
+            editor.push_line("(import \"helpers\" \"clear_canvas\" (func $clear_canvas))");
+            editor.push_line("(import \"c\" \"d\" (func $fake_func2))");
+            editor.push_line(
+                "(import \"helpers\" \"draw_point\" (func $draw_point (param f64 f64)))",
+            );
+            editor.push_line("(import \"e\" \"f\" (func $fake_func3))");
+            editor.push_line("(func");
+            editor.push_line("call $fake_func1");
+            editor.push_line("f64.const 0");
+            editor.push_line("call $fake_func2");
+            editor.push_line("f64.const 0");
+            editor.push_line("call $fake_func3");
+            editor.push_line("call $draw_point");
+            editor.push_line("call $fake_func1");
+            editor.push_line("call $clear_canvas");
+            editor.push_line("call $fake_func2");
+            editor.push_line(")");
+            let _ = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                editor.lines[0]
+                    .info
+                    .invalid
+                    .as_ref()
+                    .expect("a/b should be invalid"),
+                "module a not found"
+            );
+            assert!(
+                editor.lines[1].info.invalid.is_none(),
+                "clear_canvas should be valid"
+            );
+            assert_eq!(
+                editor.lines[2]
+                    .info
+                    .invalid
+                    .as_ref()
+                    .expect("c/d should be invalid"),
+                "module c not found"
+            );
+            assert!(
+                editor.lines[3].info.invalid.is_none(),
+                "draw_point should be valid"
+            );
+            assert_eq!(
+                editor.lines[4]
+                    .info
+                    .invalid
+                    .as_ref()
+                    .expect("e/f should be invalid"),
+                "module e not found"
+            );
+            for i in 5..editor.len() {
+                if i % 2 == 0 {
+                    assert_eq!(
+                        editor.lines[i]
+                            .info
+                            .invalid
+                            .as_ref()
+                            .expect("invalid import test should be invalid"),
+                        "call to invalid import"
+                    );
+                } else {
+                    assert!(
+                        editor.lines[i].info.invalid.is_none(),
+                        "invalid import test line {i} should be invalid"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 }

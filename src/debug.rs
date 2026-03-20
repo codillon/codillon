@@ -152,6 +152,13 @@ pub fn make_imports() -> Result<Object, JsValue> {
     }) as Box<dyn Fn(i32)>);
     register_closure(&debug_numbers, "pop_i", pop_i);
 
+    let invalid_import_placeholder = Closure::wrap(Box::new(move || {}) as Box<dyn Fn()>);
+    register_closure(
+        &debug_numbers,
+        "invalid_import_placeholder",
+        invalid_import_placeholder,
+    );
+
     Reflect::set(
         &imports,
         &JsValue::from_str("codillon_debug"),
