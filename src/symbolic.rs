@@ -92,7 +92,7 @@ impl ModuleIdentifiers {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SymbolRef {
     name: String,
     space: IndexSpace,
@@ -107,7 +107,7 @@ impl SymbolRef {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct LineSymbols {
     defines: Vec<SymbolRef>,
     consumes: Vec<SymbolRef>,
