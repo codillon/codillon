@@ -1,29 +1,27 @@
 use crate::{
-    dom_struct::DomStruct,
-    dom_text::DomText,
     dom_vec::DomVec,
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement},
 };
-use web_sys::{HtmlDivElement, HtmlInputElement, HtmlSpanElement};
-
-type TickSpan = DomStruct<(DomText, ()), HtmlSpanElement>;
+use web_sys::{HtmlDataListElement, HtmlDivElement, HtmlInputElement, HtmlOptionElement};
 
 pub struct DomSlider {
     container: ElementHandle<HtmlDivElement>,
-    ticks: DomVec<TickSpan, HtmlDivElement>,
+    ticks: DomVec<ElementHandle<HtmlOptionElement>, HtmlDataListElement>,
     input: ElementHandle<HtmlInputElement>,
     factory: ElementFactory,
 }
 
 impl DomSlider {
     pub fn new(factory: ElementFactory) -> Self {
-        let container = factory.div();
-        let mut ticks = DomVec::new(factory.div());
+        let mut container = factory.div();
+        let mut ticks = DomVec::new(factory.datalist());
         let mut input = factory.input();
         input.set_attribute("type", "range");
         input.set_attribute("min", "0");
         input.set_attribute("class", "step-slider");
-        ticks.set_attribute("class", "slider-ticks");
+        input.set_attribute("list", "slider-ticks");
+        ticks.set_attribute("id", "slider-ticks");
+        container.set_attribute("class", "slider-container");
         container.append_node(&input);
         container.append_node(&ticks);
         Self {
@@ -59,15 +57,15 @@ impl DomSlider {
         self.input.set_attribute("max", &last_step.to_string());
         self.ticks.remove_range(0, self.ticks.len());
         let tick = |step: usize, pos: f64| {
-            let mut span = self.factory.span();
-            span.set_attribute("class", "slider-tick");
+            let mut option = self.factory.option();
+            option.set_attribute("value", &step.to_string());
+            option.set_attribute("label", &step.to_string());
             // percentage of width - portion of right margin (10 px)
-            span.set_attribute("style", &format!("left:calc({pos:.4}% - {pos:.0}px / 10)"));
-            DomStruct::new((DomText::new(&step.to_string()), ()), span)
+            option.set_attribute("style", &format!("left:calc({pos:.4}% - {pos:.0}px / 10)"));
+            option
         };
         // Always include step 0 and last_step
         self.ticks.push(tick(0, 0.0));
-        self.ticks.push(tick(last_step, 100.0));
         let interval = Self::tick_interval(last_step);
         let mut step = interval;
         while step < last_step - interval {
@@ -82,6 +80,7 @@ impl DomSlider {
             let pos = step as f64 / last_step as f64 * 100.0;
             self.ticks.push(tick(step, pos));
         }
+        self.ticks.push(tick(last_step, 100.0));
     }
 }
 

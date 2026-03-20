@@ -218,11 +218,18 @@ span.debug[data-debug]::after {
     transform: scaleY(0) translateX(0) translateY(0);
 }
 
+.graph-canvas {
+    background-color: #fff;
+    display: block; 
+    border: 1px solid darkred;
+    margin-left: auto;
+    margin-right: auto;
+}
+
 .step-slider {
-    appearance: none;
-    background: transparent;
     width: 100%;
     margin: 0;
+    accent-color: darkred;
     --slider-thumb-size: 20px;
     --slider-track-height: 10px;
     --slider-track-bg: linen;
@@ -257,6 +264,12 @@ span.debug[data-debug]::after {
     box-shadow: none;
 }
 
+.step-slider::-webkit-slider-thumb:hover,
+.step-slider::-webkit-slider-thumb:active {
+    background: var(--slider-thumb-bg);
+    color: var(--slider-thumb-bg);
+}
+
 .step-slider::-moz-range-thumb {
     width: var(--slider-thumb-size);
     height: var(--slider-thumb-size);
@@ -267,34 +280,22 @@ span.debug[data-debug]::after {
     box-shadow: none;
 }
 
-.graph-canvas {
-    background-color: #fff;
-    display: block; 
-    border: 1px solid darkred;
-    margin-left: auto;
-    margin-right: auto;
-}
-
-.slider-ticks {
-    position: relative;
-    height: 40px;
-    margin: 0 10px;
-}
-
-.slider-tick {
-    position: absolute;
-    transform: translateX(-25%);
+#slider-ticks {
     display: flex;
-    flex-direction: column;
+    position: relative;
+    height: 30px;
+    margin: 0 0 0 10px;
+}
+
+#slider-ticks option {
+    position: absolute;
+    transform: translateX(-50%);
+    display: flex;
     align-items: center;
     color: darkred;
     font-size: 12pt;
 }
 
-.slider-tick::before {
-    content: '';
-    display: block;
-    width: 1px;
-    height: 10px;
-    background: darkred;
+.slider-container {
+    margin: 0 20px;
 }
