@@ -245,13 +245,6 @@ span.debug[data-debug]::after {
     border: var(--slider-track-border);
 }
 
-.step-slider::-moz-range-track {
-    height: var(--slider-track-height);
-    border-radius: 10px;
-    background: var(--slider-track-bg);
-    border: var(--slider-track-border);
-}
-
 .step-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
     width: var(--slider-thumb-size);
@@ -264,22 +257,6 @@ span.debug[data-debug]::after {
     box-shadow: none;
 }
 
-.step-slider::-webkit-slider-thumb:hover,
-.step-slider::-webkit-slider-thumb:active {
-    background: var(--slider-thumb-bg);
-    color: var(--slider-thumb-bg);
-}
-
-.step-slider::-moz-range-thumb {
-    width: var(--slider-thumb-size);
-    height: var(--slider-thumb-size);
-    border-radius: 50%;
-    background: var(--slider-thumb-bg);
-    border: var(--slider-thumb-border);
-    cursor: pointer;
-    box-shadow: none;
-}
-
 #slider-ticks {
     display: flex;
     position: relative;
@@ -288,12 +265,12 @@ span.debug[data-debug]::after {
 }
 
 #slider-ticks option {
-    position: absolute;
     transform: translateX(-50%);
     display: flex;
     align-items: center;
     color: darkred;
     font-size: 12pt;
+    padding: 0;
 }
 
 .slider-container {
