@@ -60,17 +60,23 @@ impl DomSlider {
             let mut option = self.factory.option();
             option.set_attribute("value", &step.to_string());
             option.set_attribute("label", &step.to_string());
-            // percentage of width - portion of right margin (10 px)
-            option.set_attribute("style", &format!("left:calc({pos:.4}% - {pos:.0}px / 10)"));
+            let label_len = step.to_string().len() as f64;
+            // Negative margin-right to cancel out own width
+            option.set_attribute(
+                "style",
+                &format!("margin: 0 -{label_len}ch 0 calc({pos:.4}% - {pos:.0}px / 10)"),
+            );
             option
         };
         // Always include step 0 and last_step
         self.ticks.push(tick(0, 0.0));
         let interval = Self::tick_interval(last_step);
         let mut step = interval;
+        let mut prev_pos = 0.0_f64;
         while step < last_step - interval {
             let pos = step as f64 / last_step as f64 * 100.0;
-            self.ticks.push(tick(step, pos));
+            self.ticks.push(tick(step, pos - prev_pos));
+            prev_pos = pos;
             step += interval;
         }
         // Only include the last interval tick if it is half an interval away from last step
@@ -78,9 +84,10 @@ impl DomSlider {
         let remainder = last_step % interval;
         if remainder == 0 || remainder >= interval / 2 {
             let pos = step as f64 / last_step as f64 * 100.0;
-            self.ticks.push(tick(step, pos));
+            self.ticks.push(tick(step, pos - prev_pos));
+            prev_pos = pos;
         }
-        self.ticks.push(tick(last_step, 100.0));
+        self.ticks.push(tick(last_step, 100.0 - prev_pos));
     }
 }
 
