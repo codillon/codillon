@@ -218,10 +218,18 @@ span.debug[data-debug]::after {
     transform: scaleY(0) translateX(0) translateY(0);
 }
 
+.graph-canvas {
+    background-color: #fff;
+    display: block; 
+    border: 1px solid darkred;
+    margin-left: auto;
+    margin-right: auto;
+}
+
 .step-slider {
-    appearance: none;
-    background: transparent;
     width: 100%;
+    margin: 0;
+    accent-color: darkred;
     --slider-thumb-size: 20px;
     --slider-track-height: 10px;
     --slider-track-bg: linen;
@@ -231,13 +239,6 @@ span.debug[data-debug]::after {
 }
 
 .step-slider::-webkit-slider-runnable-track {
-    height: var(--slider-track-height);
-    border-radius: 10px;
-    background: var(--slider-track-bg);
-    border: var(--slider-track-border);
-}
-
-.step-slider::-moz-range-track {
     height: var(--slider-track-height);
     border-radius: 10px;
     background: var(--slider-track-bg);
@@ -256,20 +257,22 @@ span.debug[data-debug]::after {
     box-shadow: none;
 }
 
-.step-slider::-moz-range-thumb {
-    width: var(--slider-thumb-size);
-    height: var(--slider-thumb-size);
-    border-radius: 50%;
-    background: var(--slider-thumb-bg);
-    border: var(--slider-thumb-border);
-    cursor: pointer;
-    box-shadow: none;
+#slider-ticks {
+    display: flex;
+    position: relative;
+    height: 30px;
+    margin: 0 0 0 10px;
 }
 
-.graph-canvas {
-    background-color: #fff;
-    display: block; 
-    border: 1px solid darkred;
-    margin-left: auto;
-    margin-right: auto;
+#slider-ticks option {
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    color: darkred;
+    font-size: 12pt;
+    padding: 0;
+}
+
+.slider-container {
+    margin: 0 20px;
 }

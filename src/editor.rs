@@ -7,12 +7,13 @@ use crate::{
         with_sparse_changes,
     },
     dom_canvas::{Action, DomCanvas},
+    dom_slider::DomSlider,
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
-        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
-        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
+        AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
+        RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
         compare_document_position, get_selection, now_ms, render_canvas, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
@@ -34,11 +35,13 @@ use wasm_bindgen::JsValue;
 use web_sys::{HtmlDivElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
-type Slider = ReactiveComponent<ElementHandle<web_sys::HtmlInputElement>>;
 type ComponentType = DomStruct<
     (
         DomImage,
-        (ReactiveComponent<TextType>, (Slider, (DomCanvas, ()))),
+        (
+            ReactiveComponent<TextType>,
+            (ReactiveComponent<DomSlider>, (DomCanvas, ())),
+        ),
     ),
     HtmlDivElement,
 >;
@@ -81,7 +84,7 @@ impl Editor {
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
                         (
-                            (Slider::new(factory.input())),
+                            (ReactiveComponent::new(DomSlider::new(factory.clone()))),
                             (DomCanvas::new(factory.canvas()), ()),
                         ),
                     ),
@@ -133,12 +136,6 @@ impl Editor {
         }
 
         ret.image_mut().set_attribute("class", "annotations");
-        ret.slider_mut().inner_mut().set_attribute("type", "range");
-        ret.slider_mut().inner_mut().set_attribute("min", "0");
-        ret.slider_mut().inner_mut().set_value_as_number(0f64);
-        ret.slider_mut()
-            .inner_mut()
-            .set_attribute("class", "step-slider");
 
         // Restore from localStorage, or use default content
         if let Some(storage) = StorageHandle::new()
@@ -540,11 +537,11 @@ impl Editor {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.program_state)
     }
 
-    fn slider(&self) -> Ref<'_, Slider> {
+    fn slider(&self) -> Ref<'_, ReactiveComponent<DomSlider>> {
         Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
     }
 
-    fn slider_mut(&self) -> RefMut<'_, Slider> {
+    fn slider_mut(&self) -> RefMut<'_, ReactiveComponent<DomSlider>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
     }
 
@@ -659,11 +656,7 @@ impl Editor {
             editor_handle
                 .slider_mut()
                 .inner_mut()
-                .set_attribute("max", &(last_step() + 1).to_string());
-            editor_handle
-                .slider_mut()
-                .inner_mut()
-                .set_value_as_number((last_step() + 1) as f64);
+                .build_ticks(last_step() + 1);
             *editor_handle.program_state_mut() = ProgramState::default();
             editor_handle.0.borrow_mut().saved_states = Vec::new();
             editor_handle.build_program_state(last_step() + 1);
