@@ -30,7 +30,7 @@ use std::{
     ops::Deref,
     rc::Rc,
 };
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsValue, closure::Closure};
 use web_sys::{HtmlDivElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
@@ -45,6 +45,7 @@ type ComponentType = DomStruct<
 
 pub const LINE_SPACING: usize = 40;
 const STORAGE_ID: &str = "codillon_content";
+const SCHEDULE_STORE_MS: i32 = 500;
 
 #[derive(Clone, Default)]
 pub struct ProgramState {
@@ -62,6 +63,7 @@ struct _Editor {
     factory: ElementFactory,
     action_history: ActionHistory,
     storage: Option<StorageHandle>,
+    pending_save: Option<Closure<dyn Fn()>>,
 
     program_state: ProgramState,
     function_locals: Vec<Vec<WebAssemblyTypes>>,
@@ -91,6 +93,8 @@ impl Editor {
             factory,
             action_history: ActionHistory::default(),
             storage: StorageHandle::new(),
+            pending_save: None,
+
             program_state: ProgramState::default(),
             function_locals: Vec::new(),
             globals: Vec::new(),
@@ -130,6 +134,17 @@ impl Editor {
                 let step = editor.slider().inner().value_as_number().round() as usize;
                 editor.build_program_state(step);
             });
+
+            let editor_ref = Rc::clone(&ret.0);
+            let beforeunload = Closure::new(move || {
+                let editor = Editor(editor_ref.clone());
+                if let Some(storage) = &editor_ref.borrow().storage {
+                    storage.set_item(STORAGE_ID, &editor.buffer_as_text().join(""));
+                }
+            });
+            StorageHandle::set_onbeforeunload(&beforeunload);
+            // Must live for tab lifetime so small memory leak is ok until tab is closed
+            beforeunload.forget();
         }
 
         ret.image_mut().set_attribute("class", "annotations");
@@ -589,19 +604,29 @@ impl Editor {
         self.initialize_globals(&validized);
         self.initialize_locals(&validized);
         self.execute(&validized.build_executable_binary(&types, &self.0.borrow().function_ranges)?);
-
-        // save to local storage
-        {
-            let as_text = self.buffer_as_text().join("");
-            if let Some(storage) = &self.0.borrow_mut().storage {
-                storage.set_item(STORAGE_ID, &as_text);
-            }
-        }
+        self.schedule_save(); // schedule save to local storage
 
         #[cfg(debug_assertions)]
         self.audit();
 
         Ok(())
+    }
+
+    fn schedule_save(&self) {
+        if self.0.borrow().pending_save.is_some() {
+            return;
+        }
+        let editor_ref = Rc::clone(&self.0);
+        let closure = Closure::new(move || {
+            let editor_content = Editor(editor_ref.clone()).buffer_as_text().join("");
+            let mut inner = editor_ref.borrow_mut();
+            if let Some(storage) = &inner.storage {
+                storage.set_item(STORAGE_ID, &editor_content);
+                inner.pending_save = None;
+            }
+        });
+        StorageHandle::set_timeout_with_callback(&closure, SCHEDULE_STORE_MS);
+        self.0.borrow_mut().pending_save = Some(closure);
     }
 
     fn execute(&self, binary: &[u8]) {

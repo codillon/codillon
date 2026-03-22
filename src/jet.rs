@@ -763,6 +763,22 @@ impl StorageHandle {
             .map(StorageHandle)
     }
 
+    pub fn set_timeout_with_callback(callback: &Closure<dyn Fn()>, delay_ms: i32) -> i32 {
+        web_sys::window()
+            .expect("window")
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                delay_ms,
+            )
+            .expect("set_timeout")
+    }
+
+    pub fn set_onbeforeunload(callback: &Closure<dyn Fn()>) {
+        web_sys::window()
+            .expect("window")
+            .set_onbeforeunload(Some(callback.as_ref().unchecked_ref()));
+    }
+
     delegate! {
     to self.0 {
     #[unwrap]
