@@ -9,15 +9,11 @@
 // - all SIMD/vector operations
 // - all reference types operations
 
-use anyhow::Context;
-use anyhow::{Result, bail};
-use js_sys::{Object, Reflect};
-use std::cell::{Ref, RefCell};
-use wasm_bindgen::JsCast;
-use wasm_bindgen::prelude::*;
-use web_sys::console::log_1;
-
 use crate::utils::FmtError;
+use anyhow::{Context, Result, bail};
+use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
+use std::cell::{Ref, RefCell};
+use wasm_bindgen::{JsCast, prelude::*};
 
 const MAX_STEP_COUNT: usize = 1_000;
 
@@ -112,8 +108,8 @@ fn make_imports() -> Result<Object, JsValue> {
     let imports = Object::new();
     let debug_numbers = Object::new();
 
-    // Updating the debug state at every step. Returns 0 if execution should terminate.
-    let step_closure = Closure::wrap(Box::new(move |line_num: i32| -> i32 {
+    // Updating the debug state at every step. Returns whether execution should continue.
+    let step_closure = Closure::wrap(Box::new(move |line_num: i32| -> bool {
         STATE.with_borrow_mut(|state| {
             state.current_step.line_idx = line_num.try_into().expect("line_num -> u32");
 
@@ -123,14 +119,13 @@ fn make_imports() -> Result<Object, JsValue> {
 
             // Signal halt
             if state.completed_steps.len() >= MAX_STEP_COUNT {
-                log_1(&"debug: max step count exceeded".into());
                 state.termination = TerminationType::TooManySteps;
-                0
+                false
             } else {
-                1
+                true
             }
         })
-    }) as Box<dyn Fn(i32) -> i32>);
+    }) as Box<dyn Fn(i32) -> bool>);
 
     register_closure(&debug_numbers, "record_step", step_closure);
     create_closure_record_operations(&debug_numbers);
@@ -220,11 +215,38 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
             let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
                 .context("main is not an exported function")?;
             match main.apply(&JsValue::null(), &js_sys::Array::new()) {
-                Ok(val) if val.is_undefined() => Ok(()),
+                Ok(val) if val.is_undefined() => {
+                    STATE.with_borrow_mut(|state| match state.termination {
+                        TerminationType::Running => state.termination = TerminationType::Success,
+                        TerminationType::TooManySteps
+                        | TerminationType::Success
+                        | TerminationType::Error(_) => {
+                            unreachable!("success after other result");
+                        }
+                    });
+                    Ok(())
+                }
                 Ok(val) => {
                     bail!("unhandled return value from function: {:?}", val)
                 }
-                Err(e) => bail!("execution failure: {:?}", e),
+                Err(e) => match e.dyn_ref::<RuntimeError>() {
+                    Some(r) => {
+                        let reason: String = r.message().into();
+                        STATE.with_borrow_mut(|state| match state.termination {
+                            TerminationType::Running => {
+                                state.termination = TerminationType::Error(reason)
+                            }
+                            TerminationType::TooManySteps => {}
+                            TerminationType::Success | TerminationType::Error(_) => {
+                                unreachable!("error after other result");
+                            }
+                        });
+                        Ok(())
+                    }
+                    None => {
+                        bail!("other failure: {:?}", e);
+                    }
+                },
             }
         }
         Err(e) => bail!("reflection failure: {:?}", e),

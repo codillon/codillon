@@ -130,7 +130,8 @@ impl Editor {
             ret.set_default_contents();
         }
 
-        ret.on_change().expect("well-formed initial contents");
+        // XXX temporarily disable second call to on_change until #187 (double concurrent execution) is fixed
+        //        ret.on_change().expect("well-formed initial contents");
 
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
