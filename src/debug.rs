@@ -19,7 +19,7 @@ use web_sys::console::log_1;
 
 use crate::utils::FmtError;
 
-const MAX_STEP_COUNT: usize = 10_000;
+const MAX_STEP_COUNT: usize = 1_000;
 
 // Debug state stored in Wasm memory
 thread_local! {
@@ -112,8 +112,8 @@ fn make_imports() -> Result<Object, JsValue> {
     let imports = Object::new();
     let debug_numbers = Object::new();
 
-    // Updating the debug state at every step. Trap if at step limit.
-    let step_closure = Closure::wrap(Box::new(move |line_num: i32| {
+    // Updating the debug state at every step. Returns 0 if execution should terminate.
+    let step_closure = Closure::wrap(Box::new(move |line_num: i32| -> i32 {
         STATE.with_borrow_mut(|state| {
             state.current_step.line_idx = line_num.try_into().expect("line_num -> u32");
 
@@ -125,12 +125,14 @@ fn make_imports() -> Result<Object, JsValue> {
             if state.completed_steps.len() >= MAX_STEP_COUNT {
                 log_1(&"debug: max step count exceeded".into());
                 state.termination = TerminationType::TooManySteps;
-                panic!("max step count exceeded");
+                0
+            } else {
+                1
             }
         })
-    }) as Box<dyn Fn(i32)>);
+    }) as Box<dyn Fn(i32) -> i32>);
 
-    register_closure(&debug_numbers, "step", step_closure);
+    register_closure(&debug_numbers, "record_step", step_closure);
     create_closure_record_operations(&debug_numbers);
 
     Reflect::set(&imports, &"codillon_debug".into(), &debug_numbers)?;
@@ -212,7 +214,7 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
         .fmt_err()?;
     let instance = Reflect::get(&js_value, &JsValue::from_str("instance")).fmt_err()?;
     let exports = Reflect::get(&instance, &JsValue::from_str("exports")).fmt_err()?;
-    // Call first function with default values for its params
+    // Call main function with default values for its params
     match Reflect::get(&exports, &JsValue::from_str("main")) {
         Ok(main) => {
             let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
