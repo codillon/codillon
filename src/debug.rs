@@ -57,6 +57,7 @@ pub enum TerminationType {
     #[default]
     Running,
     TooManySteps,
+    HitInvalid(u32),
     Error(String),
     Success,
 }
@@ -109,9 +110,9 @@ fn make_imports() -> Result<Object, JsValue> {
     let debug_numbers = Object::new();
 
     // Updating the debug state at every step. Returns whether execution should continue.
-    let step_closure = Closure::wrap(Box::new(move |line_num: i32| -> bool {
+    let step_closure = Closure::wrap(Box::new(move |line_num: u32| -> bool {
         STATE.with_borrow_mut(|state| {
-            state.current_step.line_idx = line_num.try_into().expect("line_num -> u32");
+            state.current_step.line_idx = line_num;
 
             state
                 .completed_steps
@@ -125,9 +126,14 @@ fn make_imports() -> Result<Object, JsValue> {
                 true
             }
         })
-    }) as Box<dyn Fn(i32) -> bool>);
-
+    }) as Box<dyn Fn(u32) -> bool>);
     register_closure(&debug_numbers, "record_step", step_closure);
+
+    let record_invalid = Closure::wrap(Box::new(move |line_num: u32| {
+        STATE.with_borrow_mut(|state| state.termination = TerminationType::HitInvalid(line_num));
+    }) as Box<dyn Fn(u32)>);
+    register_closure(&debug_numbers, "record_invalid", record_invalid);
+
     create_closure_record_operations(&debug_numbers);
 
     Reflect::set(&imports, &"codillon_debug".into(), &debug_numbers)?;
@@ -168,35 +174,35 @@ fn create_closure_helpers(import: &Object) {
 }
 */
 
-fn create_closure_record_operations(debug_numbers: &Object) {
+fn create_closure_record_operations(obj: &Object) {
     let record = |value: WasmValue, slot: u32| {
-        STATE.with(|cur_state| {
-            cur_state
+        STATE.with(|state| {
+            state
                 .borrow_mut()
                 .current_step
                 .slot_assignments
                 .push((slot, value))
         });
     };
-    let record_i32 = Closure::wrap(Box::new(move |value: i32, slot: i32| {
-        record(value.into(), slot.try_into().expect("slot -> u32"));
-    }) as Box<dyn Fn(i32, i32)>);
-    register_closure(debug_numbers, "record_i32", record_i32);
+    let record_i32 = Closure::wrap(
+        Box::new(move |value: i32, slot: u32| record(value.into(), slot)) as Box<dyn Fn(i32, u32)>,
+    );
+    register_closure(obj, "record_i32", record_i32);
 
-    let record_f32 = Closure::wrap(Box::new(move |value: f32, slot: i32| {
-        record(value.into(), slot.try_into().expect("slot -> u32"));
-    }) as Box<dyn Fn(f32, i32)>);
-    register_closure(debug_numbers, "record_f32", record_f32);
+    let record_f32 = Closure::wrap(
+        Box::new(move |value: f32, slot: u32| record(value.into(), slot)) as Box<dyn Fn(f32, u32)>,
+    );
+    register_closure(obj, "record_f32", record_f32);
 
-    let record_i64 = Closure::wrap(Box::new(move |value: i64, slot: i32| {
-        record(value.into(), slot.try_into().expect("slot -> u32"));
-    }) as Box<dyn Fn(i64, i32)>);
-    register_closure(debug_numbers, "record_i64", record_i64);
+    let record_i64 = Closure::wrap(
+        Box::new(move |value: i64, slot: u32| record(value.into(), slot)) as Box<dyn Fn(i64, u32)>,
+    );
+    register_closure(obj, "record_i64", record_i64);
 
-    let record_f64 = Closure::wrap(Box::new(move |value: f64, slot: i32| {
-        record(value.into(), slot.try_into().expect("slot -> u32"));
-    }) as Box<dyn Fn(f64, i32)>);
-    register_closure(debug_numbers, "record_f64", record_f64);
+    let record_f64 = Closure::wrap(
+        Box::new(move |value: f64, slot: u32| record(value.into(), slot)) as Box<dyn Fn(f64, u32)>,
+    );
+    register_closure(obj, "record_f64", record_f64);
 }
 
 pub async fn run_binary(binary: &[u8]) -> Result<()> {
@@ -219,6 +225,7 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
                     STATE.with_borrow_mut(|state| match state.termination {
                         TerminationType::Running => state.termination = TerminationType::Success,
                         TerminationType::TooManySteps
+                        | TerminationType::HitInvalid(_)
                         | TerminationType::Success
                         | TerminationType::Error(_) => {
                             unreachable!("success after other result");
@@ -236,6 +243,7 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
                             TerminationType::Running => {
                                 state.termination = TerminationType::Error(reason)
                             }
+                            TerminationType::HitInvalid(_) => {} // error is expected
                             TerminationType::TooManySteps => {}
                             TerminationType::Success | TerminationType::Error(_) => {
                                 unreachable!("error after other result");

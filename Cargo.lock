@@ -247,6 +247,7 @@ dependencies = [
  "itertools",
  "js-sys",
  "pretty_assertions",
+ "regex",
  "str_indices",
  "wasm-bindgen",
  "wasm-bindgen-futures",
