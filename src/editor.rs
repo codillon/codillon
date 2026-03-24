@@ -572,10 +572,7 @@ impl Editor {
                 .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
             let max_step = with_debug_state(|state| state.completed_steps.len()).saturating_sub(1);
             // Update slider
-            editor_handle
-                .slider_mut()
-                .inner_mut()
-                .build_ticks(last_step() + 1);
+            editor_handle.slider_mut().inner_mut().build_ticks(max_step);
 
             // print out steps for debugging
             // XXX: render in UI
