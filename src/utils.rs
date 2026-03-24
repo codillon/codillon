@@ -39,15 +39,15 @@ impl InstrImports {
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: i32 -> i32
         (&[EncoderValType::I32], &[EncoderValType::I32]),
-        // 0: i32 -> ()
+        // 1: i32 -> ()
         (&[EncoderValType::I32], &[]),
-        // 1: (i32, i32) -> ()
+        // 2: (i32, i32) -> ()
         (&[EncoderValType::I32, EncoderValType::I32], &[]),
-        // 2: (f32, i32) -> ()
+        // 3: (f32, i32) -> ()
         (&[EncoderValType::F32, EncoderValType::I32], &[]),
-        // 3: (i64, i32) -> ()
+        // 4: (i64, i32) -> ()
         (&[EncoderValType::I64, EncoderValType::I32], &[]),
-        // 4: (f64, i32) -> ()
+        // 5: (f64, i32) -> ()
         (&[EncoderValType::F64, EncoderValType::I32], &[]),
     ];
 }
