@@ -29,25 +29,27 @@ enum InstrImports {
 }
 impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
-        ("record_step", 0), // indices relative to end of user-provided type section
-        ("record_invalid", 1),
-        ("record_i32", 2),
-        ("record_f32", 3),
-        ("record_i64", 4),
-        ("record_f64", 5),
+        ("record_step", 1), // indices relative to end of user-provided type section
+        ("record_invalid", 2),
+        ("record_i32", 3),
+        ("record_f32", 4),
+        ("record_i64", 5),
+        ("record_f64", 6),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
-        // 0: i32 -> i32
+        // 0: () -> () (type of func_placeholder)
+        (&[], &[]),
+        // 1: i32 -> i32
         (&[EncoderValType::I32], &[EncoderValType::I32]),
-        // 1: i32 -> ()
+        // 2: i32 -> ()
         (&[EncoderValType::I32], &[]),
-        // 2: (i32, i32) -> ()
+        // 3: (i32, i32) -> ()
         (&[EncoderValType::I32, EncoderValType::I32], &[]),
-        // 3: (f32, i32) -> ()
+        // 4: (f32, i32) -> ()
         (&[EncoderValType::F32, EncoderValType::I32], &[]),
-        // 4: (i64, i32) -> ()
+        // 5: (i64, i32) -> ()
         (&[EncoderValType::I64, EncoderValType::I32], &[]),
-        // 5: (f64, i32) -> ()
+        // 6: (f64, i32) -> ()
         (&[EncoderValType::F64, EncoderValType::I32], &[]),
     ];
 }
@@ -342,22 +344,25 @@ impl<'a> RawModule<'a> {
 
         /* Disable unlinkable imports */
         let mut imports = Vec::new();
+        let placeholder_import = wasmparser::Import {
+            module: "codillon_debug",
+            name: "func_placeholder",
+            ty: wasmparser::TypeRef::Func(self.types.len() as u32), // empty type is first added type
+        };
         for (import_idx, import @ wasmparser::Import { module, name, ty }) in
             self.imports.into_iter().enumerate()
         {
             match ty {
                 wasmparser::TypeRef::Func(type_idx) => {
                     match Self::check_func_import(module, name, &self.types[type_idx as usize]) {
-                        Some(reason) => editor.set_invalid(import_lines[import_idx], Some(reason)),
                         None => imports.push(import),
+                        Some(reason) => {
+                            editor.set_invalid(import_lines[import_idx], Some(reason));
+                            imports.push(placeholder_import);
+                        }
                     }
                 }
-                _ => {
-                    editor.set_invalid(
-                        import_lines[import_idx],
-                        Some(String::from("unsupported import kind")),
-                    );
-                }
+                _ => unreachable!("unsupported import kind (forbidden syntactically)"),
             };
         }
 
@@ -802,7 +807,7 @@ impl<'a> ValidModule<'a> {
         /* Make import section (with instrumentation functions prepended) */
         let (import_section, num_func_imports) = {
             let mut import_section = ImportSection::new();
-            let mut num_func_imports = 0;
+            let mut num_func_imports: u32 = 0;
 
             // First in import section: the "primitive" instrumentation functions
             // All function indices in code will have to be incremented by the number of these.
@@ -831,7 +836,7 @@ impl<'a> ValidModule<'a> {
         // These are done together because we are auto-generating "transparent" instrumentation
         // functions (which collect the results of an arbitrary operator) and their types
         // at the same time.
-        let (type_section, function_section, result_types_to_func_idx, num_inserted_functions) = {
+        let (type_section, function_section, result_types_to_func_idx, step_function_idx) = {
             let mut type_section = TypeSection::new();
             let mut function_section = FunctionSection::new();
 
@@ -849,7 +854,7 @@ impl<'a> ValidModule<'a> {
                 type_section.ty().function(p.to_vec(), r.to_vec());
             }
 
-            // Next in type section: the type of the "step" function
+            // Next in type section: the type of the "step" function (N.B. not the same as the record_step import)
             let step_function_type_idx = type_section.len();
             type_section.ty().function([EncoderValType::I32], []);
             let num_inserted_types = 1;
@@ -860,16 +865,18 @@ impl<'a> ValidModule<'a> {
 
             // N.B. The imported functions have claimed the first function *indices*.
 
-            // First in the actual function section: the "step" function (called after every operator)
-            // This is inserted into the user's module so it can safely use `unreachable`
-            // to terminate execution.
-            function_section.function(step_function_type_idx);
-            let num_inserted_functions = 1;
-
-            // Next in function section: the user-defined (original) functions
+            // First in the actual function section: the user-defined (original) functions
             for func in &self.functions {
                 function_section.function(func.type_idx);
             }
+
+            // Next in function section: the "step" function (called after every operator)
+            // This is inserted into the user's module so it can safely use `unreachable`
+            // to terminate execution.
+            let step_function_idx = num_func_imports + self.functions.len() as u32;
+            debug_assert_eq!(function_section.len() as usize, self.functions.len());
+            function_section.function(step_function_type_idx);
+            let num_inserted_functions = 1;
 
             // Last in function section: the "transparent" instrumentation functions (which return their inputs)
 
@@ -878,7 +885,7 @@ impl<'a> ValidModule<'a> {
 
             let mut next_type_idx = type_section.len();
             let mut next_func_idx =
-                num_func_imports + num_inserted_functions + self.functions.len() as u32;
+                num_func_imports + self.functions.len() as u32 + num_inserted_functions;
 
             debug_assert_eq!(
                 next_type_idx,
@@ -918,7 +925,7 @@ impl<'a> ValidModule<'a> {
                 type_section,
                 function_section,
                 result_types_to_func_idx,
-                num_inserted_functions,
+                step_function_idx,
             )
         };
 
@@ -953,11 +960,7 @@ impl<'a> ValidModule<'a> {
         {
             let mut exports = ExportSection::new();
             if !self.functions.is_empty() {
-                exports.export(
-                    "main",
-                    ExportKind::Func,
-                    num_func_imports + num_inserted_functions,
-                );
+                exports.export("main", ExportKind::Func, num_func_imports);
             }
             module.section(&exports);
         }
@@ -970,7 +973,19 @@ impl<'a> ValidModule<'a> {
         {
             let mut code_section = CodeSection::new();
 
-            // First in code section: the "step" function.
+            // First in code section: the original functions
+            for (func_idx, start_line) in function_ranges.iter().enumerate() {
+                self.build_function(
+                    func_idx,
+                    &mut code_section,
+                    types,
+                    &result_types_to_func_idx,
+                    start_line.0,
+                    step_function_idx,
+                )?;
+            }
+
+            // Next in code section: the "step" function.
             // This is inserted into the instrumented module so that "unreachable" doesn't panic the Rust.
             {
                 let mut f = wasm_encoder::Function::new(vec![]);
@@ -983,18 +998,6 @@ impl<'a> ValidModule<'a> {
                 f.instruction(&End);
                 f.instruction(&End);
                 code_section.function(&f);
-            }
-
-            // Next in code section: the original functions
-            for (func_idx, start_line) in function_ranges.iter().enumerate() {
-                self.build_function(
-                    func_idx,
-                    &mut code_section,
-                    types,
-                    &result_types_to_func_idx,
-                    start_line.0,
-                    num_inserted_functions,
-                )?;
             }
 
             // Last in code section: the "transparent" (dynamically generated) instrumentation functions
@@ -1019,7 +1022,7 @@ impl<'a> ValidModule<'a> {
         types: &TypedModule,
         result_types_to_func_idx: &IndexMap<Vec<ValType>, u32>,
         start_line: usize,
-        num_inserted_functions: u32,
+        step_function_idx: u32,
     ) -> Result<()> {
         use wasm_encoder::Instruction::*;
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32; // also idx of step function
@@ -1068,7 +1071,7 @@ impl<'a> ValidModule<'a> {
         let step_debug = |f: &mut wasm_encoder::Function, line_number: usize| {
             // Step after each instruction evaluation
             f.instruction(&I32Const(line_number.try_into().expect("line_no -> i32")));
-            f.instruction(&Call(num_instr_imports));
+            f.instruction(&Call(step_function_idx));
         };
 
         // XXX on function entry, should "enter frame" of the params and locals
@@ -1110,7 +1113,7 @@ impl<'a> ValidModule<'a> {
             // increment function indices to accommodate added imports
             match op {
                 Call(ref mut idx) | RefFunc(ref mut idx) | ReturnCall(ref mut idx) => {
-                    *idx += num_instr_imports + num_inserted_functions
+                    *idx += num_instr_imports
                 }
                 _ => {}
             }
@@ -1970,6 +1973,7 @@ pub(crate) mod tests {
     }
 
     const EXPECTED_TYPES: &str = r#"  (type (func))
+  (type (func))
   (type (func (param i32) (result i32)))
   (type (func (param i32)))
   (type (func (param i32 i32)))
@@ -1978,14 +1982,18 @@ pub(crate) mod tests {
   (type (func (param f64 i32)))
   (type (func (param i32)))
 "#;
-    const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 1)))
-  (import "codillon_debug" "record_invalid" (func (type 2)))
-  (import "codillon_debug" "record_i32" (func (type 3)))
-  (import "codillon_debug" "record_f32" (func (type 4)))
-  (import "codillon_debug" "record_i64" (func (type 5)))
-  (import "codillon_debug" "record_f64" (func (type 6)))
-  (export "main" (func 7))
-  (func (type 7) (param i32)
+    const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 2)))
+  (import "codillon_debug" "record_invalid" (func (type 3)))
+  (import "codillon_debug" "record_i32" (func (type 4)))
+  (import "codillon_debug" "record_f32" (func (type 5)))
+  (import "codillon_debug" "record_i64" (func (type 6)))
+  (import "codillon_debug" "record_f64" (func (type 7)))
+"#;
+
+    const EXPECTED_MAIN: &str = r#"  (export "main" (func 6))
+"#;
+
+    const EXPECTED_STEP: &str = r#"  (func (type 8) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -2006,12 +2014,13 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 6
+    call 7
   )
-)
-"#;
+"# + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2022,12 +2031,13 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 6
+    call 7
   )
-)
-"#;
+"# + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2038,12 +2048,13 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 2
-    call 6
+    call 7
   )
-)
-"#;
+"# + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2056,19 +2067,21 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + "  (type (func (param i64 i32) (result i64)))\n"
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 6
+    call 7
     i64.const 17
     i32.const 0
     call 8
     i32.const 1
-    call 6
+    call 7
     drop
     i32.const 2
-    call 6
+    call 7
   )
-  (func (type 8) (param i64 i32) (result i64)
+"# + EXPECTED_STEP
+                + r#"  (func (type 9) (param i64 i32) (result i64)
     local.get 0
     local.get 1
     call 4
@@ -2081,15 +2094,14 @@ pub(crate) mod tests {
 
         // well-formed block
         const JUST_BLOCK_END: &str = r#"    i32.const 1
-    call 6
+    call 7
     block ;; label = @1
       i32.const 2
-      call 6
+      call 7
     end
     i32.const 3
-    call 6
+    call 7
   )
-)
 "#;
         {
             let mut editor = FakeTextBuffer::default();
@@ -2100,8 +2112,11 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + "  (func (type 0)\n"
-                + JUST_BLOCK_END;
+                + JUST_BLOCK_END
+                + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2114,8 +2129,11 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + "  (func (type 0)\n"
-                + JUST_BLOCK_END;
+                + JUST_BLOCK_END
+                + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2131,14 +2149,15 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + "  (type (func (param i32 i32) (result i32)))\n"
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 6
+    call 7
     i32.const 137
     i32.const 0
     call 8
     i32.const 2
-    call 6
+    call 7
     i32.const 2
     call 1
     unreachable
@@ -2146,12 +2165,13 @@ pub(crate) mod tests {
     i32.const 3
     call 8
     i32.const 3
-    call 6
+    call 7
     drop
     i32.const 4
-    call 6
+    call 7
   )
-  (func (type 8) (param i32 i32) (result i32)
+"# + EXPECTED_STEP
+                + r#"  (func (type 9) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2176,12 +2196,14 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
-                + r#"  (func (type 0)
+                + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
+  (export "main" (func 7))
+  (func (type 0)
     i32.const 7
-    call 6
+    call 8
   )
-)
-"#;
+"# + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2198,8 +2220,11 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + "  (func (type 0)\n"
-                + JUST_BLOCK_END;
+                + JUST_BLOCK_END
+                + EXPECTED_STEP
+                + ")\n";
             let expected = expected.replace("i32.const 3", "i32.const 6");
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
@@ -2217,24 +2242,25 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 6
+    call 7
     block ;; label = @1
       i32.const 2
-      call 6
+      call 7
       loop ;; label = @2
         i32.const 3
-        call 6
+        call 7
       end
       i32.const 5
-      call 6
+      call 7
     end
     i32.const 6
-    call 6
+    call 7
   )
-)
-"#;
+"# + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2247,18 +2273,19 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 6
+    call 7
     i32.const 1
     call 1
     unreachable
     nop
     i32.const 2
-    call 6
+    call 7
   )
-)
-"#;
+"# + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2273,29 +2300,26 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + "  (memory 0)\n"
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 2
-    call 6
+    call 7
     i32.const 2
     call 1
     unreachable
     nop
     i32.const 3
-    call 6
+    call 7
     i32.const 3
     call 1
     unreachable
     drop
     i32.const 4
-    call 6
+    call 7
   )
-)
-"#;
-            let expected = expected.replace(
-                "  (export \"main\" (func 7))",
-                "  (memory 0)\n  (export \"main\" (func 7))",
-            );
-
+"# + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2310,25 +2334,27 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + "  (type (func (param i32 i32) (result i32)))\n"
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 6
+    call 7
     loop ;; label = @1
       i32.const 1
-      call 6
+      call 7
       i32.const 5
       i32.const 0
       call 8
       i32.const 2
-      call 6
+      call 7
       br 0 (;@1;)
       i32.const 3
-      call 6
+      call 7
     end
     i32.const 4
-    call 6
+    call 7
   )
-  (func (type 8) (param i32 i32) (result i32)
+"# + EXPECTED_STEP
+                + r#"  (func (type 9) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2336,6 +2362,7 @@ pub(crate) mod tests {
   )
 )
 "#;
+
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2349,19 +2376,21 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + "  (type (func (param i32 i32) (result i32)))\n"
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 6
+    call 7
     i32.const 4
     i32.const 0
     call 8
     i32.const 2
-    call 6
+    call 7
     i32.const 2
     call 1
     unreachable
   )
-  (func (type 8) (param i32 i32) (result i32)
+"# + EXPECTED_STEP
+                + r#"  (func (type 9) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2386,6 +2415,7 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + r#"  (type (func))
   (type (func (result i32 i32)))
+  (type (func))
   (type (func (param i32) (result i32)))
   (type (func (param i32)))
   (type (func (param i32 i32)))
@@ -2395,14 +2425,46 @@ pub(crate) mod tests {
   (type (func (param i32)))
   (type (func (param i32 i32 i32 i32) (result i32 i32)))
   (type (func (param i32 i32) (result i32)))
-  (import "codillon_debug" "record_step" (func (type 2)))
-  (import "codillon_debug" "record_invalid" (func (type 3)))
-  (import "codillon_debug" "record_i32" (func (type 4)))
-  (import "codillon_debug" "record_f32" (func (type 5)))
-  (import "codillon_debug" "record_i64" (func (type 6)))
-  (import "codillon_debug" "record_f64" (func (type 7)))
-  (export "main" (func 7))
-  (func (type 8) (param i32)
+  (import "codillon_debug" "record_step" (func (type 3)))
+  (import "codillon_debug" "record_invalid" (func (type 4)))
+  (import "codillon_debug" "record_i32" (func (type 5)))
+  (import "codillon_debug" "record_f32" (func (type 6)))
+  (import "codillon_debug" "record_i64" (func (type 7)))
+  (import "codillon_debug" "record_f64" (func (type 8)))
+  (export "main" (func 6))
+  (func (type 0)
+    i32.const 1
+    call 8
+    call 7
+    i32.const 0
+    i32.const 1
+    call 9
+    i32.const 2
+    call 8
+    i32.add
+    i32.const 2
+    call 10
+    i32.const 3
+    call 8
+    i32.const 3
+    call 1
+    unreachable
+  )
+  (func (type 1) (result i32 i32)
+    i32.const 5
+    call 8
+    i32.const 9
+    i32.const 3
+    call 10
+    i32.const 6
+    call 8
+    i32.const 10
+    i32.const 4
+    call 10
+    i32.const 7
+    call 8
+  )
+  (func (type 9) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -2410,39 +2472,7 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (type 0)
-    i32.const 1
-    call 6
-    call 8
-    i32.const 0
-    i32.const 1
-    call 9
-    i32.const 2
-    call 6
-    i32.add
-    i32.const 2
-    call 10
-    i32.const 3
-    call 6
-    i32.const 3
-    call 1
-    unreachable
-  )
-  (func (type 1) (result i32 i32)
-    i32.const 5
-    call 6
-    i32.const 9
-    i32.const 3
-    call 10
-    i32.const 6
-    call 6
-    i32.const 10
-    i32.const 4
-    call 10
-    i32.const 7
-    call 6
-  )
-  (func (type 9) (param i32 i32 i32 i32) (result i32 i32)
+  (func (type 10) (param i32 i32 i32 i32) (result i32 i32)
     local.get 0
     local.get 2
     call 2
@@ -2452,7 +2482,7 @@ pub(crate) mod tests {
     local.get 0
     local.get 1
   )
-  (func (type 10) (param i32 i32) (result i32)
+  (func (type 11) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2474,6 +2504,7 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
                 + r#"  (func (type 0)
     (local i32 i32 i32 f64)
     local.get 0
@@ -2489,13 +2520,14 @@ pub(crate) mod tests {
     i32.const 3
     call 5
     i32.const 1
-    call 6
+    call 7
   )
-)
-"#;
+"# + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
+        // invalid block
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
@@ -2506,6 +2538,7 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + r#"  (type (func))
   (type (func (param i32)))
+  (type (func))
   (type (func (param i32) (result i32)))
   (type (func (param i32)))
   (type (func (param i32 i32)))
@@ -2514,24 +2547,16 @@ pub(crate) mod tests {
   (type (func (param f64 i32)))
   (type (func (param i32)))
   (type (func (param i32 i32) (result i32)))
-  (import "codillon_debug" "record_step" (func (type 2)))
-  (import "codillon_debug" "record_invalid" (func (type 3)))
-  (import "codillon_debug" "record_i32" (func (type 4)))
-  (import "codillon_debug" "record_f32" (func (type 5)))
-  (import "codillon_debug" "record_i64" (func (type 6)))
-  (import "codillon_debug" "record_f64" (func (type 7)))
-  (export "main" (func 7))
-  (func (type 8) (param i32)
-    local.get 0
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
-  )
+  (import "codillon_debug" "record_step" (func (type 3)))
+  (import "codillon_debug" "record_invalid" (func (type 4)))
+  (import "codillon_debug" "record_i32" (func (type 5)))
+  (import "codillon_debug" "record_f32" (func (type 6)))
+  (import "codillon_debug" "record_i64" (func (type 7)))
+  (import "codillon_debug" "record_f64" (func (type 8)))
+  (export "main" (func 6))
   (func (type 0)
     i32.const 1
-    call 6
+    call 7
     i32.const 1
     call 1
     unreachable
@@ -2539,15 +2564,23 @@ pub(crate) mod tests {
       i32.const 1
       call 8
       i32.const 2
-      call 6
+      call 7
       i32.const 2
       call 1
       unreachable
     end
     i32.const 3
-    call 6
+    call 7
   )
-  (func (type 9) (param i32 i32) (result i32)
+  (func (type 9) (param i32)
+    local.get 0
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+  )
+  (func (type 10) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2555,6 +2588,30 @@ pub(crate) mod tests {
   )
 )
 "#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // placeholder import is called
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"x\" \"y\" (func $f))");
+            editor.push_line("(func");
+            editor.push_line("call $f");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
+  (export "main" (func 7))
+  (func (type 0)
+    i32.const 2
+    call 8
+    call 6
+    i32.const 3
+    call 8
+  )
+"# + EXPECTED_STEP
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2617,6 +2674,85 @@ pub(crate) mod tests {
                 editor.lines[0].info.invalid.is_none(),
                 "draw_point should be correctly imported"
             );
+        }
+
+        //Test case 5: interleave valid and invalid imports
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"a\" \"b\" (func $fake_func1))");
+            editor.push_line("(import \"helpers\" \"clear_canvas\" (func $clear_canvas))");
+            editor.push_line("(import \"c\" \"d\" (func $fake_func2))");
+            editor.push_line(
+                "(import \"helpers\" \"draw_point\" (func $draw_point (param f64 f64)))",
+            );
+            editor.push_line("(import \"e\" \"f\" (func $fake_func3))");
+            editor.push_line("(func");
+            editor.push_line("call $fake_func1");
+            editor.push_line("f64.const 0");
+            editor.push_line("call $fake_func2");
+            editor.push_line("f64.const 0");
+            editor.push_line("call $fake_func3");
+            editor.push_line("call $draw_point");
+            editor.push_line("call $fake_func1");
+            editor.push_line("call $clear_canvas");
+            editor.push_line("call $fake_func2");
+            editor.push_line(")");
+            let _ = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                editor.lines[0]
+                    .info
+                    .invalid
+                    .as_ref()
+                    .expect("a/b should be invalid"),
+                "module ‘a’ not found"
+            );
+            assert!(
+                editor.lines[1].info.invalid.is_none(),
+                "clear_canvas should be valid"
+            );
+            assert_eq!(
+                editor.lines[2]
+                    .info
+                    .invalid
+                    .as_ref()
+                    .expect("c/d should be invalid"),
+                "module ‘c’ not found"
+            );
+            assert!(
+                editor.lines[3].info.invalid.is_none(),
+                "draw_point should be valid"
+            );
+            assert_eq!(
+                editor.lines[4]
+                    .info
+                    .invalid
+                    .as_ref()
+                    .expect("e/f should be invalid"),
+                "module ‘e’ not found"
+            );
+            /*
+             * Skip below, because we aren't statically tracking calls to invalid imports at the callsite.
+             * (This would be hard to do for call_indirect, etc.)
+             * TODO: signal the HitBadImport at execution time on the culprit line.
+
+                for i in 5..editor.len() {
+                    if i % 2 == 0 {
+                        assert_eq!(
+                            editor.lines[i]
+                                .info
+                                .invalid
+                                .as_ref()
+                                .expect("invalid import test should be invalid"),
+                            "call to invalid import"
+                        );
+                    } else {
+                        assert!(
+                            editor.lines[i].info.invalid.is_none(),
+                            "invalid import test line {i} should be invalid"
+                        );
+                    }
+            }
+            */
         }
 
         Ok(())
