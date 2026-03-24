@@ -1,8 +1,11 @@
-use anyhow::{Context, Result, bail};
+use crate::syntax::{
+    FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, ModulePart,
+};
+use EncoderInstruction::*;
+use anyhow::{Result, bail};
 use indexmap::IndexMap;
 use wasm_encoder::{
-    CodeSection, ExportSection, FunctionSection, GlobalSection, Instruction as EncoderInstruction,
-    TypeSection, ValType as EncoderValType,
+    CodeSection, Instruction as EncoderInstruction, ValType as EncoderValType,
     reencode::{Reencode, RoundtripReencoder},
 };
 use wasm_tools::parse_binary_wasm;
@@ -15,42 +18,10 @@ use wast::{
     parser::{self, ParseBuffer},
 };
 
-use crate::syntax::{LineInfos, LineInfosMut};
-use EncoderInstruction::*;
-use InstrumentationFuncs::*;
-
-enum InstrumentationFuncs {
-    SetLocalI32(u32),
-    SetLocalF32(u32),
-    SetLocalI64(u32),
-    SetLocalF64(u32),
-    SetGlobalI32(u32),
-    SetGlobalF32(u32),
-    SetGlobalI64(u32),
-    SetGlobalF64(u32),
-    SetMemoryI32,
-    SetMemoryF32,
-    SetMemoryI64,
-    SetMemoryF64,
-    CallFunc(u32),
-    Other,
-}
 #[repr(u32)]
 enum InstrImports {
-    Step,
-    PopI,
-    SetLocalI32,
-    SetLocalF32,
-    SetLocalI64,
-    SetLocalF64,
-    SetGlobalI32,
-    SetGlobalF32,
-    SetGlobalI64,
-    SetGlobalF64,
-    SetMemoryI32,
-    SetMemoryF32,
-    SetMemoryI64,
-    SetMemoryF64,
+    RecordStep,
+    RecordInvalid,
     RecordI32,
     RecordF32,
     RecordI64,
@@ -58,58 +29,26 @@ enum InstrImports {
 }
 impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
-        ("step", 1),
-        ("pop_i", 0),
-        ("set_local_i32", 2),
-        ("set_local_f32", 7),
-        ("set_local_i64", 8),
-        ("set_local_f64", 9),
-        ("set_global_i32", 2),
-        ("set_global_f32", 7),
-        ("set_global_i64", 8),
-        ("set_global_f64", 9),
-        ("set_memory_i32", 3),
-        ("set_memory_f32", 4),
-        ("set_memory_i64", 5),
-        ("set_memory_f64", 6),
+        ("record_step", 0), // indices relative to end of user-provided type section
+        ("record_invalid", 1),
         ("record_i32", 2),
-        ("record_f32", 7),
-        ("record_i64", 8),
-        ("record_f64", 9),
+        ("record_f32", 3),
+        ("record_i64", 4),
+        ("record_f64", 5),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
-        // 0: (i32) -> ()
-        (&[EncoderValType::I32], &[]),
-        // 1: (i32) -> (i32)
+        // 0: i32 -> i32
         (&[EncoderValType::I32], &[EncoderValType::I32]),
-        // 2: (i32, i32) -> ()
+        // 0: i32 -> ()
+        (&[EncoderValType::I32], &[]),
+        // 1: (i32, i32) -> ()
         (&[EncoderValType::I32, EncoderValType::I32], &[]),
-        // 3: (i32, i32) -> (i32, i32)
-        (
-            &[EncoderValType::I32, EncoderValType::I32],
-            &[EncoderValType::I32, EncoderValType::I32],
-        ),
-        // 4: (i32, f32) -> (i32, f32)
-        (
-            &[EncoderValType::I32, EncoderValType::F32],
-            &[EncoderValType::I32, EncoderValType::F32],
-        ),
-        // 5: (i32, i64) -> (i32, i64)
-        (
-            &[EncoderValType::I32, EncoderValType::I64],
-            &[EncoderValType::I32, EncoderValType::I64],
-        ),
-        // 6: (i32, f64) -> (i32, f64)
-        (
-            &[EncoderValType::I32, EncoderValType::F64],
-            &[EncoderValType::I32, EncoderValType::F64],
-        ),
-        // 7: (i32, f32) -> ()
-        (&[EncoderValType::I32, EncoderValType::F32], &[]),
-        // 8: (i32, i64) -> ()
-        (&[EncoderValType::I32, EncoderValType::I64], &[]),
-        // 9: (i32, f64) -> ()
-        (&[EncoderValType::I32, EncoderValType::F64], &[]),
+        // 2: (f32, i32) -> ()
+        (&[EncoderValType::F32, EncoderValType::I32], &[]),
+        // 3: (i64, i32) -> ()
+        (&[EncoderValType::I64, EncoderValType::I32], &[]),
+        // 4: (f64, i32) -> ()
+        (&[EncoderValType::F64, EncoderValType::I32], &[]),
     ];
 }
 
@@ -155,26 +94,31 @@ const HELPER_IMPORTS: &[(&str, &[HelperFunc])] = &[(
     ],
 )];
 
+#[derive(Debug)]
 pub struct GeneralOperator<'a> {
     prepended: Vec<Operator<'a>>,
     op: Operator<'a>,
     untyped: bool,
 }
 
+#[derive(Debug)]
 pub struct Aligned<T> {
-    pub op: T,
+    pub inner: T,
     pub line_idx: usize,
 }
 
 pub struct RawFunction<'a> {
-    pub type_idx: usize,
-    pub locals: Vec<(u32, ValType)>,
+    pub type_idx: u32,
+    pub params: Vec<ValType>,
+    pub locals: Vec<Aligned<ValType>>,
     pub operators: Vec<Aligned<Operator<'a>>>,
 }
 
+#[derive(Debug)]
 pub struct ValidFunction<'a> {
-    pub type_idx: usize,
-    pub locals: Vec<(u32, ValType)>,
+    pub type_idx: u32,
+    pub params: Vec<ValType>,
+    pub locals: Vec<Aligned<ValType>>,
     pub operators: Vec<Aligned<GeneralOperator<'a>>>,
 }
 
@@ -182,25 +126,25 @@ pub struct RawModule<'a> {
     pub types: Vec<wasmparser::FuncType>,
     pub imports: Vec<wasmparser::Import<'a>>,
     pub memory: Vec<wasmparser::MemoryType>,
-    pub globals: Vec<wasmparser::Global<'a>>,
+    pub globals: Vec<Aligned<wasmparser::Global<'a>>>,
     pub functions: Vec<RawFunction<'a>>,
 }
 
+#[derive(Debug)]
 pub struct ValidModule<'a> {
     pub types: Vec<wasmparser::FuncType>,
-    pub imports: wasm_encoder::ImportSection,
+    pub imports: Vec<wasmparser::Import<'a>>,
     pub memory: Vec<wasmparser::MemoryType>,
-    pub globals: Vec<wasmparser::Global<'a>>,
+    pub globals: Vec<Aligned<wasmparser::Global<'a>>>,
     pub functions: Vec<ValidFunction<'a>>,
-    pub num_func_imports: u32,
 }
 
 impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
     fn from(val: Aligned<Operator<'a>>) -> Self {
         Self {
-            op: GeneralOperator {
+            inner: GeneralOperator {
                 prepended: vec![],
-                op: val.op,
+                op: val.inner,
                 untyped: false,
             },
             line_idx: val.line_idx,
@@ -236,12 +180,12 @@ impl<'a> RawModule<'a> {
         let parser = Parser::new(0);
         let mut functions: Vec<RawFunction> = Vec::new();
         let mut types: Vec<FuncType> = Vec::new();
-        let mut func_type_indices: Vec<usize> = Vec::new();
+        let mut func_type_indices: Vec<u32> = Vec::new();
         let mut imports: Vec<Import> = Vec::new();
         let mut memory: Vec<MemoryType> = Vec::new();
-        let mut globals: Vec<Global> = Vec::new();
-        let mut func_locals: Vec<Vec<(u32, ValType)>> = Vec::new();
-        let mut func_ops: Vec<Vec<Operator<'a>>> = Vec::new();
+        let mut globals: Vec<Aligned<Global>> = Vec::new();
+        type FuncInfo<'a> = (Vec<Aligned<ValType>>, Vec<Aligned<Operator<'a>>>);
+        let mut funcs: Vec<FuncInfo> = Vec::with_capacity(function_ranges.len());
 
         for payload in parser.parse_all(wasm_bin) {
             match payload? {
@@ -257,7 +201,7 @@ impl<'a> RawModule<'a> {
                 }
                 Payload::FunctionSection(reader) => {
                     for func_type_idx in reader.into_iter().flatten() {
-                        func_type_indices.push(func_type_idx as usize);
+                        func_type_indices.push(func_type_idx);
                     }
                 }
                 Payload::MemorySection(reader) => {
@@ -267,55 +211,113 @@ impl<'a> RawModule<'a> {
                 }
                 Payload::GlobalSection(reader) => {
                     for global in reader.into_iter_with_offsets().flatten() {
-                        globals.push(global.1);
+                        globals.push(Aligned {
+                            line_idx: 0,
+                            inner: global.1,
+                        });
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
-                    let mut locals: Vec<(u32, ValType)> = Vec::new();
-                    let local_reader = body.get_locals_reader()?;
-                    for local in local_reader {
-                        locals.push(local?);
+                    let mut locals = Vec::new();
+                    let locals_reader = body.get_locals_reader()?;
+                    for entry in locals_reader {
+                        let (num, ty) = entry?;
+                        for _ in 0..num {
+                            locals.push(Aligned {
+                                line_idx: 0,
+                                inner: ty,
+                            });
+                        }
                     }
-                    func_locals.push(locals);
                     let mut ops = Vec::new();
                     for op in body.get_operators_reader()?.into_iter() {
-                        ops.push(op?);
+                        ops.push(Aligned {
+                            line_idx: 0,
+                            inner: op?,
+                        });
                     }
-                    //include the function's end opcode
-                    func_ops.push(ops);
+                    funcs.push((locals, ops));
                 }
                 _ => {}
             }
         }
-        for (func_idx, (func_start, func_end)) in function_ranges.iter().enumerate() {
-            //match each operator with its idx in the editor
-            let mut aligned_ops = Vec::new();
-            let mut ops_iter = func_ops[func_idx].clone().into_iter();
-            for line_idx in *func_start..=*func_end {
-                for _ in 0..editor.info(line_idx).num_ops() {
-                    let op = ops_iter.next().context("not enough operators")?;
-                    aligned_ops.push(Aligned { op, line_idx });
+
+        // align globals
+        {
+            let mut globals_iter = globals.iter_mut();
+            for line_no in 0..editor.len() {
+                if editor.info(line_no).is_active()
+                    && let LineKind::Other(parts) = &editor.info(line_no).kind
+                    && parts.first() == Some(&ModulePart::Global)
+                {
+                    debug_assert_eq!(parts.len(), 1);
+                    globals_iter
+                        .next()
+                        .expect("not enough enough globals in module")
+                        .line_idx = line_no;
+                }
+            }
+            assert!(globals_iter.next().is_none(), "too many globals in module");
+        }
+
+        assert_eq!(
+            function_ranges.len(),
+            funcs.len(),
+            "function count mismatch"
+        );
+
+        for (func_idx, ((mut locals, mut ops), (start_line, end_line))) in
+            funcs.into_iter().zip(function_ranges).enumerate()
+        {
+            // align locals
+            let mut locals_iter = locals.iter_mut();
+            for line_no in *start_line..=*end_line {
+                if editor.info(line_no).is_active()
+                    && let LineKind::Other(parts) = &editor.info(line_no).kind
+                    && let Some(ModulePart::Local(num)) = parts.first()
+                {
+                    debug_assert_eq!(parts.len(), 1);
+                    for _ in 0..*num {
+                        locals_iter
+                            .next()
+                            .expect("not enough locals in function")
+                            .line_idx = line_no;
+                    }
+                }
+            }
+            assert!(locals_iter.next().is_none(), "too many locals in function");
+
+            // align ops
+            let mut ops_iter = ops.iter_mut();
+            for line_no in *start_line..=*end_line {
+                for _ in 0..editor.info(line_no).num_ops() {
+                    ops_iter
+                        .next()
+                        .expect("not enough ops in function")
+                        .line_idx = line_no;
                 }
             }
             match ops_iter.next() {
-                Some(end @ wasmparser::Operator::End) => {
-                    aligned_ops.push(Aligned {
-                        op: end,
-                        line_idx: *func_end,
-                    });
+                Some(Aligned {
+                    line_idx,
+                    inner: wasmparser::Operator::End,
+                }) => {
+                    *line_idx = *end_line;
                 }
                 Some(_) => {
-                    bail!("not enough instructions");
+                    bail!("too many ops in function");
                 }
                 None => {
-                    bail!("not enough operators");
+                    bail!("not enough ops in function (missing end)");
                 }
             }
-            let locals = func_locals.get(func_idx).cloned().unwrap_or_default();
             functions.push(RawFunction {
                 type_idx: func_type_indices[func_idx],
+                params: types[func_type_indices[func_idx] as usize]
+                    .params()
+                    .to_vec(),
                 locals,
-                operators: aligned_ops,
+                operators: ops,
             });
         }
 
@@ -337,7 +339,27 @@ impl<'a> RawModule<'a> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
-        let (imports, num_func_imports) = self.instr_imports(import_lines, editor);
+
+        /* Disable unlinkable imports */
+        let mut imports = Vec::new();
+        for (import_idx, import @ wasmparser::Import { module, name, ty }) in
+            self.imports.into_iter().enumerate()
+        {
+            match ty {
+                wasmparser::TypeRef::Func(type_idx) => {
+                    match Self::check_func_import(module, name, &self.types[type_idx as usize]) {
+                        Some(reason) => editor.set_invalid(import_lines[import_idx], Some(reason)),
+                        None => imports.push(import),
+                    }
+                }
+                _ => {
+                    editor.set_invalid(
+                        import_lines[import_idx],
+                        Some(String::from("unsupported import kind")),
+                    );
+                }
+            };
+        }
 
         let mut ret = ValidModule {
             types: self.types,
@@ -345,48 +367,50 @@ impl<'a> RawModule<'a> {
             memory: self.memory,
             globals: self.globals,
             functions: Vec::with_capacity(self.functions.len()),
-            num_func_imports,
         };
 
         let mut raw_functions = self.functions.into_iter();
 
+        /* "Validize" each function */
         for payload in parser.parse_all(wasm_bin) {
             if let ValidPayload::Func(func, body) = validator.payload(&payload?)? {
                 let RawFunction {
                     type_idx,
+                    params,
                     locals,
                     operators,
-                } = raw_functions.next().expect("one function");
+                } = raw_functions.next().expect("function count mismatch");
 
                 #[cfg(debug_assertions)]
                 Self::assert_bodies_match(&locals, &operators, &body)?;
 
                 let mut func_validator = func.into_validator(allocs);
 
-                for (count, ty) in &locals {
-                    func_validator.define_locals(DUMMY_OFFSET, *count, *ty)?;
+                for ty in &locals {
+                    func_validator.define_locals(DUMMY_OFFSET, 1, ty.inner)?;
                 }
 
                 let mut valid_function = ValidFunction {
                     type_idx,
+                    params,
                     locals,
                     operators: Vec::with_capacity(operators.len()),
                 };
 
                 for op in operators {
-                    match func_validator.try_op(DUMMY_OFFSET, &op.op) {
+                    match func_validator.try_op(DUMMY_OFFSET, &op.inner) {
                         Ok(()) => valid_function.operators.push(op.into()),
                         Err(e) => {
                             editor.set_invalid(op.line_idx, Some(e.message().to_string()));
                             /* make a valid version of this operator */
                             let validized = Self::make_valid(func_validator.clone(), op)?;
-                            for prepended_op in &validized.op.prepended {
+                            for prepended_op in &validized.inner.prepended {
                                 func_validator
                                     .op(DUMMY_OFFSET, prepended_op)
                                     .expect("prepended op is valid");
                             }
                             func_validator
-                                .op(DUMMY_OFFSET, &validized.op.op)
+                                .op(DUMMY_OFFSET, &validized.inner.op)
                                 .expect("validized op now valid");
                             valid_function.operators.push(validized);
                         }
@@ -453,10 +477,10 @@ impl<'a> RawModule<'a> {
         fn bailout(op: &Aligned<GeneralOperator<'_>>) -> Aligned<GeneralOperator<'static>> {
             Aligned {
                 line_idx: op.line_idx,
-                op: GeneralOperator {
+                inner: GeneralOperator {
                     prepended: vec![],
                     untyped: true,
-                    op: match op.op.op {
+                    op: match op.inner.op {
                         Operator::Block { .. } => Operator::Block {
                             blockty: wasmparser::BlockType::Empty,
                         },
@@ -478,7 +502,7 @@ impl<'a> RawModule<'a> {
         let drop_count = func_validator.operand_stack_height() as usize
             - func_validator.get_control_frame(0).unwrap().height;
         for _ in 0..drop_count {
-            general_op.op.prepended.push(Operator::Drop);
+            general_op.inner.prepended.push(Operator::Drop);
         }
 
         // Attempt to validate the operator in this context,
@@ -487,13 +511,13 @@ impl<'a> RawModule<'a> {
         loop {
             let mut validator_copy = func_validator.clone();
 
-            for prepended_op in &general_op.op.prepended {
+            for prepended_op in &general_op.inner.prepended {
                 validator_copy
                     .op(DUMMY_OFFSET, prepended_op)
                     .expect("prepended op is valid");
             }
 
-            match validator_copy.try_op(DUMMY_OFFSET, &general_op.op.op) {
+            match validator_copy.try_op(DUMMY_OFFSET, &general_op.inner.op) {
                 Ok(()) => {
                     return Ok(general_op);
                 }
@@ -507,23 +531,23 @@ impl<'a> RawModule<'a> {
                         Some(suffix) => match type_str_to_default_value(first_type(suffix)?) {
                             // Invalidity is because of a missing or mismatched param.
                             // Can we insert a default value?
-                            Some(op) => general_op.op.prepended.insert(drop_count, op),
+                            Some(op) => general_op.inner.prepended.insert(drop_count, op),
                             None => {
                                 // No default value possible.
-                                general_op.op.untyped = true;
-                                match &general_op.op.op {
+                                general_op.inner.untyped = true;
+                                match &general_op.inner.op {
                                     // If the operator is an end, need to preserve block structure,
                                     // but we can do this by marking block (which is almost ending anyway)
                                     // unreachable. This will make the stack polymorphic and the `end`
                                     // can pop whatever it needs.
                                     Operator::End => general_op
-                                        .op
+                                        .inner
                                         .prepended
                                         .insert(drop_count, Operator::Unreachable),
                                     // A polymorphic operator (e.g. `drop` or `select`) can take any param,
                                     // so here give it an i32.
                                     _ if suffix == "a type but nothing on stack" => general_op
-                                        .op
+                                        .inner
                                         .prepended
                                         .insert(drop_count, Operator::I32Const { value: 0 }),
                                     // Otherwise, replace operator with something valid in this context.
@@ -538,28 +562,31 @@ impl<'a> RawModule<'a> {
     }
 
     fn assert_bodies_match(
-        locals: &[(u32, ValType)],
+        locals: &[Aligned<ValType>],
         ops: &[Aligned<Operator<'a>>],
         body: &wasmparser::FunctionBody<'a>,
     ) -> Result<()> {
-        let mut locals_reader = body.get_locals_reader()?;
-
-        for (count, ty) in locals {
-            let (body_count, body_ty) = locals_reader.read()?;
-            assert_eq!(*count, body_count);
-            assert_eq!(*ty, body_ty);
+        let mut local_idx = 0;
+        let locals_reader = body.get_locals_reader()?;
+        for entry in locals_reader {
+            let (num, ty) = entry?;
+            for _ in 0..num {
+                assert!(local_idx < locals.len());
+                assert_eq!(ty, locals[local_idx].inner);
+                local_idx += 1;
+            }
         }
 
         let mut ops_reader = body.get_operators_reader()?;
         for op in ops {
-            assert_eq!(&op.op, &ops_reader.read()?);
+            assert_eq!(&op.inner, &ops_reader.read()?);
         }
         ops_reader.finish()?;
         assert!(&ops_reader.eof());
         Ok(())
     }
 
-    fn check_import(
+    fn check_func_import(
         import_module: &str,
         import_name: &str,
         ty: &wasmparser::FuncType,
@@ -585,79 +612,11 @@ impl<'a> RawModule<'a> {
                     }
                 }
                 return Some(format!(
-                    "component {import_name} not found in module {module}"
+                    "function ‘{import_name}’ not found in module {module}"
                 ));
             }
         }
-        Some(format!("module {import_module} not found"))
-    }
-
-    fn instr_imports(
-        &self,
-        import_lines: &[usize],
-        editor: &mut impl LineInfosMut,
-    ) -> (wasm_encoder::ImportSection, u32) {
-        use wasm_encoder::EntityType;
-        use wasmparser::*;
-        use web_sys::console::log_1;
-        // Encode the instrumentation functions as imports.
-        let mut imports = wasm_encoder::ImportSection::new();
-        for (name, type_idx) in InstrImports::TYPE_INDICES.iter() {
-            imports.import("codillon_debug", name, EntityType::Function(*type_idx));
-        }
-        let mut num_func_imports = 0;
-        for (import_idx, Import { module, name, ty }) in self.imports.iter().enumerate() {
-            match *ty {
-                TypeRef::Func(type_idx) | TypeRef::FuncExact(type_idx) => {
-                    let reason = Self::check_import(module, name, &self.types[type_idx as usize]);
-                    editor.set_invalid(import_lines[import_idx], reason);
-                    imports.import(
-                        module,
-                        name,
-                        EntityType::Function(type_idx + InstrImports::FUNC_SIGS.len() as u32),
-                    );
-                    num_func_imports += 1;
-                }
-                TypeRef::Memory(MemoryType {
-                    initial,
-                    memory64,
-                    shared,
-                    maximum,
-                    page_size_log2,
-                }) => {
-                    imports.import(
-                        module,
-                        name,
-                        EntityType::Memory(wasm_encoder::MemoryType {
-                            minimum: initial,
-                            maximum,
-                            memory64,
-                            shared,
-                            page_size_log2,
-                        }),
-                    );
-                }
-                TypeRef::Global(GlobalType {
-                    content_type,
-                    mutable,
-                    shared,
-                }) => {
-                    imports.import(
-                        module,
-                        name,
-                        EntityType::Global(wasm_encoder::GlobalType {
-                            val_type: parser_to_encoder(&content_type),
-                            shared,
-                            mutable,
-                        }),
-                    );
-                }
-                _ => {
-                    log_1(&format!("unsupported import {name} from module {module}").into());
-                }
-            };
-        }
-        (imports, num_func_imports)
+        Some(format!("module ‘{import_module}’ not found"))
     }
 }
 
@@ -687,7 +646,7 @@ impl SimulatedStack {
         &mut self,
         op: &Operator<'_>,
         validator: &mut wasmparser::FuncValidator<wasmparser::ValidatorResources>,
-        slot_idx_counter: &mut usize,
+        slots: &mut Vec<Slot>,
         untyped: bool,
     ) -> Result<OperatorType> {
         let (pop_count, push_count) = op
@@ -710,13 +669,9 @@ impl SimulatedStack {
                 if untyped || (pop_count - i - 1) >= accessible_operands {
                     None
                 } else {
-                    Some(Slot {
-                        ty: validator
-                            .get_operand_type(pop_count - i - 1)
-                            .flatten()
-                            .unwrap(),
-                        idx: self.slot_idx_stack[pre_instr_height + i - pop_count],
-                    })
+                    Some(SlotUse(
+                        self.slot_idx_stack[pre_instr_height + i - pop_count],
+                    ))
                 }
             })
             .collect::<Vec<_>>();
@@ -738,19 +693,17 @@ impl SimulatedStack {
 
         let outputs = (0..push_count)
             .map(|i| {
-                let new_slot_idx = *slot_idx_counter + i; // new slot created by this pushed operand
-                self.slot_idx_stack.push(new_slot_idx);
-                Slot {
-                    ty: validator
+                slots.push(Slot(
+                    validator
                         .get_operand_type(push_count - i - 1)
                         .flatten()
                         .expect("result operand"),
-                    idx: new_slot_idx,
-                }
+                ));
+                self.slot_idx_stack.push(slots.len() - 1);
+                // XXX: advisory connection to "original" global or local slot for a {global/local}.get?
+                SlotUse(slots.len() - 1)
             })
             .collect::<Vec<_>>();
-
-        *slot_idx_counter += push_count;
 
         Ok(OperatorType { inputs, outputs })
     }
@@ -763,264 +716,297 @@ impl<'a> ValidModule<'a> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
         let mut ret = TypedModule {
+            slots: Vec::new(),
             globals: Vec::with_capacity(self.globals.len()),
             funcs: Vec::with_capacity(self.functions.len()),
         };
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
-        let mut function_index = 0;
 
-        let mut slot_idx_counter = 0;
-
-        for Global {
-            ty: GlobalType { content_type, .. },
+        for Aligned {
+            inner:
+                Global {
+                    ty: GlobalType { content_type, .. },
+                    ..
+                },
             ..
         } in &self.globals
         {
-            ret.globals.push(Slot {
-                ty: *content_type,
-                idx: slot_idx_counter,
-            });
-            slot_idx_counter += 1;
+            ret.slots.push(Slot(*content_type));
+            ret.globals.push(SlotUse(ret.slots.len() - 1));
         }
 
+        let mut funcs_iter = self.functions.iter();
         for payload in parser.parse_all(wasm_bin) {
             if let ValidPayload::Func(func, _) = validator.payload(&payload?)? {
+                let valid_func = funcs_iter.next().expect("not enough funcs in ValidModule");
                 let mut validator = func.into_validator(allocs);
                 let types = Self::function_into_types_table(
                     &mut validator,
-                    self.functions.get(function_index).unwrap(),
-                    &mut slot_idx_counter,
+                    &self.types,
+                    valid_func,
+                    &mut ret.slots,
                 )?;
                 ret.funcs.push(types);
                 allocs = validator.into_allocations();
-                function_index += 1;
             }
         }
+        assert!(funcs_iter.next().is_none(), "too much funcs in ValidModule");
         Ok(ret)
     }
 
     fn function_into_types_table(
         func_validator: &mut wasmparser::FuncValidator<wasmparser::ValidatorResources>,
+        types: &[wasmparser::FuncType],
         valid_func: &ValidFunction<'_>,
-        slot_idx_counter: &mut usize,
+        slots: &mut Vec<Slot>,
     ) -> Result<TypedFunction> {
-        let mut stack = SimulatedStack::default();
-
         let mut ret = TypedFunction {
+            params: Vec::with_capacity(valid_func.params.len()),
             locals: Vec::with_capacity(valid_func.locals.len()),
             ops: Vec::with_capacity(valid_func.operators.len()),
         };
 
-        for (count, ty) in &valid_func.locals {
-            func_validator.define_locals(DUMMY_OFFSET, *count, *ty)?;
-            ret.locals.push(Slot {
-                ty: *ty,
-                idx: *slot_idx_counter,
-            });
-            *slot_idx_counter += 1;
+        for param_ty in types[valid_func.type_idx as usize].params() {
+            slots.push(Slot(*param_ty));
+            ret.params.push(SlotUse(slots.len() - 1));
         }
 
+        for ty in &valid_func.locals {
+            func_validator.define_locals(DUMMY_OFFSET, 1, ty.inner)?;
+            slots.push(Slot(ty.inner));
+            ret.locals.push(SlotUse(slots.len() - 1));
+        }
+
+        let mut stack = SimulatedStack::default();
+
         for op in &valid_func.operators {
-            for pre in &op.op.prepended {
-                stack.op(pre, func_validator, slot_idx_counter, false)?;
+            for pre in &op.inner.prepended {
+                stack.op(pre, func_validator, slots, false)?;
             }
 
             ret.ops
-                .push(stack.op(&op.op.op, func_validator, slot_idx_counter, op.op.untyped)?);
+                .push(stack.op(&op.inner.op, func_validator, slots, op.inner.untyped)?);
         }
 
         Ok(ret)
     }
 
-    fn classify(operation: &wasmparser::Operator, op_type: &OperatorType) -> InstrumentationFuncs {
-        use wasmparser::Operator::*;
-        match operation {
-            // Special Functions
-            Call { function_index } => CallFunc(*function_index),
-            LocalSet { local_index } | LocalTee { local_index } => {
-                match op_type.inputs.first().expect("local op type") {
-                    Some(ty) => match ty {
-                        Slot {
-                            ty: ValType::I32, ..
-                        } => SetLocalI32(*local_index),
-                        Slot {
-                            ty: ValType::F32, ..
-                        } => SetLocalF32(*local_index),
-                        Slot {
-                            ty: ValType::I64, ..
-                        } => SetLocalI64(*local_index),
-                        Slot {
-                            ty: ValType::F64, ..
-                        } => SetLocalF64(*local_index),
-                        _ => Other,
-                    },
-                    None => panic!("classify run on unreachable op"),
-                }
-            }
-            GlobalSet { global_index } => match op_type.inputs.first().expect("global op type") {
-                Some(ty) => match ty {
-                    Slot {
-                        ty: ValType::I32, ..
-                    } => SetGlobalI32(*global_index),
-                    Slot {
-                        ty: ValType::F32, ..
-                    } => SetGlobalF32(*global_index),
-                    Slot {
-                        ty: ValType::I64, ..
-                    } => SetGlobalI64(*global_index),
-                    Slot {
-                        ty: ValType::F64, ..
-                    } => SetGlobalF64(*global_index),
-                    _ => Other,
-                },
-                None => panic!("classify run on unreachable op"),
-            },
-            I32Store { .. } | I32Store8 { .. } | I32Store16 { .. } => SetMemoryI32,
-            F32Store { .. } => SetMemoryF32,
-            I64Store { .. } | I64Store8 { .. } | I64Store16 { .. } => SetMemoryI64,
-            F64Store { .. } => SetMemoryF64,
-            _ => Other,
-        }
-    }
-    fn build_type_section(&self) -> TypeSection {
-        let mut type_section = TypeSection::new();
-        // Instrumentation function types
-        for (params_slice, results_slice) in InstrImports::FUNC_SIGS.iter() {
-            type_section
-                .ty()
-                .function(params_slice.to_vec(), results_slice.to_vec());
-        }
-        // User-defined types
-        for ty in &self.types {
-            type_section.ty().function(
-                ty.params()
-                    .iter()
-                    .map(parser_to_encoder)
-                    .collect::<Vec<_>>()
-                    .clone(),
-                ty.results()
-                    .iter()
-                    .map(parser_to_encoder)
-                    .collect::<Vec<_>>()
-                    .clone(),
-            );
-        }
-        type_section
-    }
-
-    fn build_globals(&self) -> wasm_encoder::GlobalSection {
-        use wasm_encoder::ConstExpr;
-        use wasmparser::Operator::*;
-        let mut globals = GlobalSection::new();
-        for wasmparser::Global { ty, init_expr } in &self.globals {
-            let mut init_reader = init_expr.get_operators_reader();
-            if let Ok(op) = init_reader.read() {
-                let initial_expression = match op {
-                    I32Const { value } => ConstExpr::i32_const(value),
-                    F32Const { value } => ConstExpr::f32_const(value.into()),
-                    I64Const { value } => ConstExpr::i64_const(value),
-                    F64Const { value } => ConstExpr::f64_const(value.into()),
-                    V128Const { value } => ConstExpr::v128_const(value.into()),
-                    _ => ConstExpr::empty(),
-                };
-                globals.global(
-                    wasm_encoder::GlobalType {
-                        val_type: parser_to_encoder(&ty.content_type),
-                        mutable: ty.mutable,
-                        shared: ty.shared,
-                    },
-                    &initial_expression,
-                );
-            }
-        }
-        globals
-    }
-
-    fn build_memory(&self) -> wasm_encoder::MemorySection {
-        let mut memory = wasm_encoder::MemorySection::new();
-        for &wasmparser::MemoryType {
-            memory64,
-            shared,
-            initial,
-            maximum,
-            page_size_log2,
-        } in &self.memory
-        {
-            memory.memory(wasm_encoder::MemoryType {
-                minimum: initial,
-                maximum,
-                shared,
-                memory64,
-                page_size_log2,
-            });
-        }
-        memory
-    }
-
-    pub fn build_executable_binary(
-        &self,
+    pub fn build_instrumented_binary(
+        self,
         types: &TypedModule,
         function_ranges: &[(usize, usize)],
     ) -> Result<Vec<u8>> {
-        let mut module: wasm_encoder::Module = Default::default();
-        // Maps ouputs (list of ValTypes) to dynamic_func_idx
-        let mut types_map: IndexMap<Vec<ValType>, usize> =
-            IndexMap::with_capacity(self.functions.len());
-        let mut type_section = self.build_type_section();
-        let mut dynamic_type_idx = (InstrImports::FUNC_SIGS.len() + self.types.len()) as u32;
-        let mut function_section = FunctionSection::new();
-        for func in &self.functions {
-            function_section.function((func.type_idx + InstrImports::FUNC_SIGS.len()) as u32);
-        }
-        let mut dynamic_func_idx = InstrImports::TYPE_INDICES.len()
-            + self.num_func_imports as usize
-            + self.functions.len();
-        for func in &types.funcs {
-            for OperatorType { outputs, .. } in &func.ops {
-                let results = outputs.iter().map(|ty| ty.ty).collect::<Vec<_>>();
-                if !results.is_empty() && !types_map.contains_key(&results) {
-                    let mut outputs_params =
-                        results.iter().map(parser_to_encoder).collect::<Vec<_>>();
-                    outputs_params.append(&mut vec![EncoderValType::I32; outputs.len()]);
-                    type_section.ty().function(
-                        outputs_params,
-                        results.iter().map(parser_to_encoder).collect::<Vec<_>>(),
-                    );
-                    function_section.function(dynamic_type_idx);
-                    types_map.insert(results.clone(), dynamic_func_idx);
-                    // The type and function indices of the dynamically generated functions
-                    // They are incremented after being encoded in the TypeSection and FunctionSection, and they have different initial offsets
-                    dynamic_type_idx += 1;
-                    dynamic_func_idx += 1;
+        use wasm_encoder::*;
+        let mut module = Module::default();
+
+        /* Make import section (with instrumentation functions prepended) */
+        let (import_section, num_func_imports) = {
+            let mut import_section = ImportSection::new();
+            let mut num_func_imports = 0;
+
+            // First in import section: the "primitive" instrumentation functions
+            // All function indices in code will have to be incremented by the number of these.
+            for (name, type_idx) in InstrImports::TYPE_INDICES.iter() {
+                import_section.import(
+                    "codillon_debug",
+                    name,
+                    // instrumentation types come after the types in the original module
+                    EntityType::Function(self.types.len() as u32 + type_idx),
+                );
+                num_func_imports += 1;
+            }
+
+            // Next in import section: the user-defined (original) imports
+            for orig_import in &self.imports {
+                match orig_import.ty {
+                    wasmparser::TypeRef::Func(_) => num_func_imports += 1,
+                    _ => panic!("unexpected import type"),
+                }
+                RoundtripReencoder.parse_import(&mut import_section, *orig_import)?;
+            }
+            (import_section, num_func_imports)
+        };
+
+        /* Build type and function section */
+        // These are done together because we are auto-generating "transparent" instrumentation
+        // functions (which collect the results of an arbitrary operator) and their types
+        // at the same time.
+        let (type_section, function_section, result_types_to_func_idx, num_inserted_functions) = {
+            let mut type_section = TypeSection::new();
+            let mut function_section = FunctionSection::new();
+
+            /* Start type section */
+
+            // First in type section: the user-defined (original) function types
+            for ty in &self.types {
+                type_section
+                    .ty()
+                    .func_type(&RoundtripReencoder.func_type(ty.clone())?);
+            }
+
+            // Next in type section: the "primitive" instrumentation function types
+            for (p, r) in InstrImports::FUNC_SIGS.iter() {
+                type_section.ty().function(p.to_vec(), r.to_vec());
+            }
+
+            // Next in type section: the type of the "step" function
+            let step_function_type_idx = type_section.len();
+            type_section.ty().function([EncoderValType::I32], []);
+            let num_inserted_types = 1;
+
+            // Last in type section will be the "transparent" instrumention function types (below)
+
+            /* Start function section */
+
+            // N.B. The imported functions have claimed the first function *indices*.
+
+            // First in the actual function section: the "step" function (called after every operator)
+            // This is inserted into the user's module so it can safely use `unreachable`
+            // to terminate execution.
+            function_section.function(step_function_type_idx);
+            let num_inserted_functions = 1;
+
+            // Next in function section: the user-defined (original) functions
+            for func in &self.functions {
+                function_section.function(func.type_idx);
+            }
+
+            // Last in function section: the "transparent" instrumentation functions (which return their inputs)
+
+            // Map operator result types to the func idx of the "transparent" instrumentation function
+            let mut result_types_to_func_idx = IndexMap::new();
+
+            let mut next_type_idx = type_section.len();
+            let mut next_func_idx =
+                num_func_imports + num_inserted_functions + self.functions.len() as u32;
+
+            debug_assert_eq!(
+                next_type_idx,
+                InstrImports::FUNC_SIGS.len() as u32 + num_inserted_types + self.types.len() as u32
+            );
+            debug_assert_eq!(next_type_idx, type_section.len());
+            debug_assert_eq!(next_func_idx, num_func_imports + function_section.len());
+            for func in &types.funcs {
+                for OperatorType { outputs, .. } in &func.ops {
+                    let results = outputs
+                        .iter()
+                        .map(|SlotUse(idx)| types.slots[*idx].0)
+                        .collect::<Vec<_>>();
+                    if !results.is_empty() && !result_types_to_func_idx.contains_key(&results) {
+                        // Make function-section entry for new "transparent" instrumentation function
+                        // The results are just the results of the instrumented operator.
+                        let instr_results = RoundtripReencoder.val_types(results.clone())?;
+                        // The params are the same thing, plus a slot index for each operand.
+                        let mut instr_params = instr_results.clone();
+                        instr_params.extend(vec![EncoderValType::I32; outputs.len()]);
+
+                        // Add the instrumentation function type to the type section...
+                        debug_assert_eq!(type_section.len(), next_type_idx);
+                        type_section.ty().function(instr_params, instr_results);
+                        // ... and add the function itself to the function section...
+                        debug_assert_eq!(num_func_imports + function_section.len(), next_func_idx);
+                        function_section.function(next_type_idx);
+                        // ... and add this relationship to the map.
+                        result_types_to_func_idx.insert(results, next_func_idx);
+
+                        next_type_idx += 1;
+                        next_func_idx += 1;
+                    }
                 }
             }
+            (
+                type_section,
+                function_section,
+                result_types_to_func_idx,
+                num_inserted_functions,
+            )
+        };
+
+        // Write finalized sections.
+        module.section(&type_section);
+        module.section(&import_section);
+        module.section(&function_section);
+
+        /* XXX table section: skip for now */
+
+        /* Memory section */
+        {
+            let mut memory_section = MemorySection::new();
+            for memory in &self.memory {
+                memory_section.memory(RoundtripReencoder.memory_type(*memory)?);
+            }
+            module.section(&memory_section);
         }
 
-        // Encode the export section.
-        let mut exports = ExportSection::new();
-        let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
-        if !self.functions.is_empty() {
-            exports.export(
-                "main",
-                wasm_encoder::ExportKind::Func,
-                num_instr_imports + self.num_func_imports,
-            );
+        /* XXX tag section: skip for now */
+
+        /* Global section */
+        {
+            let mut global_section = GlobalSection::new();
+            for global in &self.globals {
+                RoundtripReencoder.parse_global(&mut global_section, global.inner.clone())?;
+            }
+            module.section(&global_section);
         }
-        module.section(&type_section);
-        module.section(&self.imports);
-        module.section(&function_section);
-        module.section(&self.build_memory());
-        module.section(&self.build_globals());
-        module.section(&exports);
-        // Encode the code section.
-        let mut codes = CodeSection::new();
-        for (func_idx, start_line) in function_ranges.iter().enumerate() {
-            self.build_function(func_idx, &mut codes, types, &types_map, start_line.0)?;
+
+        /* Export section */
+        {
+            let mut exports = ExportSection::new();
+            if !self.functions.is_empty() {
+                exports.export(
+                    "main",
+                    ExportKind::Func,
+                    num_func_imports + num_inserted_functions,
+                );
+            }
+            module.section(&exports);
         }
-        for outputs in types_map.keys() {
-            self.dynamically_generate_function(outputs, &mut codes)?;
+
+        /* XXX start section: skip for now */
+        /* XXX elem section: skip for now */
+        /* XXX datacount section: skip for now */
+
+        /* Code section */
+        {
+            let mut code_section = CodeSection::new();
+
+            // First in code section: the "step" function.
+            // This is inserted into the instrumented module so that "unreachable" doesn't panic the Rust.
+            {
+                let mut f = wasm_encoder::Function::new(vec![]);
+                f.instruction(&LocalGet(0)); // line number param
+                f.instruction(&Call(InstrImports::RecordStep as u32));
+                f.instruction(&I32Eqz);
+                f.instruction(&If(wasm_encoder::BlockType::Empty));
+                // Trap when run out of steps
+                f.instruction(&Unreachable);
+                f.instruction(&End);
+                f.instruction(&End);
+                code_section.function(&f);
+            }
+
+            // Next in code section: the original functions
+            for (func_idx, start_line) in function_ranges.iter().enumerate() {
+                self.build_function(
+                    func_idx,
+                    &mut code_section,
+                    types,
+                    &result_types_to_func_idx,
+                    start_line.0,
+                    num_inserted_functions,
+                )?;
+            }
+
+            // Last in code section: the "transparent" (dynamically generated) instrumentation functions
+            for result_type in result_types_to_func_idx.keys() {
+                // iterated in same order as inserted
+                self.dynamically_generate_function(result_type, &mut code_section)?;
+            }
+
+            module.section(&code_section);
         }
-        module.section(&codes);
+
+        /* XXX data section: skip for now */
 
         let wasm = module.finish();
         Ok(wasm)
@@ -1029,290 +1015,202 @@ impl<'a> ValidModule<'a> {
     fn build_function(
         &self,
         func_idx: usize,
-        codes: &mut CodeSection,
+        code_section: &mut CodeSection,
         types: &TypedModule,
-        types_map: &IndexMap<Vec<ValType>, usize>,
+        result_types_to_func_idx: &IndexMap<Vec<ValType>, u32>,
         start_line: usize,
+        num_inserted_functions: u32,
     ) -> Result<()> {
-        let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32;
-        let function = self.functions.get(func_idx).expect("valid func idx");
-        let mut f = wasm_encoder::Function::new(
-            function
+        use wasm_encoder::Instruction::*;
+        let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32; // also idx of step function
+        let orig_function = &self.functions[func_idx];
+        let typed_function = &types.funcs[func_idx];
+        let mut new_function = wasm_encoder::Function::new_with_locals_types(
+            orig_function
                 .locals
                 .iter()
-                .map(|(count, value)| (*count, parser_to_encoder(value)))
-                .collect::<Vec<(u32, EncoderValType)>>(),
+                .map(|ty| RoundtripReencoder.val_type(ty.inner).fmt_err())
+                .collect::<Result<Vec<_>>>()?,
         );
-        let pop_debug = |f: &mut wasm_encoder::Function, num_pop: i32| {
-            f.instruction(&I32Const(num_pop));
-            f.instruction(&Call(InstrImports::PopI as u32));
+
+        let transparent_record_results =
+            |f: &mut wasm_encoder::Function, results: &Vec<SlotUse>| {
+                if results.is_empty() {
+                    return;
+                }
+                for SlotUse(slot_idx) in results {
+                    f.instruction(&I32Const((*slot_idx).try_into().expect("slot -> i32")));
+                }
+                f.instruction(&Call(
+                    result_types_to_func_idx[&results
+                        .iter()
+                        .map(|SlotUse(slot_idx)| types.slots[*slot_idx].0)
+                        .collect::<Vec<_>>()],
+                ));
+            };
+
+        let primitive_record = |f: &mut wasm_encoder::Function, operand: &SlotUse| {
+            use InstrImports::*;
+            use ValType::*;
+            let SlotUse(slot_idx) = operand;
+            f.instruction(&I32Const((*slot_idx).try_into().expect("slot -> i32"))); // slot
+            let rec_function = match types.slots[*slot_idx].0 {
+                I32 => RecordI32,
+                F32 => RecordF32,
+                I64 => RecordI64,
+                F64 => RecordF64,
+                _ => bail!("unhandled ValType for primitive_record"),
+            };
+            f.instruction(&Call(rec_function as u32));
+            Ok(())
         };
-        let record = |f: &mut wasm_encoder::Function, outputs: &Vec<ValType>| {
-            for _ in 0..outputs.len() {
-                f.instruction(&I32Const(0));
-            }
-            f.instruction(&Call(types_map[outputs] as u32));
+
+        let step_debug = |f: &mut wasm_encoder::Function, line_number: usize| {
+            // Step after each instruction evaluation
+            f.instruction(&I32Const(line_number.try_into().expect("line_no -> i32")));
+            f.instruction(&Call(num_instr_imports));
         };
-        let params = self.get_func_type(func_idx).params();
-        if !params.is_empty() {
-            self.record_params(params, &mut f, start_line);
+
+        // XXX on function entry, should "enter frame" of the params and locals
+
+        // Record values of params and locals
+        for (param_idx, param) in typed_function.params.iter().enumerate() {
+            new_function.instruction(&LocalGet(param_idx.try_into().expect("param idx -> u32")));
+            primitive_record(&mut new_function, param)?;
         }
-        let mut unreachable = false;
-        for (i, codillon_instruction) in function.operators.iter().enumerate() {
-            // Skip unreachable operators until end of frame.
-            if codillon_instruction.op.op == Operator::End {
-                // End of frame; need to include this operator and all after.
-                unreachable = false;
-            } else if unreachable {
-                // Otherwise, skip operator.
-                continue;
-            }
+        for (local_idx_pre, local) in typed_function.locals.iter().enumerate() {
+            let local_idx = local_idx_pre + typed_function.params.len();
+            new_function.instruction(&LocalGet(local_idx.try_into().expect("local idx -> u32")));
+            primitive_record(&mut new_function, local)?;
+        }
 
-            let line_idx = codillon_instruction.line_idx as i32;
-            let instruction = RoundtripReencoder.instruction(codillon_instruction.op.op.clone())?;
-            let value_type = &types.funcs.get(func_idx).unwrap().ops[i];
-            let operation_type = Self::classify(&codillon_instruction.op.op, value_type);
+        if orig_function.operators.len() > 1
+            && let Some(Aligned { line_idx, .. }) = orig_function.operators.first()
+        {
+            step_debug(&mut new_function, *line_idx);
+        } else {
+            step_debug(&mut new_function, start_line + 1);
+        }
 
-            if !codillon_instruction.op.prepended.is_empty() {
+        // Record all operators, translating func idxes as necessary
+        for (i, codillon_operator) in orig_function.operators.iter().enumerate() {
+            let mut op = RoundtripReencoder.instruction(codillon_operator.inner.op.clone())?;
+            let op_type = &typed_function.ops[i];
+
+            if codillon_operator.inner.untyped || !codillon_operator.inner.prepended.is_empty() {
                 // Originally invalid operator that was "validized" for type-analysis purposes.
                 // Traps at runtime.
-                f.instruction(&Unreachable);
-                unreachable = true;
-            } else if !value_type.inputs.is_empty() {
-                pop_debug(&mut f, value_type.inputs.len() as i32);
+                new_function.instruction(&I32Const(
+                    codillon_operator.line_idx.try_into().expect("line -> i32"),
+                ));
+                new_function.instruction(&Call(InstrImports::RecordInvalid as u32));
+                new_function.instruction(&Unreachable);
             }
 
-            if codillon_instruction.op.op == Operator::End {
-                // Call dynamically generated type to record return values
-                if !value_type.outputs.is_empty() {
-                    let results = value_type
-                        .outputs
-                        .iter()
-                        .map(|ty| ty.ty)
-                        .collect::<Vec<_>>(); // XXX provide slot indices for recording properly
-                    record(&mut f, &results);
+            // increment function indices to accommodate added imports
+            match op {
+                Call(ref mut idx) | RefFunc(ref mut idx) | ReturnCall(ref mut idx) => {
+                    *idx += num_instr_imports + num_inserted_functions
                 }
-                f.instruction(&instruction);
-                continue;
-            } else if unreachable {
-                continue;
+                _ => {}
             }
 
-            if let CallFunc(function_idx) = operation_type {
-                f.instruction(&Call(function_idx + num_instr_imports));
-            } else {
-                // Instrumentation that needs to occur before execution
-                Self::instrument_memory_ops(&mut f, &operation_type);
-                f.instruction(&instruction);
-                // Instrumentation that needs to occur after execution
-                Self::instrument_local_ops(&mut f, &operation_type);
-                Self::instrument_global_ops(&mut f, &operation_type);
-                if let Other = operation_type
-                    && !value_type.outputs.is_empty()
-                {
-                    let results = value_type
-                        .outputs
-                        .iter()
-                        .map(|ty| ty.ty)
-                        .collect::<Vec<_>>(); // XXX provide slot indices for recording properly
-                    record(&mut f, &results);
+            // the operator itself
+            new_function.instruction(&op);
+
+            if i + 1 == orig_function.operators.len() {
+                debug_assert!(matches!(op, End));
+                continue; // function is over
+            }
+
+            // record result operands
+            transparent_record_results(&mut new_function, &op_type.outputs);
+
+            // did this operator change a global or local (XXX or memory?)
+            match op {
+                GlobalSet(idx) => {
+                    new_function.instruction(&GlobalGet(idx));
+                    primitive_record(&mut new_function, &types.globals[idx as usize])?;
                 }
+                LocalSet(idx) | LocalTee(idx) => {
+                    new_function.instruction(&LocalGet(idx));
+                    let local_type = typed_function
+                        .params
+                        .iter()
+                        .chain(&typed_function.locals)
+                        .nth(idx as usize)
+                        .expect("valid local idx");
+                    primitive_record(&mut new_function, local_type)?;
+                }
+                _ => {}
             }
 
-            if is_unreachable_op(&codillon_instruction.op.op) {
-                // Operator that will render the rest of frame unreachable.
-                unreachable = true;
-                continue;
-            }
-            Self::step_debug(&mut f, line_idx)
+            step_debug(&mut new_function, codillon_operator.line_idx + 1);
         }
-        codes.function(&f);
+        code_section.function(&new_function);
         Ok(())
     }
 
     fn dynamically_generate_function(
         &self,
-        outputs: &[ValType],
-        codes: &mut CodeSection,
-    ) -> Result<(), anyhow::Error> {
-        let n = outputs.len();
+        tys: &[ValType],
+        code_section: &mut CodeSection,
+    ) -> Result<()> {
+        use InstrImports::*;
+        use ValType::*;
+        let n = tys.len();
         let mut f = wasm_encoder::Function::new(vec![]);
-        for (output_idx, output) in outputs.iter().enumerate() {
-            f.instruction(&LocalGet((n + output_idx) as u32));
-            f.instruction(&LocalGet(output_idx as u32));
-            match output {
-                ValType::I32 => {
-                    f.instruction(&Call(InstrImports::RecordI32 as u32));
-                }
-                ValType::F32 => {
-                    f.instruction(&Call(InstrImports::RecordF32 as u32));
-                }
-                ValType::I64 => {
-                    f.instruction(&Call(InstrImports::RecordI64 as u32));
-                }
-                ValType::F64 => {
-                    f.instruction(&Call(InstrImports::RecordF64 as u32));
-                }
-                _ => {
-                    panic!("unexpected output type")
-                }
-            }
+        for (i, ty) in tys.iter().enumerate() {
+            f.instruction(&LocalGet(i as u32)); // value
+            f.instruction(&LocalGet((n + i) as u32)); // slot idx
+            let rec_function = match ty {
+                I32 => RecordI32,
+                F32 => RecordF32,
+                I64 => RecordI64,
+                F64 => RecordF64,
+                _ => bail!("unexpected output type"),
+            };
+            f.instruction(&Call(rec_function as u32));
         }
-        for output_idx in 0..outputs.len() {
-            f.instruction(&LocalGet(output_idx as u32));
+        for output_idx in 0..tys.len() {
+            f.instruction(&LocalGet(output_idx as u32)); // restore values to stack
         }
         f.instruction(&End);
-        codes.function(&f);
+        code_section.function(&f);
         Ok(())
-    }
-
-    fn record_params(&self, params: &[ValType], f: &mut wasm_encoder::Function, start_line: usize) {
-        for (param_idx, param) in params.iter().enumerate() {
-            f.instruction(&I32Const(param_idx as i32));
-            f.instruction(&LocalGet(param_idx as u32));
-            match param {
-                ValType::I32 => {
-                    f.instruction(&Call(InstrImports::SetLocalI32 as u32));
-                }
-                ValType::F32 => {
-                    f.instruction(&Call(InstrImports::SetLocalF32 as u32));
-                }
-                ValType::I64 => {
-                    f.instruction(&Call(InstrImports::SetLocalI64 as u32));
-                }
-                ValType::F64 => {
-                    f.instruction(&Call(InstrImports::SetLocalF64 as u32));
-                }
-                _ => {}
-            }
-        }
-        Self::step_debug(f, start_line as i32);
-    }
-
-    fn instrument_memory_ops(
-        f: &mut wasm_encoder::Function,
-        operation_type: &InstrumentationFuncs,
-    ) {
-        match operation_type {
-            SetMemoryI32 => {
-                f.instruction(&Call(InstrImports::SetMemoryI32 as u32));
-            }
-            SetMemoryF32 => {
-                f.instruction(&Call(InstrImports::SetMemoryF32 as u32));
-            }
-            SetMemoryI64 => {
-                f.instruction(&Call(InstrImports::SetMemoryI64 as u32));
-            }
-            SetMemoryF64 => {
-                f.instruction(&Call(InstrImports::SetMemoryF64 as u32));
-            }
-            _ => {}
-        }
-    }
-    fn instrument_local_ops(f: &mut wasm_encoder::Function, operation_type: &InstrumentationFuncs) {
-        match *operation_type {
-            SetLocalI32(local_index) => {
-                f.instruction(&I32Const(local_index as i32));
-                f.instruction(&LocalGet(local_index));
-                f.instruction(&Call(InstrImports::SetLocalI32 as u32));
-            }
-            SetLocalF32(local_index) => {
-                f.instruction(&I32Const(local_index as i32));
-                f.instruction(&LocalGet(local_index));
-                f.instruction(&Call(InstrImports::SetLocalF32 as u32));
-            }
-            SetLocalI64(local_index) => {
-                f.instruction(&I32Const(local_index as i32));
-                f.instruction(&LocalGet(local_index));
-                f.instruction(&Call(InstrImports::SetLocalI64 as u32));
-            }
-            SetLocalF64(local_index) => {
-                f.instruction(&I32Const(local_index as i32));
-                f.instruction(&LocalGet(local_index));
-                f.instruction(&Call(InstrImports::SetLocalF64 as u32));
-            }
-            _ => {}
-        }
-    }
-    fn instrument_global_ops(
-        f: &mut wasm_encoder::Function,
-        operation_type: &InstrumentationFuncs,
-    ) {
-        match *operation_type {
-            SetGlobalI32(global_index) => {
-                f.instruction(&I32Const(global_index as i32));
-                f.instruction(&GlobalGet(global_index));
-                f.instruction(&Call(InstrImports::SetGlobalI32 as u32));
-            }
-            SetGlobalF32(global_index) => {
-                f.instruction(&I32Const(global_index as i32));
-                f.instruction(&GlobalGet(global_index));
-                f.instruction(&Call(InstrImports::SetGlobalF32 as u32));
-            }
-            SetGlobalI64(global_index) => {
-                f.instruction(&I32Const(global_index as i32));
-                f.instruction(&GlobalGet(global_index));
-                f.instruction(&Call(InstrImports::SetGlobalI64 as u32));
-            }
-            SetGlobalF64(global_index) => {
-                f.instruction(&I32Const(global_index as i32));
-                f.instruction(&GlobalGet(global_index));
-                f.instruction(&Call(InstrImports::SetGlobalF64 as u32));
-            }
-            _ => {}
-        }
-    }
-
-    pub fn get_func_type(&self, func_idx: usize) -> &wasmparser::FuncType {
-        &self.types[self.functions[func_idx].type_idx]
-    }
-
-    fn step_debug(f: &mut wasm_encoder::Function, line_number: i32) {
-        // Step after each instruction evaluation
-        f.instruction(&I32Const(line_number));
-        f.instruction(&Call(InstrImports::Step as u32));
-        f.instruction(&I32Eqz);
-        f.instruction(&If(wasm_encoder::BlockType::Empty));
-        // Trap when run out of steps
-        f.instruction(&Unreachable);
-        f.instruction(&End);
-    }
-}
-
-fn parser_to_encoder(value: &wasmparser::ValType) -> EncoderValType {
-    match value {
-        ValType::I32 => EncoderValType::I32,
-        ValType::I64 => EncoderValType::I64,
-        ValType::F32 => EncoderValType::F32,
-        ValType::F64 => EncoderValType::F64,
-        ValType::V128 => EncoderValType::V128,
-        // Reference types not yet supported
-        _ => panic!("unsupported valtype"),
     }
 }
 
 // Slot represents anywhere that a value can go, e.g. a global, local, or stack operand.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Slot {
-    pub ty: ValType,
-    pub idx: usize,
-}
+pub struct Slot(ValType);
+
+// A SlotUse represents any input from, or output to, a slot (identified by its global index).
+#[derive(Debug, PartialEq, Eq)]
+pub struct SlotUse(usize);
+
+// An Expression represents a collection of Slots that are initiatialized on entry and restored on exit.
+// E.g. local Slots live in an Expression for the function's entire body, and stack operands
+// live in an Expression that might be smaller than the function's body.
+// pub struct Expression(Vec<usize>);
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct OperatorType {
-    pub inputs: Vec<Option<Slot>>,
-    pub outputs: Vec<Slot>,
+    pub inputs: Vec<Option<SlotUse>>,
+    pub outputs: Vec<SlotUse>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypedFunction {
-    pub locals: Vec<Slot>,
+    pub params: Vec<SlotUse>,
+    pub locals: Vec<SlotUse>,
     pub ops: Vec<OperatorType>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypedModule {
-    pub globals: Vec<Slot>,
+    pub slots: Vec<Slot>,
+    pub globals: Vec<SlotUse>,
     pub funcs: Vec<TypedFunction>,
 }
 
@@ -1335,6 +1233,118 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     }
 }
 
+pub fn indent_and_frame(
+    code: &mut impl FrameInfosMut,
+    _module: &ValidModule,
+    _types: &TypedModule,
+) {
+    struct OpenFrame {
+        num: usize,
+        start: usize,
+        kind: InstrKind,
+    }
+
+    let mut frame_stack: Vec<OpenFrame> = Vec::new();
+    let mut frame_count = 0;
+
+    let mut indent: i32 = 0;
+    for line_no in 0..code.len() {
+        let mut indent_adjustment: i32 = 0;
+        let ends_before = code.info(line_no).synthetic_before.end_opcodes;
+
+        for _ in 0..ends_before {
+            let f = frame_stack.pop().expect("frame ended before line");
+            indent -= 1;
+            code.set_frame_info(
+                f.num,
+                FrameInfo {
+                    indent: indent.try_into().expect("indent -> usize"),
+                    start: f.start,
+                    end: line_no,
+                    unclosed: true,
+                    kind: f.kind,
+                },
+            );
+        }
+
+        let active = code.info(line_no).is_active();
+        let line_kind = code.info(line_no).kind.stripped_clone();
+        match line_kind {
+            LineKind::Instr(kind) if active => match kind {
+                InstrKind::If | InstrKind::OtherStructured => {
+                    frame_stack.push(OpenFrame {
+                        num: frame_count,
+                        start: line_no,
+                        kind,
+                    });
+                    frame_count += 1;
+                    indent_adjustment = -1;
+                    indent += 1;
+                }
+                InstrKind::Else => {
+                    let Some(OpenFrame {
+                        num,
+                        start,
+                        kind: InstrKind::If,
+                    }) = frame_stack.pop()
+                    else {
+                        panic!("else outside if block");
+                    };
+                    indent_adjustment = -1;
+                    indent -= 1;
+                    code.set_frame_info(
+                        num,
+                        FrameInfo {
+                            indent: indent.try_into().expect("indent -> usize"),
+                            start,
+                            end: line_no,
+                            unclosed: false,
+                            kind: InstrKind::If,
+                        },
+                    );
+                    frame_stack.push(OpenFrame {
+                        num: frame_count,
+                        start: line_no,
+                        kind: InstrKind::Else,
+                    });
+                    indent += 1;
+                    frame_count += 1;
+                }
+                InstrKind::End => {
+                    let Some(OpenFrame { num, start, kind }) = frame_stack.pop() else {
+                        panic!("unclosed frame");
+                    };
+                    indent -= 1;
+                    code.set_frame_info(
+                        num,
+                        FrameInfo {
+                            indent: indent.try_into().expect("indent -> usize"),
+                            start,
+                            end: line_no,
+                            unclosed: false,
+                            kind,
+                        },
+                    );
+                }
+                InstrKind::Other => {}
+            },
+            LineKind::Instr(_) | LineKind::Empty | LineKind::Malformed(_) | LineKind::Other(_) => {}
+        }
+
+        // adjust indentation
+        let paren_depths = code.info(line_no).paren_depths();
+        indent += paren_depths.0;
+        code.set_indent(
+            line_no,
+            (indent + indent_adjustment)
+                .try_into()
+                .expect("indent -> usize"),
+        );
+        indent += paren_depths.1;
+    }
+    code.set_frame_count(frame_count);
+}
+
 pub trait FmtError {
     type T;
     fn fmt_err(self) -> anyhow::Result<Self::T, anyhow::Error>;
@@ -1349,8 +1359,8 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use wasm_encoder::ImportSection;
-    use wasmparser::BlockType;
+    use regex::Regex;
+    use wasmparser::{BlockType, FuncType};
 
     #[test]
     fn test_str_to_binary_for_one_function() {
@@ -1383,49 +1393,57 @@ pub(crate) mod tests {
         assert!(!is_well_formed_func("i32.const 1\ni32.adx"));
     }
 
+    fn empty_ft() -> FuncType {
+        FuncType::new(vec![], vec![])
+    }
+
     #[test]
     fn test_types_table() -> Result<()> {
         type CodillonInstruction<'a> = Aligned<Operator<'a>>;
         use ValType::*;
 
-        fn ins(inputs: Vec<Slot>) -> OperatorType {
+        fn ins(inputs: Vec<SlotUse>) -> OperatorType {
             OperatorType {
                 inputs: inputs.into_iter().map(Some).collect(),
                 outputs: Vec::new(),
             }
         }
 
-        fn outs(outputs: Vec<Slot>) -> OperatorType {
+        fn outs(outputs: Vec<SlotUse>) -> OperatorType {
             OperatorType {
                 inputs: Vec::new(),
                 outputs,
             }
         }
 
-        fn inout(inputs: Vec<Slot>, outputs: Vec<Slot>) -> OperatorType {
+        fn inout(inputs: Vec<SlotUse>, outputs: Vec<SlotUse>) -> OperatorType {
             OperatorType {
                 inputs: inputs.into_iter().map(Some).collect(),
                 outputs,
             }
         }
 
-        fn slot(ty: ValType, idx: usize) -> Slot {
-            Slot { ty, idx }
+        fn os(ty: ValType) -> Slot {
+            Slot(ty)
+        }
+
+        fn slot(idx: usize) -> SlotUse {
+            SlotUse(idx)
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
             let mut ret = ValidModule {
-                types: vec![],
-                imports: ImportSection::new(),
-                memory: vec![],
-                globals: vec![],
+                types: raw.types,
+                imports: raw.imports,
+                memory: raw.memory,
+                globals: raw.globals,
                 functions: vec![],
-                num_func_imports: 0,
             };
 
             for func in raw.functions {
                 let mut valid = ValidFunction {
                     type_idx: 0,
+                    params: func.params,
                     locals: func.locals,
                     operators: vec![],
                 };
@@ -1440,19 +1458,18 @@ pub(crate) mod tests {
 
         //block instruction with params and results
         let output = TypedModule {
+            slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
             globals: vec![],
             funcs: vec![TypedFunction {
+                params: vec![],
                 locals: vec![],
                 ops: vec![
-                    outs(vec![slot(I32, 0)]),
-                    outs(vec![slot(I32, 1)]),
-                    inout(
-                        vec![slot(I32, 0), slot(I32, 1)],
-                        vec![slot(I32, 2), slot(I32, 3)],
-                    ),
-                    inout(vec![slot(I32, 2), slot(I32, 3)], vec![slot(I32, 4)]),
-                    inout(vec![slot(I32, 4)], vec![slot(I32, 5)]),
-                    ins(vec![slot(I32, 5)]),
+                    outs(vec![slot(0)]),
+                    outs(vec![slot(1)]),
+                    inout(vec![slot(0), slot(1)], vec![slot(2), slot(3)]),
+                    inout(vec![slot(2), slot(3)], vec![slot(4)]),
+                    inout(vec![slot(4)], vec![slot(5)]),
+                    ins(vec![slot(5)]),
                     ins(vec![]),
                 ],
             }],
@@ -1462,42 +1479,43 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
-            types: vec![],
+            types: vec![empty_ft()],
             imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                params: vec![],
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 1 },
+                        inner: Operator::I32Const { value: 1 },
                         line_idx: 0,
                     },
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 2 },
+                        inner: Operator::I32Const { value: 2 },
                         line_idx: 1,
                     },
                     CodillonInstruction {
-                        op: Operator::Block {
+                        inner: Operator::Block {
                             blockty: BlockType::FuncType(1),
                         },
                         line_idx: 2,
                     },
                     CodillonInstruction {
-                        op: Operator::I32Add,
+                        inner: Operator::I32Add,
                         line_idx: 3,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 4,
                     },
                     CodillonInstruction {
-                        op: Operator::Drop,
+                        inner: Operator::Drop,
                         line_idx: 5,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 6,
                     },
                 ],
@@ -1510,17 +1528,19 @@ pub(crate) mod tests {
 
         //if else with params and results
         let output = TypedModule {
+            slots: vec![os(I32), os(I32), os(I32), os(I32)],
             globals: vec![],
             funcs: vec![TypedFunction {
+                params: vec![],
                 locals: vec![],
                 ops: vec![
-                    outs(vec![slot(I32, 0)]),
-                    ins(vec![slot(I32, 0)]),
-                    outs(vec![slot(I32, 1)]),
-                    ins(vec![slot(I32, 1)]),
-                    outs(vec![slot(I32, 2)]),
-                    inout(vec![slot(I32, 2)], vec![slot(I32, 3)]),
-                    ins(vec![slot(I32, 3)]),
+                    outs(vec![slot(0)]),
+                    ins(vec![slot(0)]),
+                    outs(vec![slot(1)]),
+                    ins(vec![slot(1)]),
+                    outs(vec![slot(2)]),
+                    inout(vec![slot(2)], vec![slot(3)]),
+                    ins(vec![slot(3)]),
                     ins(vec![]),
                 ],
             }],
@@ -1529,46 +1549,47 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
-            types: vec![],
+            types: vec![empty_ft()],
             imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                params: vec![],
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 1 },
+                        inner: Operator::I32Const { value: 1 },
                         line_idx: 0,
                     },
                     CodillonInstruction {
-                        op: Operator::If {
+                        inner: Operator::If {
                             blockty: BlockType::Type(I32),
                         },
                         line_idx: 1,
                     },
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 1 },
+                        inner: Operator::I32Const { value: 1 },
                         line_idx: 2,
                     },
                     CodillonInstruction {
-                        op: Operator::Else,
+                        inner: Operator::Else,
                         line_idx: 3,
                     },
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 2 },
+                        inner: Operator::I32Const { value: 2 },
                         line_idx: 4,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 5,
                     },
                     CodillonInstruction {
-                        op: Operator::Drop,
+                        inner: Operator::Drop,
                         line_idx: 6,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 7,
                     },
                 ],
@@ -1581,18 +1602,20 @@ pub(crate) mod tests {
 
         //loop with param and return
         let output = TypedModule {
+            slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
             globals: vec![],
             funcs: vec![TypedFunction {
+                params: vec![],
                 locals: vec![],
                 ops: vec![
-                    outs(vec![slot(I32, 0)]),
-                    inout(vec![slot(I32, 0)], vec![slot(I32, 1)]),
-                    outs(vec![slot(I32, 2)]),
-                    inout(vec![slot(I32, 1), slot(I32, 2)], vec![slot(I32, 3)]),
-                    ins(vec![slot(I32, 3)]),
-                    outs(vec![slot(I32, 4)]),
-                    inout(vec![slot(I32, 4)], vec![slot(I32, 5)]),
-                    ins(vec![slot(I32, 5)]),
+                    outs(vec![slot(0)]),
+                    inout(vec![slot(0)], vec![slot(1)]),
+                    outs(vec![slot(2)]),
+                    inout(vec![slot(1), slot(2)], vec![slot(3)]),
+                    ins(vec![slot(3)]),
+                    outs(vec![slot(4)]),
+                    inout(vec![slot(4)], vec![slot(5)]),
+                    ins(vec![slot(5)]),
                     ins(vec![]),
                 ],
             }],
@@ -1601,50 +1624,51 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
-            types: vec![],
+            types: vec![empty_ft()],
             imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                params: vec![],
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 10 },
+                        inner: Operator::I32Const { value: 10 },
                         line_idx: 0,
                     },
                     CodillonInstruction {
-                        op: Operator::Loop {
+                        inner: Operator::Loop {
                             blockty: BlockType::FuncType(1),
                         },
                         line_idx: 1,
                     },
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 1 },
+                        inner: Operator::I32Const { value: 1 },
                         line_idx: 2,
                     },
                     CodillonInstruction {
-                        op: Operator::I32Sub,
+                        inner: Operator::I32Sub,
                         line_idx: 3,
                     },
                     CodillonInstruction {
-                        op: Operator::BrIf { relative_depth: 1 },
+                        inner: Operator::BrIf { relative_depth: 1 },
                         line_idx: 4,
                     },
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 2 },
+                        inner: Operator::I32Const { value: 2 },
                         line_idx: 5,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 6,
                     },
                     CodillonInstruction {
-                        op: Operator::Drop,
+                        inner: Operator::Drop,
                         line_idx: 7,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 8,
                     },
                 ],
@@ -1657,19 +1681,21 @@ pub(crate) mod tests {
 
         //nested block and if
         let output = TypedModule {
+            slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
             globals: vec![],
             funcs: vec![TypedFunction {
+                params: vec![],
                 locals: vec![],
                 ops: vec![
-                    outs(vec![slot(I32, 0)]),
-                    inout(vec![slot(I32, 0)], vec![slot(I32, 1)]),
-                    ins(vec![slot(I32, 1)]),
-                    outs(vec![slot(I32, 2)]),
-                    ins(vec![slot(I32, 2)]),
-                    outs(vec![slot(I32, 3)]),
-                    inout(vec![slot(I32, 3)], vec![slot(I32, 4)]),
-                    inout(vec![slot(I32, 4)], vec![slot(I32, 5)]),
-                    ins(vec![slot(I32, 5)]),
+                    outs(vec![slot(0)]),
+                    inout(vec![slot(0)], vec![slot(1)]),
+                    ins(vec![slot(1)]),
+                    outs(vec![slot(2)]),
+                    ins(vec![slot(2)]),
+                    outs(vec![slot(3)]),
+                    inout(vec![slot(3)], vec![slot(4)]),
+                    inout(vec![slot(4)], vec![slot(5)]),
+                    ins(vec![slot(5)]),
                     ins(vec![]),
                 ],
             }],
@@ -1678,56 +1704,57 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
-            types: vec![],
+            types: vec![empty_ft()],
             imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                params: vec![],
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 10 },
+                        inner: Operator::I32Const { value: 10 },
                         line_idx: 0,
                     },
                     CodillonInstruction {
-                        op: Operator::Block {
+                        inner: Operator::Block {
                             blockty: BlockType::FuncType(1),
                         },
                         line_idx: 1,
                     },
                     CodillonInstruction {
-                        op: Operator::If {
+                        inner: Operator::If {
                             blockty: BlockType::Type(I32),
                         },
                         line_idx: 2,
                     },
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 1 },
+                        inner: Operator::I32Const { value: 1 },
                         line_idx: 3,
                     },
                     CodillonInstruction {
-                        op: Operator::Else,
+                        inner: Operator::Else,
                         line_idx: 4,
                     },
                     CodillonInstruction {
-                        op: Operator::I32Const { value: 2 },
+                        inner: Operator::I32Const { value: 2 },
                         line_idx: 5,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 6,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 7,
                     },
                     CodillonInstruction {
-                        op: Operator::Drop,
+                        inner: Operator::Drop,
                         line_idx: 8,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 9,
                     },
                 ],
@@ -1740,8 +1767,10 @@ pub(crate) mod tests {
 
         //empty block
         let output = TypedModule {
+            slots: vec![],
             globals: vec![],
             funcs: vec![TypedFunction {
+                params: vec![],
                 locals: vec![],
                 ops: vec![ins(vec![]), ins(vec![]), ins(vec![])],
             }],
@@ -1750,26 +1779,27 @@ pub(crate) mod tests {
         let func = format!("(module (func {lines}))");
         let wasm_bin = wat::parse_str(func).expect("failed to parse wat to binary wasm");
         let instruction_table = RawModule {
-            types: vec![],
+            types: vec![empty_ft()],
             imports: vec![],
             memory: vec![],
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                params: vec![],
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
-                        op: Operator::Block {
+                        inner: Operator::Block {
                             blockty: BlockType::Empty,
                         },
                         line_idx: 0,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 1,
                     },
                     CodillonInstruction {
-                        op: Operator::End,
+                        inner: Operator::End,
                         line_idx: 2,
                     },
                 ],
@@ -1793,16 +1823,16 @@ pub(crate) mod tests {
             page_size_log2: Some(0),
         };
         let valid_module = ValidModule {
-            types: vec![],
-            imports: ImportSection::new(),
+            types: vec![empty_ft()],
+            imports: vec![],
             memory: vec![test_mem],
             globals: vec![],
             functions: vec![],
-            num_func_imports: 0,
         };
         let function_ranges: Vec<(usize, usize)> = Vec::new();
-        let wasm_bin = valid_module.build_executable_binary(
+        let wasm_bin = valid_module.build_instrumented_binary(
             &TypedModule {
+                slots: vec![],
                 globals: vec![],
                 funcs: vec![],
             },
@@ -1829,7 +1859,7 @@ pub(crate) mod tests {
         SyntheticWasm, find_function_ranges, find_import_lines, fix_syntax, parse_line,
     };
 
-    #[derive(Default)]
+    #[derive(Default, Debug)]
     struct FakeTextLine {
         instr_text: String,
         info: LineInfo,
@@ -1895,6 +1925,8 @@ pub(crate) mod tests {
     }
 
     fn test_editor_flow(editor: &mut FakeTextBuffer) -> Result<String> {
+        use anyhow::Context;
+
         fix_syntax(editor);
 
         let function_ranges = find_function_ranges(editor);
@@ -1918,47 +1950,49 @@ pub(crate) mod tests {
         let validized = raw_module
             .fix_validity(&wasm_bin, editor, &find_import_lines(editor))
             .context("fix_validity")?;
+
         let types = validized
             .to_types_table(&wasm_bin)
             .context("to_types_table")?;
         let runnable = validized
-            .build_executable_binary(&types, &function_ranges)
+            .build_instrumented_binary(&types, &function_ranges)
             .context("build_executable_binary")?;
-        wasmparser::validate(&runnable).context("validate")?;
 
-        wasmprinter::print_bytes(&runnable).context("print_bytes")
+        let instrumented_text = wasmprinter::print_bytes(&runnable).context("print_bytes")?;
+
+        wasmparser::validate(&runnable).context(format!(
+            "validate {:?} -> {instrumented_text}",
+            editor.lines
+        ))?;
+
+        let re = Regex::new(r"\(;\d+;\) ")?; // remove wasmprinter idx comments to let tests evolve more easily
+        Ok(re.replace_all(&instrumented_text, "").to_string())
     }
 
-    const EXPECTED_FIELDS: &str = r#"  (type (;0;) (func (param i32)))
-  (type (;1;) (func (param i32) (result i32)))
-  (type (;2;) (func (param i32 i32)))
-  (type (;3;) (func (param i32 i32) (result i32 i32)))
-  (type (;4;) (func (param i32 f32) (result i32 f32)))
-  (type (;5;) (func (param i32 i64) (result i32 i64)))
-  (type (;6;) (func (param i32 f64) (result i32 f64)))
-  (type (;7;) (func (param i32 f32)))
-  (type (;8;) (func (param i32 i64)))
-  (type (;9;) (func (param i32 f64)))
-  (type (;10;) (func))
-  (import "codillon_debug" "step" (func (;0;) (type 1)))
-  (import "codillon_debug" "pop_i" (func (;1;) (type 0)))
-  (import "codillon_debug" "set_local_i32" (func (;2;) (type 2)))
-  (import "codillon_debug" "set_local_f32" (func (;3;) (type 7)))
-  (import "codillon_debug" "set_local_i64" (func (;4;) (type 8)))
-  (import "codillon_debug" "set_local_f64" (func (;5;) (type 9)))
-  (import "codillon_debug" "set_global_i32" (func (;6;) (type 2)))
-  (import "codillon_debug" "set_global_f32" (func (;7;) (type 7)))
-  (import "codillon_debug" "set_global_i64" (func (;8;) (type 8)))
-  (import "codillon_debug" "set_global_f64" (func (;9;) (type 9)))
-  (import "codillon_debug" "set_memory_i32" (func (;10;) (type 3)))
-  (import "codillon_debug" "set_memory_f32" (func (;11;) (type 4)))
-  (import "codillon_debug" "set_memory_i64" (func (;12;) (type 5)))
-  (import "codillon_debug" "set_memory_f64" (func (;13;) (type 6)))
-  (import "codillon_debug" "record_i32" (func (;14;) (type 2)))
-  (import "codillon_debug" "record_f32" (func (;15;) (type 7)))
-  (import "codillon_debug" "record_i64" (func (;16;) (type 8)))
-  (import "codillon_debug" "record_f64" (func (;17;) (type 9)))
-  (export "main" (func 18))
+    const EXPECTED_TYPES: &str = r#"  (type (func))
+  (type (func (param i32) (result i32)))
+  (type (func (param i32)))
+  (type (func (param i32 i32)))
+  (type (func (param f32 i32)))
+  (type (func (param i64 i32)))
+  (type (func (param f64 i32)))
+  (type (func (param i32)))
+"#;
+    const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 1)))
+  (import "codillon_debug" "record_invalid" (func (type 2)))
+  (import "codillon_debug" "record_i32" (func (type 3)))
+  (import "codillon_debug" "record_f32" (func (type 4)))
+  (import "codillon_debug" "record_i64" (func (type 5)))
+  (import "codillon_debug" "record_f64" (func (type 6)))
+  (export "main" (func 7))
+  (func (type 7) (param i32)
+    local.get 0
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+  )
 "#;
 
     use pretty_assertions::assert_eq;
@@ -1970,8 +2004,12 @@ pub(crate) mod tests {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func)");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10))
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
+    i32.const 1
+    call 6
+  )
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -1982,20 +2020,28 @@ pub(crate) mod tests {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10))
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
+    i32.const 1
+    call 6
+  )
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
-        // syntax error (synthesizes closing "func)")
+        // syntax error (synthesizes closing "func)" on line 1)
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10))
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
+    i32.const 2
+    call 6
+  )
 )
 "#;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -2007,51 +2053,41 @@ pub(crate) mod tests {
             editor.push_line("i64.const 17");
             editor.push_line("drop");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10)
+                + EXPECTED_TYPES
+                + "  (type (func (param i64 i32) (result i64)))\n"
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
+    i32.const 0
+    call 6
     i64.const 17
     i32.const 0
-    call 19
-    i32.const 0
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
+    call 8
     i32.const 1
-    call 1
+    call 6
     drop
-    i32.const 1
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
+    i32.const 2
+    call 6
   )
-  (func (;19;) (type 11) (param i64 i32) (result i64)
-    local.get 1
+  (func (type 8) (param i64 i32) (result i64)
     local.get 0
-    call 16
+    local.get 1
+    call 4
     local.get 0
   )
 )
 "#;
-            let expected = expected.replace(
-                "  (type (;10;) (func))\n",
-                "  (type (;10;) (func))\n  (type (;11;) (func (param i64 i32) (result i64)))\n",
-            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
         // well-formed block
-        const JUST_BLOCK_END: &str = r#"    block ;; label = @1
-      i32.const 1
-      call 0
-      i32.eqz
-      if ;; label = @2
-        unreachable
-      end
+        const JUST_BLOCK_END: &str = r#"    i32.const 1
+    call 6
+    block ;; label = @1
+      i32.const 2
+      call 6
     end
+    i32.const 3
+    call 6
   )
 )
 "#;
@@ -2062,8 +2098,9 @@ pub(crate) mod tests {
             editor.push_line("end");
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + "  (func (;18;) (type 10)\n"
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + "  (func (type 0)\n"
                 + JUST_BLOCK_END;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
@@ -2075,8 +2112,9 @@ pub(crate) mod tests {
             editor.push_line("block");
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + "  (func (;18;) (type 10)\n"
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + "  (func (type 0)\n"
                 + JUST_BLOCK_END;
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
@@ -2090,31 +2128,38 @@ pub(crate) mod tests {
             editor.push_line("drop");
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10)
+                + EXPECTED_TYPES
+                + "  (type (func (param i32 i32) (result i32)))\n"
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
+    i32.const 1
+    call 6
     i32.const 137
     i32.const 0
-    call 19
-    i32.const 1
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
+    call 8
+    i32.const 2
+    call 6
+    i32.const 2
+    call 1
     unreachable
+    i32.add
+    i32.const 3
+    call 8
+    i32.const 3
+    call 6
+    drop
+    i32.const 4
+    call 6
   )
-  (func (;19;) (type 11) (param i32 i32) (result i32)
-    local.get 1
+  (func (type 8) (param i32 i32) (result i32)
     local.get 0
-    call 14
+    local.get 1
+    call 2
     local.get 0
   )
 )
 "#;
-            let expected = expected.replace(
-                "  (type (;10;) (func))\n",
-                "  (type (;10;) (func))\n  (type (;11;) (func (param i32 i32) (result i32)))\n",
-            );
+
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2129,17 +2174,18 @@ pub(crate) mod tests {
             editor.push_line(")");
             editor.push_line("(func)");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (import "hello" "goodbye" (func (;18;) (type 10)))
-  (export "main" (func 19))
-  (func (;19;) (type 10))
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
+    i32.const 7
+    call 6
+  )
 )
 "#;
-            let expected = expected.replace("  (export \"main\" (func 18))\n", "");
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
-        // syntax error (consumed symbolic reference no defined - module-level, local, label)
+        // syntax error (consumed symbolic reference not defined - module-level, local, label)
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
@@ -2150,9 +2196,11 @@ pub(crate) mod tests {
             editor.push_line("end");
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + "  (func (;18;) (type 10)\n"
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + "  (func (type 0)\n"
                 + JUST_BLOCK_END;
+            let expected = expected.replace("i32.const 3", "i32.const 6");
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2167,24 +2215,23 @@ pub(crate) mod tests {
             editor.push_line("end $y");
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10)
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
+    i32.const 1
+    call 6
     block ;; label = @1
-      i32.const 1
-      call 0
-      i32.eqz
-      if ;; label = @2
-        unreachable
-      end
+      i32.const 2
+      call 6
       loop ;; label = @2
-        i32.const 2
-        call 0
-        i32.eqz
-        if ;; label = @3
-          unreachable
-        end
+        i32.const 3
+        call 6
       end
+      i32.const 5
+      call 6
     end
+    i32.const 6
+    call 6
   )
 )
 "#;
@@ -2198,15 +2245,17 @@ pub(crate) mod tests {
             editor.push_line("br 144");
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10)
-    nop
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
     i32.const 1
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
+    call 6
+    i32.const 1
+    call 1
+    unreachable
+    nop
+    i32.const 2
+    call 6
   )
 )
 "#;
@@ -2222,22 +2271,29 @@ pub(crate) mod tests {
             editor.push_line("drop");
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10)
-    nop
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
     i32.const 2
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
+    call 6
+    i32.const 2
+    call 1
     unreachable
+    nop
+    i32.const 3
+    call 6
+    i32.const 3
+    call 1
+    unreachable
+    drop
+    i32.const 4
+    call 6
   )
 )
 "#;
             let expected = expected.replace(
-                "  (export \"main\" (func 18))",
-                "  (memory (;0;) 0)\n  (export \"main\" (func 18))",
+                "  (export \"main\" (func 7))",
+                "  (memory 0)\n  (export \"main\" (func 7))",
             );
 
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -2251,79 +2307,72 @@ pub(crate) mod tests {
             editor.push_line("br 0");
             editor.push_line("end");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10)
+                + EXPECTED_TYPES
+                + "  (type (func (param i32 i32) (result i32)))\n"
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
+    i32.const 0
+    call 6
     loop ;; label = @1
-      i32.const 0
-      call 0
-      i32.eqz
-      if ;; label = @2
-        unreachable
-      end
+      i32.const 1
+      call 6
       i32.const 5
       i32.const 0
-      call 19
-      i32.const 1
-      call 0
-      i32.eqz
-      if ;; label = @2
-        unreachable
-      end
-      i32.const 1
-      call 1
+      call 8
+      i32.const 2
+      call 6
       br 0 (;@1;)
+      i32.const 3
+      call 6
     end
+    i32.const 4
+    call 6
   )
-  (func (;19;) (type 11) (param i32 i32) (result i32)
-    local.get 1
+  (func (type 8) (param i32 i32) (result i32)
     local.get 0
-    call 14
+    local.get 1
+    call 2
     local.get 0
   )
 )
 "#;
-            let expected = expected.replace(
-                "  (type (;10;) (func))\n",
-                "  (type (;10;) (func))\n  (type (;11;) (func (param i32 i32) (result i32)))\n",
-            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
-        // validation error
+        // validation error (operands not popped at end of block/function)
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
             editor.push_line("i32.const 4");
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10)
+                + EXPECTED_TYPES
+                + "  (type (func (param i32 i32) (result i32)))\n"
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
+    i32.const 1
+    call 6
     i32.const 4
     i32.const 0
-    call 19
-    i32.const 1
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
+    call 8
+    i32.const 2
+    call 6
+    i32.const 2
+    call 1
     unreachable
   )
-  (func (;19;) (type 11) (param i32 i32) (result i32)
-    local.get 1
+  (func (type 8) (param i32 i32) (result i32)
     local.get 0
-    call 14
+    local.get 1
+    call 2
     local.get 0
   )
 )
 "#;
-            let expected = expected.replace(
-                "  (type (;10;) (func))\n",
-                "  (type (;10;) (func))\n  (type (;11;) (func (param i32 i32) (result i32)))\n",
-            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
+        // additional function with multi-value result type
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
@@ -2335,75 +2384,82 @@ pub(crate) mod tests {
             editor.push_line("i32.const 10");
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10)
-    call 19
+                + r#"  (type (func))
+  (type (func (result i32 i32)))
+  (type (func (param i32) (result i32)))
+  (type (func (param i32)))
+  (type (func (param i32 i32)))
+  (type (func (param f32 i32)))
+  (type (func (param i64 i32)))
+  (type (func (param f64 i32)))
+  (type (func (param i32)))
+  (type (func (param i32 i32 i32 i32) (result i32 i32)))
+  (type (func (param i32 i32) (result i32)))
+  (import "codillon_debug" "record_step" (func (type 2)))
+  (import "codillon_debug" "record_invalid" (func (type 3)))
+  (import "codillon_debug" "record_i32" (func (type 4)))
+  (import "codillon_debug" "record_f32" (func (type 5)))
+  (import "codillon_debug" "record_i64" (func (type 6)))
+  (import "codillon_debug" "record_f64" (func (type 7)))
+  (export "main" (func 7))
+  (func (type 8) (param i32)
+    local.get 0
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+  )
+  (func (type 0)
     i32.const 1
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
-    i32.const 2
-    call 1
-    i32.add
+    call 6
+    call 8
     i32.const 0
-    call 21
+    i32.const 1
+    call 9
     i32.const 2
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
+    call 6
+    i32.add
+    i32.const 2
+    call 10
+    i32.const 3
+    call 6
+    i32.const 3
+    call 1
     unreachable
   )
-  (func (;19;) (type 11) (result i32 i32)
-    i32.const 9
-    i32.const 0
-    call 21
+  (func (type 1) (result i32 i32)
     i32.const 5
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
-    i32.const 10
-    i32.const 0
-    call 21
+    call 6
+    i32.const 9
+    i32.const 3
+    call 10
     i32.const 6
-    call 0
-    i32.eqz
-    if ;; label = @1
-      unreachable
-    end
-    i32.const 2
-    call 1
-    i32.const 0
-    i32.const 0
-    call 20
+    call 6
+    i32.const 10
+    i32.const 4
+    call 10
+    i32.const 7
+    call 6
   )
-  (func (;20;) (type 12) (param i32 i32 i32 i32) (result i32 i32)
+  (func (type 9) (param i32 i32 i32 i32) (result i32 i32)
+    local.get 0
     local.get 2
-    local.get 0
-    call 14
-    local.get 3
+    call 2
     local.get 1
-    call 14
+    local.get 3
+    call 2
     local.get 0
     local.get 1
   )
-  (func (;21;) (type 13) (param i32 i32) (result i32)
-    local.get 1
+  (func (type 10) (param i32 i32) (result i32)
     local.get 0
-    call 14
+    local.get 1
+    call 2
     local.get 0
   )
 )
 "#;
-            let expected = expected.replace(
-                "  (type (;10;) (func))\n",
-                "  (type (;10;) (func))\n  (type (;11;) (func (result i32 i32)))\n  (type (;12;) (func (param i32 i32 i32 i32) (result i32 i32)))\n  (type (;13;) (func (param i32 i32) (result i32)))\n",
-            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2416,9 +2472,86 @@ pub(crate) mod tests {
             editor.push_line("(local f64)"); // also allowed
             editor.push_line(")");
             let expected = String::from("(module\n")
-                + EXPECTED_FIELDS
-                + r#"  (func (;18;) (type 10)
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + r#"  (func (type 0)
     (local i32 i32 i32 f64)
+    local.get 0
+    i32.const 0
+    call 2
+    local.get 1
+    i32.const 1
+    call 2
+    local.get 2
+    i32.const 2
+    call 2
+    local.get 3
+    i32.const 3
+    call 5
+    i32.const 1
+    call 6
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("block (param i32)");
+            editor.push_line("end");
+            editor.push_line(")");
+
+            let expected = String::from("(module\n")
+                + r#"  (type (func))
+  (type (func (param i32)))
+  (type (func (param i32) (result i32)))
+  (type (func (param i32)))
+  (type (func (param i32 i32)))
+  (type (func (param f32 i32)))
+  (type (func (param i64 i32)))
+  (type (func (param f64 i32)))
+  (type (func (param i32)))
+  (type (func (param i32 i32) (result i32)))
+  (import "codillon_debug" "record_step" (func (type 2)))
+  (import "codillon_debug" "record_invalid" (func (type 3)))
+  (import "codillon_debug" "record_i32" (func (type 4)))
+  (import "codillon_debug" "record_f32" (func (type 5)))
+  (import "codillon_debug" "record_i64" (func (type 6)))
+  (import "codillon_debug" "record_f64" (func (type 7)))
+  (export "main" (func 7))
+  (func (type 8) (param i32)
+    local.get 0
+    call 0
+    i32.eqz
+    if ;; label = @1
+      unreachable
+    end
+  )
+  (func (type 0)
+    i32.const 1
+    call 6
+    i32.const 1
+    call 1
+    unreachable
+    block (type 1) (param i32) ;; label = @1
+      i32.const 1
+      call 8
+      i32.const 2
+      call 6
+      i32.const 2
+      call 1
+      unreachable
+    end
+    i32.const 3
+    call 6
+  )
+  (func (type 9) (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    call 2
+    local.get 0
   )
 )
 "#;
@@ -2441,7 +2574,7 @@ pub(crate) mod tests {
                     .invalid
                     .as_ref()
                     .expect("nonexistent module name should be invalid"),
-                "module not_helpers not found"
+                "module ‘not_helpers’ not found"
             );
         }
 
@@ -2456,7 +2589,7 @@ pub(crate) mod tests {
                     .invalid
                     .as_ref()
                     .expect("nonexistent component name should be invalid"),
-                "component not_draw_point not found in module helpers"
+                "function ‘not_draw_point’ not found in module helpers"
             );
         }
 

@@ -41,7 +41,7 @@ pub enum ModulePart {
     InlineImport,
     Param,
     Result,
-    Local,
+    Local(usize), // number of locals declared
     Global,
     Table,
     Memory,
@@ -96,8 +96,8 @@ impl<'a> From<Export<'a>> for ModulePart {
 }
 
 impl<'a> From<LocalParser<'a>> for ModulePart {
-    fn from(_: LocalParser) -> Self {
-        ModulePart::Local
+    fn from(parser: LocalParser) -> Self {
+        ModulePart::Local(parser.locals.len())
     }
 }
 
@@ -157,7 +157,7 @@ pub trait FrameInfosMut: LineInfos {
 }
 
 impl LineKind {
-    fn stripped_clone(&self) -> LineKind {
+    pub fn stripped_clone(&self) -> LineKind {
         match self {
             LineKind::Malformed(_) => LineKind::Malformed(String::new()),
             _ => self.clone(),
@@ -302,7 +302,7 @@ impl<'a> Parse<'a> for LineKind {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct SyntheticWasm {
     pub end_opcodes: usize,
     pub module_field_syntax: Vec<ModulePart>,
@@ -370,22 +370,18 @@ struct FuncHeader {
 }
 
 impl FuncHeader {
-    // Expected order of function fields
-    const ORDER: &'static [ModulePart] = &[
-        ModulePart::FuncKeyword,  // 0 - Required
-        ModulePart::Id,           // 1 - Optional
-        ModulePart::InlineExport, // 2 - Optional, Repeatable
-        ModulePart::InlineImport, // 3 - Optional
-        ModulePart::Param,        // 4 - Optional, Repeatable
-        ModulePart::Result,       // 5 - Optional, Repeatable
-        ModulePart::Local,        // 6 - Optional, Repeatable, On individual lines
-    ];
-
     fn transit_state(&mut self, part: ModulePart) -> Result<(), &'static str> {
         // Find position (index) of part in the order list
-        let part_pos = match Self::ORDER.iter().position(|&p| p == part) {
-            Some(pos) => pos,
-            None => return Err("not a function header field"),
+        let part_pos = match part {
+            // Expected order of function fields
+            ModulePart::FuncKeyword => 0,  // required
+            ModulePart::Id => 1,           // optional
+            ModulePart::InlineExport => 2, // optional, repeatable
+            ModulePart::InlineImport => 3, // optional
+            ModulePart::Param => 4,        // optional, repeatable
+            ModulePart::Result => 5,       // optional, repeatable,
+            ModulePart::Local(_) => 6,     // optional, repeatable, on individual lines
+            _ => return Err("not a function header field"),
         };
 
         // Check for order
@@ -396,7 +392,7 @@ impl FuncHeader {
 
         let repeatable = matches!(
             part,
-            ModulePart::Export | ModulePart::Param | ModulePart::Result | ModulePart::Local
+            ModulePart::Export | ModulePart::Param | ModulePart::Result | ModulePart::Local(_)
         );
         let order_invalid = if repeatable {
             part_pos + 1 < self.next_field
@@ -409,7 +405,7 @@ impl FuncHeader {
 
         // Check for function with (import ...)
         // function import can't have locals & instructions
-        if self.is_import && matches!(part, ModulePart::Local) {
+        if self.is_import && matches!(part, ModulePart::Local(_)) {
             return Err("imported function cannot have locals");
         }
 
@@ -451,6 +447,8 @@ impl SyntaxState {
             }
         }
 
+        let mut hit_initial = false;
+        let mut has_local = false;
         match &info.kind {
             LineKind::Empty | LineKind::Malformed(_) => {}
             LineKind::Instr(_) => {
@@ -458,13 +456,31 @@ impl SyntaxState {
                 callback(self);
             }
             LineKind::Other(parts) => {
-                let local_count = parts.iter().filter(|&p| *p == ModulePart::Local).count();
-                if local_count > 1 || (local_count == 1 && parts.len() > 1) {
-                    return Err("locals must be declared on their own line");
-                }
                 for part in parts {
+                    // Codiillon only wants one module-scope field per line. If this line reached the initial
+                    // state and then had more syntax afterward, disable it, revert state, and skip to next.
+                    // This rules out lines like "(memory 0) (func)" or "(func) (func)".
+                    if hit_initial {
+                        return Err("fields must be on separate lines");
+                    }
+
+                    // Codillon also only wants one local declaration per line.
+                    if has_local {
+                        return Err("fields must be on separate lines");
+                    }
+                    if matches!(part, ModulePart::Local(_)) {
+                        has_local = true;
+                        if parts.len() > 1 {
+                            return Err("fields must be on separate lines");
+                        }
+                    }
+
                     self.transit_state_from_module_part(*part)?;
                     callback(self);
+
+                    if *self == SyntaxState::Initial {
+                        hit_initial = true;
+                    }
                 }
             }
         }
@@ -506,7 +522,7 @@ impl SyntaxState {
                 | ModulePart::InlineImport
                 | ModulePart::Param
                 | ModulePart::Result
-                | ModulePart::Local,
+                | ModulePart::Local(_),
             ) => {
                 fh.transit_state(part)?;
                 SyntaxState::AfterFuncHeader(fh)
@@ -641,17 +657,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         // Process the line and transition the syntax state
         {
             let orig_state = state;
-            let mut hit_initial = false;
-            let mut syntax_after_internal_initial_state = false; // see Fix #4.5 below.
-            let res = state.transit_state(&lines.info(line_no), |new_state| {
-                if hit_initial {
-                    syntax_after_internal_initial_state = true;
-                }
-
-                if *new_state == Initial {
-                    hit_initial = true;
-                }
-            });
+            let res = state.transit_state(&lines.info(line_no), |_| {});
             match res {
                 Ok(()) => {
                     if state == Initial {
@@ -665,18 +671,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         );
                         frame_stack.clear();
                         local_symbol_defs.clear();
-                    }
-                    if syntax_after_internal_initial_state {
-                        // Fix #4.5: Codiillon only wants one field per line. If this line reached the initial
-                        // state and then had more syntax afterward, disable it, revert state, and skip to next.
-                        // This rules out lines like "(memory 0) (func)" or "(func) (func)".
-
-                        lines.set_active_status(
-                            line_no,
-                            Inactive("fields must be on separate lines"),
-                        );
-                        state = orig_state;
-                        continue;
                     }
                 }
                 Err(e) => {
@@ -789,18 +783,22 @@ pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
     for line_no in 0..code.len() {
         let mut prev_state = state;
         let on_transition = |new_state: &SyntaxState| {
-            match (prev_state, new_state) {
-                (_, AfterFuncHeader(_)) => current_start = Some(line_no),
+            match (current_start, prev_state, new_state) {
+                (None, _, AfterFuncHeader(_)) => current_start = Some(line_no),
 
                 (
+                    Some(start_line),
                     AfterInstruction
                     | AfterFuncHeader(FuncHeader {
                         is_import: false, ..
                     }),
                     Initial,
-                ) => ranges.push((current_start.unwrap(), line_no)),
+                ) => {
+                    ranges.push((start_line, line_no));
+                    current_start = None;
+                }
 
-                (_, Initial) => current_start = None,
+                (Some(_), _, Initial) => current_start = None,
 
                 _ => (),
             }
@@ -813,114 +811,6 @@ pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
             .expect("well-formed");
     }
     ranges
-}
-
-pub fn find_frames(code: &mut impl FrameInfosMut) {
-    struct OpenFrame {
-        num: usize,
-        start: usize,
-        kind: InstrKind,
-    }
-
-    let mut frame_stack: Vec<OpenFrame> = Vec::new();
-    let mut frame_count = 0;
-
-    let mut indent: i32 = 0;
-    for line_no in 0..code.len() {
-        let mut indent_adjustment: i32 = 0;
-        let ends_before = code.info(line_no).synthetic_before.end_opcodes;
-
-        for _ in 0..ends_before {
-            let f = frame_stack.pop().expect("frame ended before line");
-            indent -= 1;
-            code.set_frame_info(
-                f.num,
-                FrameInfo {
-                    indent: indent.try_into().expect("indent -> usize"),
-                    start: f.start,
-                    end: line_no,
-                    unclosed: true,
-                    kind: f.kind,
-                },
-            );
-        }
-
-        let active = code.info(line_no).is_active();
-        let line_kind = code.info(line_no).kind.stripped_clone();
-        match line_kind {
-            LineKind::Instr(kind) if active => match kind {
-                InstrKind::If | InstrKind::OtherStructured => {
-                    frame_stack.push(OpenFrame {
-                        num: frame_count,
-                        start: line_no,
-                        kind,
-                    });
-                    frame_count += 1;
-                    indent_adjustment = -1;
-                    indent += 1;
-                }
-                InstrKind::Else => {
-                    let Some(OpenFrame {
-                        num,
-                        start,
-                        kind: InstrKind::If,
-                    }) = frame_stack.pop()
-                    else {
-                        panic!("else outside if block");
-                    };
-                    indent_adjustment = -1;
-                    indent -= 1;
-                    code.set_frame_info(
-                        num,
-                        FrameInfo {
-                            indent: indent.try_into().expect("indent -> usize"),
-                            start,
-                            end: line_no,
-                            unclosed: false,
-                            kind: InstrKind::If,
-                        },
-                    );
-                    frame_stack.push(OpenFrame {
-                        num: frame_count,
-                        start: line_no,
-                        kind: InstrKind::Else,
-                    });
-                    indent += 1;
-                    frame_count += 1;
-                }
-                InstrKind::End => {
-                    let Some(OpenFrame { num, start, kind }) = frame_stack.pop() else {
-                        panic!("unclosed frame");
-                    };
-                    indent -= 1;
-                    code.set_frame_info(
-                        num,
-                        FrameInfo {
-                            indent: indent.try_into().expect("indent -> usize"),
-                            start,
-                            end: line_no,
-                            unclosed: false,
-                            kind,
-                        },
-                    );
-                }
-                InstrKind::Other => {}
-            },
-            LineKind::Instr(_) | LineKind::Empty | LineKind::Malformed(_) | LineKind::Other(_) => {}
-        }
-
-        // adjust indentation
-        let paren_depths = code.info(line_no).paren_depths();
-        indent += paren_depths.0;
-        code.set_indent(
-            line_no,
-            (indent + indent_adjustment)
-                .try_into()
-                .expect("indent -> usize"),
-        );
-        indent += paren_depths.1;
-    }
-    code.set_frame_count(frame_count);
 }
 
 pub fn parse_line(s: &str) -> LineKind {
@@ -941,7 +831,6 @@ mod tests {
 
     struct TestLineInfos {
         lines: Vec<LineInfo>,
-        frames: Vec<FrameInfo>,
     }
 
     impl TestLineInfos {
@@ -955,7 +844,6 @@ mod tests {
                         ..Default::default()
                     })
                     .collect(),
-                frames: Vec::new(),
             }
         }
     }
@@ -990,32 +878,6 @@ mod tests {
 
         fn set_invalid(&mut self, index: usize, reason: Option<String>) {
             self.lines[index].invalid = reason;
-        }
-    }
-
-    impl FrameInfosMut for TestLineInfos {
-        fn set_indent(&mut self, index: usize, num: usize) {
-            self.lines[index].indent = Some(num.try_into().unwrap());
-        }
-
-        fn set_frame_info(&mut self, num: usize, frame: FrameInfo) {
-            if num >= self.frames.len() {
-                self.frames.resize(
-                    num + 1,
-                    FrameInfo {
-                        start: 0,
-                        end: 0,
-                        indent: 0,
-                        unclosed: false,
-                        kind: InstrKind::Other,
-                    },
-                );
-            }
-            self.frames[num] = frame;
-        }
-
-        fn set_frame_count(&mut self, count: usize) {
-            self.frames.truncate(count);
         }
     }
 
@@ -1067,7 +929,7 @@ mod tests {
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    (local $x    f64 )    ")?)?,
-            ModulePart::Local
+            ModulePart::Local(1)
         );
         assert!(parse::<ModulePart>(&ParseBuffer::new("( param")?).is_err());
         assert!(parse::<ModulePart>(&ParseBuffer::new("()")?).is_err());
@@ -1144,7 +1006,7 @@ mod tests {
                 ModulePart::InlineImport,
                 ModulePart::Param,
                 ModulePart::Result,
-                ModulePart::Local
+                ModulePart::Local(1)
             ])
         );
         assert_eq!(
@@ -1187,7 +1049,7 @@ mod tests {
         assert_eq!(header_valid.next_field, 6);
 
         // local after import
-        assert!(header_valid.transit_state(ModulePart::Local).is_err());
+        assert!(header_valid.transit_state(ModulePart::Local(1)).is_err());
 
         // no func keyword
         let mut header_no_func_keyword = FuncHeader::default();
@@ -1284,31 +1146,12 @@ mod tests {
     }
 
     #[test]
-    fn test_fix_syntax_and_find_frames() {
+    fn test_fix_syntax() {
         {
             let mut infos1 = TestLineInfos::new(["(func", "block", "i32.const 42", "drop", ")"]);
             fix_syntax(&mut infos1);
-            find_frames(&mut infos1);
             assert!(infos1.lines.iter().all(|x| x.is_active()));
-            assert_eq!(
-                infos1
-                    .lines
-                    .iter()
-                    .map(|x| x.indent.unwrap())
-                    .collect::<Vec<_>>(),
-                [0, 1, 2, 2, 0]
-            );
             assert_eq!(infos1.lines[4].synthetic_before.end_opcodes, 1);
-            assert_eq!(
-                infos1.frames,
-                [FrameInfo {
-                    indent: 1,
-                    start: 1,
-                    end: 4,
-                    unclosed: true,
-                    kind: InstrKind::OtherStructured
-                }]
-            );
         }
 
         {
@@ -1321,7 +1164,6 @@ mod tests {
                 ")",     // 5
             ]);
             fix_syntax(&mut infos2);
-            find_frames(&mut infos2);
             assert_eq!(infos2.lines[5].synthetic_before.end_opcodes, 1);
             assert_eq!(
                 infos2
@@ -1331,41 +1173,12 @@ mod tests {
                     .collect::<Vec<_>>(),
                 [true, true, true, false, true, true]
             );
-            assert_eq!(
-                infos2
-                    .lines
-                    .iter()
-                    .map(|x| x.indent.unwrap())
-                    .collect::<Vec<_>>(),
-                [0, 1, 2, 3, 2, 0]
-            );
-            assert_eq!(
-                infos2.frames,
-                [
-                    FrameInfo {
-                        indent: 1,
-                        start: 1,
-                        end: 5,
-                        unclosed: true,
-                        kind: InstrKind::If
-                    },
-                    FrameInfo {
-                        indent: 2,
-                        start: 2,
-                        end: 4,
-                        unclosed: false,
-                        kind: InstrKind::OtherStructured
-                    }
-                ]
-            );
         }
 
         {
             let mut infos3 = TestLineInfos::new(["end"]);
             fix_syntax(&mut infos3);
-            find_frames(&mut infos3);
             assert!(!infos3.lines[0].is_active());
-            assert!(infos3.frames.is_empty());
         }
 
         {
@@ -1373,17 +1186,6 @@ mod tests {
             let mut infos4 =
                 TestLineInfos::new(["(func", "block", "i32.const 42", "drop", "end", ")"]);
             fix_syntax(&mut infos4);
-            find_frames(&mut infos4);
-            assert_eq!(
-                infos4.frames,
-                [FrameInfo {
-                    indent: 1,
-                    start: 1,
-                    end: 4,
-                    unclosed: false,
-                    kind: InstrKind::OtherStructured
-                }]
-            );
         }
 
         {
@@ -1408,58 +1210,6 @@ mod tests {
                 ")",            // 16
             ]);
             fix_syntax(&mut infos5);
-            find_frames(&mut infos5);
-            assert_eq!(infos5.frames.len(), 5);
-            assert_eq!(
-                infos5.frames[0],
-                FrameInfo {
-                    start: 1,
-                    end: 4,
-                    unclosed: false,
-                    indent: 1,
-                    kind: InstrKind::OtherStructured
-                }
-            );
-            assert_eq!(
-                infos5.frames[1],
-                FrameInfo {
-                    start: 5,
-                    end: 15,
-                    unclosed: false,
-                    indent: 1,
-                    kind: InstrKind::OtherStructured
-                }
-            );
-            assert_eq!(
-                infos5.frames[2],
-                FrameInfo {
-                    start: 6,
-                    end: 14,
-                    unclosed: false,
-                    indent: 2,
-                    kind: InstrKind::OtherStructured
-                }
-            );
-            assert_eq!(
-                infos5.frames[3],
-                FrameInfo {
-                    start: 7,
-                    end: 10,
-                    unclosed: false,
-                    indent: 3,
-                    kind: InstrKind::If
-                }
-            );
-            assert_eq!(
-                infos5.frames[4],
-                FrameInfo {
-                    start: 10,
-                    end: 13,
-                    unclosed: false,
-                    indent: 3,
-                    kind: InstrKind::Else
-                }
-            );
         }
 
         {

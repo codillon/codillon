@@ -64,7 +64,7 @@ div.textentry:focus {
 }
 
 .invalid-line::before {
-    content: "\1d13f        ";
+    content: "\2717        ";
 }
 
 .numbered-line::before {

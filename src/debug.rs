@@ -1,101 +1,88 @@
 // Debug manager for time-travel instrumentation
 // Currently support:
 // - all normal scalar value ops: i32, i64, f32, f64 (pushes from instructions are recorded)
-// - memory store ops: i32, i64, f32, f64 (stores record addr + value)
 // - local/global set ops: i32, i64, f32, f64
-// - function call tracking
 // Currently do not support:
+// - memory store ops: i32, i64, f32, f64 (stores record addr + value)
 // - other memory operations
+// - restoration of old values when a frame exits from a recursive call, or erasure when a frame repeats
 // - all SIMD/vector operations
 // - all reference types operations
 
-use js_sys::{Array, Object, Reflect};
-use std::cell::RefCell;
-use wasm_bindgen::JsCast;
-use wasm_bindgen::prelude::*;
-use web_sys::console::log_1;
+use crate::utils::FmtError;
+use anyhow::{Context, Result, bail};
+use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
+use std::cell::{Ref, RefCell};
+use wasm_bindgen::{JsCast, prelude::*};
 
-const MAX_STEP_COUNT: usize = 10_000;
+const MAX_STEP_COUNT: usize = 1_000;
 
 // Debug state stored in Wasm memory
 thread_local! {
-    static STATE: RefCell<DebugState> = RefCell::new(DebugState::new());
+    static STATE: RefCell<DebugState> = RefCell::new(DebugState::default());
+    static INSTRUMENTATION_IMPORTS: Object = make_imports().expect("instrumentation");
 }
 
-#[derive(Clone, Copy)]
-pub enum WebAssemblyTypes {
+#[derive(Clone, Copy, Debug)]
+pub enum WasmValue {
     I32(i32),
     I64(i64),
     F32(f32),
     F64(f64),
-    V128(u128),
 }
 
-impl From<i32> for WebAssemblyTypes {
+impl From<i32> for WasmValue {
     fn from(v: i32) -> Self {
-        WebAssemblyTypes::I32(v)
+        WasmValue::I32(v)
     }
 }
-impl From<i64> for WebAssemblyTypes {
+impl From<i64> for WasmValue {
     fn from(v: i64) -> Self {
-        WebAssemblyTypes::I64(v)
+        WasmValue::I64(v)
     }
 }
-impl From<f32> for WebAssemblyTypes {
+impl From<f32> for WasmValue {
     fn from(v: f32) -> Self {
-        WebAssemblyTypes::F32(v)
+        WasmValue::F32(v)
     }
 }
-impl From<f64> for WebAssemblyTypes {
+impl From<f64> for WasmValue {
     fn from(v: f64) -> Self {
-        WebAssemblyTypes::F64(v)
-    }
-}
-impl From<u128> for WebAssemblyTypes {
-    fn from(v: u128) -> Self {
-        WebAssemblyTypes::V128(v)
+        WasmValue::F64(v)
     }
 }
 
-pub struct Change {
-    pub line_number: usize,
-    pub stack_pushes: Vec<WebAssemblyTypes>,
-    pub num_pops: usize,
+#[derive(Debug, Default)]
+pub enum TerminationType {
+    #[default]
+    Running,
+    TooManySteps,
+    HitInvalid(u32),
+    Error(String),
+    Success,
 }
 
-pub enum SparseChange {
-    Locals(Vec<(usize, WebAssemblyTypes)>),
-    Globals(usize, WebAssemblyTypes),
-    Memory(usize, WebAssemblyTypes),
-    Point(f64, f64),
-    Clear(),
-    Color(i32, i32, i32),
-    Extent(f64, f64, f64, f64),
-    Radius(f64),
-}
-
-struct DebugState {
-    // Current State
-    stack_pushes: Vec<WebAssemblyTypes>,
-    // Vector of local variable indices and values
-    locals_change: Option<Vec<(usize, WebAssemblyTypes)>>,
-    num_pops: usize,
-    // Chronological per-step changes
-    changes: Vec<Change>,
-    // Sparse changes keyed by step index
-    sparse_changes: Vec<(usize, SparseChange)>,
+#[derive(Default)]
+pub struct DebugState {
+    current_step: ExecutionStep,
+    pub completed_steps: Vec<ExecutionStep>,
+    pub termination: TerminationType,
 }
 
 impl DebugState {
-    fn new() -> Self {
-        Self {
-            stack_pushes: Vec::new(),
-            locals_change: None,
-            num_pops: 0,
-            changes: Vec::new(),
-            sparse_changes: Vec::new(),
-        }
+    fn reset(&mut self) {
+        self.current_step = Default::default();
+        self.completed_steps.clear();
+        self.termination = Default::default();
     }
+}
+
+#[derive(Default, Debug)]
+pub struct ExecutionStep {
+    line_idx: u32,
+    slot_assignments: Vec<(u32, WasmValue)>, // slot idx, value
+                                             // XXX todo: memory
+                                             // XXX todo: canvas operations
 }
 
 fn register_closure<F>(obj: &Object, name: &str, func: Closure<F>)
@@ -106,61 +93,54 @@ where
     func.forget();
 }
 
+pub fn reset_debug_state() {
+    STATE.with(|cur_state| cur_state.borrow_mut().reset())
+}
+
+pub fn with_debug_state<T, F>(func: F) -> T
+where
+    F: FnOnce(Ref<'_, DebugState>) -> T,
+{
+    STATE.with(|state| func(state.borrow()))
+}
+
 // Constructs the instrumentation functions for import
-pub fn make_imports() -> Result<Object, JsValue> {
-    use SparseChange::*;
-    STATE.with(|cur_state| *cur_state.borrow_mut() = DebugState::new());
+fn make_imports() -> Result<Object, JsValue> {
     let imports = Object::new();
     let debug_numbers = Object::new();
 
-    // Updating the debug state at every step. Return 1 to continue, 0 to halt.
-    let step_closure = Closure::wrap(Box::new(move |line_num: i32| -> i32 {
-        STATE.with(|cur_state| {
-            let mut state = cur_state.borrow_mut();
-            // Signal halt
-            if state.changes.len() >= MAX_STEP_COUNT {
-                log_1(&"debug: max step count exceeded".into());
-                return 0;
-            }
-            let cur_change = Change {
-                line_number: line_num as usize,
-                stack_pushes: state.stack_pushes.clone(),
-                num_pops: state.num_pops,
-            };
-            let step_idx = state.changes.len();
-            if let Some(locals) = state.locals_change.take() {
-                state.sparse_changes.push((step_idx, Locals(locals)));
-            }
-            state.changes.push(cur_change);
-            state.stack_pushes.clear();
-            state.locals_change = None;
-            state.num_pops = 0;
-            1
-        })
-    }) as Box<dyn Fn(i32) -> i32>);
-    register_closure(&debug_numbers, "step", step_closure);
+    // Updating the debug state at every step. Returns whether execution should continue.
+    let step_closure = Closure::wrap(Box::new(move |line_num: u32| -> bool {
+        STATE.with_borrow_mut(|state| {
+            state.current_step.line_idx = line_num;
 
-    create_closure_local_operations(&debug_numbers);
-    create_closure_global_operations(&debug_numbers);
-    create_closure_memory_operations(&debug_numbers);
+            state
+                .completed_steps
+                .push(std::mem::take(&mut state.current_step));
+
+            // Signal halt
+            if state.completed_steps.len() >= MAX_STEP_COUNT {
+                state.termination = TerminationType::TooManySteps;
+                false
+            } else {
+                true
+            }
+        })
+    }) as Box<dyn Fn(u32) -> bool>);
+    register_closure(&debug_numbers, "record_step", step_closure);
+
+    let record_invalid = Closure::wrap(Box::new(move |line_num: u32| {
+        STATE.with_borrow_mut(|state| state.termination = TerminationType::HitInvalid(line_num));
+    }) as Box<dyn Fn(u32)>);
+    register_closure(&debug_numbers, "record_invalid", record_invalid);
+
     create_closure_record_operations(&debug_numbers);
 
-    let pop_i = Closure::wrap(Box::new(move |pop_num: i32| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().num_pops = pop_num as usize;
-        });
-    }) as Box<dyn Fn(i32)>);
-    register_closure(&debug_numbers, "pop_i", pop_i);
-
-    Reflect::set(
-        &imports,
-        &JsValue::from_str("codillon_debug"),
-        &debug_numbers,
-    )?;
-    create_closure_helpers(&imports);
+    Reflect::set(&imports, &"codillon_debug".into(), &debug_numbers)?;
     Ok(imports)
 }
 
+/* XXX: restore graphics features
 fn create_closure_helpers(import: &Object) {
     let helpers = Object::new();
     let add_change = |change: SparseChange| {
@@ -192,199 +172,91 @@ fn create_closure_helpers(import: &Object) {
     register_closure(&helpers, "set_radius", set_radius);
     Reflect::set(import, &JsValue::from_str("helpers"), &helpers).ok();
 }
+*/
 
-fn create_closure_record_operations(debug_numbers: &Object) {
-    let record = |_slot: usize, value: WebAssemblyTypes| {
-        STATE.with(|cur_state| {
-            cur_state.borrow_mut().stack_pushes.push(value);
-        });
-    };
-    let record_i32 = Closure::wrap(Box::new(move |slot: i32, value: i32| {
-        record(slot as usize, WebAssemblyTypes::I32(value));
-    }) as Box<dyn Fn(i32, i32)>);
-    register_closure(debug_numbers, "record_i32", record_i32);
-
-    let record_f32 = Closure::wrap(Box::new(move |slot: i32, value: f32| {
-        record(slot as usize, WebAssemblyTypes::F32(value));
-    }) as Box<dyn Fn(i32, f32)>);
-    register_closure(debug_numbers, "record_f32", record_f32);
-
-    let record_i64 = Closure::wrap(Box::new(move |slot: i32, value: i64| {
-        record(slot as usize, WebAssemblyTypes::I64(value));
-    }) as Box<dyn Fn(i32, i64)>);
-    register_closure(debug_numbers, "record_i64", record_i64);
-
-    let record_f64 = Closure::wrap(Box::new(move |slot: i32, value: f64| {
-        record(slot as usize, WebAssemblyTypes::F64(value));
-    }) as Box<dyn Fn(i32, f64)>);
-    register_closure(debug_numbers, "record_f64", record_f64);
-}
-
-fn create_closure_global_operations(debug_numbers: &Object) {
-    let record_global_change = |idx: i32, value: WebAssemblyTypes| {
-        STATE.with(|cur_state| {
-            let mut state = cur_state.borrow_mut();
-            let step_idx = state.changes.len();
+fn create_closure_record_operations(obj: &Object) {
+    let record = |value: WasmValue, slot: u32| {
+        STATE.with(|state| {
             state
-                .sparse_changes
-                .push((step_idx, SparseChange::Globals(idx as usize, value)));
+                .borrow_mut()
+                .current_step
+                .slot_assignments
+                .push((slot, value))
         });
     };
-    let set_global_i32 = Closure::wrap(Box::new(move |idx: i32, value: i32| {
-        record_global_change(idx, value.into());
-    }) as Box<dyn Fn(i32, i32)>);
-    register_closure(debug_numbers, "set_global_i32", set_global_i32);
+    let record_i32 = Closure::wrap(
+        Box::new(move |value: i32, slot: u32| record(value.into(), slot)) as Box<dyn Fn(i32, u32)>,
+    );
+    register_closure(obj, "record_i32", record_i32);
 
-    let set_global_f32 = Closure::wrap(Box::new(move |idx: i32, value: f32| {
-        record_global_change(idx, value.into());
-    }) as Box<dyn Fn(i32, f32)>);
-    register_closure(debug_numbers, "set_global_f32", set_global_f32);
+    let record_f32 = Closure::wrap(
+        Box::new(move |value: f32, slot: u32| record(value.into(), slot)) as Box<dyn Fn(f32, u32)>,
+    );
+    register_closure(obj, "record_f32", record_f32);
 
-    let set_global_i64 = Closure::wrap(Box::new(move |idx: i32, value: i64| {
-        record_global_change(idx, value.into());
-    }) as Box<dyn Fn(i32, i64)>);
-    register_closure(debug_numbers, "set_global_i64", set_global_i64);
+    let record_i64 = Closure::wrap(
+        Box::new(move |value: i64, slot: u32| record(value.into(), slot)) as Box<dyn Fn(i64, u32)>,
+    );
+    register_closure(obj, "record_i64", record_i64);
 
-    let set_global_f64 = Closure::wrap(Box::new(move |idx: i32, value: f64| {
-        record_global_change(idx, value.into());
-    }) as Box<dyn Fn(i32, f64)>);
-    register_closure(debug_numbers, "set_global_f64", set_global_f64);
+    let record_f64 = Closure::wrap(
+        Box::new(move |value: f64, slot: u32| record(value.into(), slot)) as Box<dyn Fn(f64, u32)>,
+    );
+    register_closure(obj, "record_f64", record_f64);
 }
 
-fn create_closure_local_operations(debug_numbers: &Object) {
-    let record_local_change = |idx: usize, value: WebAssemblyTypes| {
-        STATE.with(|cur_state| {
-            let mut state = cur_state.borrow_mut();
-            if let Some(cur_locals) = &mut state.locals_change {
-                cur_locals.push((idx, value));
-            } else {
-                state.locals_change = Some(vec![(idx, value)]);
+pub async fn run_binary(binary: &[u8]) -> Result<()> {
+    use js_sys::{Function, Reflect};
+    reset_debug_state();
+    let imports = INSTRUMENTATION_IMPORTS.with(|imports| imports.clone());
+    let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
+    let js_value = wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .fmt_err()?;
+    let instance = Reflect::get(&js_value, &JsValue::from_str("instance")).fmt_err()?;
+    let exports = Reflect::get(&instance, &JsValue::from_str("exports")).fmt_err()?;
+    // Call main function with default values for its params
+    match Reflect::get(&exports, &JsValue::from_str("main")) {
+        Ok(main) => {
+            let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
+                .context("main is not an exported function")?;
+            match main.apply(&JsValue::null(), &js_sys::Array::new()) {
+                Ok(val) if val.is_undefined() => {
+                    STATE.with_borrow_mut(|state| match state.termination {
+                        TerminationType::Running => state.termination = TerminationType::Success,
+                        TerminationType::TooManySteps
+                        | TerminationType::HitInvalid(_)
+                        | TerminationType::Success
+                        | TerminationType::Error(_) => {
+                            unreachable!("success after other result");
+                        }
+                    });
+                    Ok(())
+                }
+                Ok(val) => {
+                    bail!("unhandled return value from function: {:?}", val)
+                }
+                Err(e) => match e.dyn_ref::<RuntimeError>() {
+                    Some(r) => {
+                        let reason: String = r.message().into();
+                        STATE.with_borrow_mut(|state| match state.termination {
+                            TerminationType::Running => {
+                                state.termination = TerminationType::Error(reason)
+                            }
+                            TerminationType::HitInvalid(_) => {} // error is expected
+                            TerminationType::TooManySteps => {}
+                            TerminationType::Success | TerminationType::Error(_) => {
+                                unreachable!("error after other result");
+                            }
+                        });
+                        Ok(())
+                    }
+                    None => {
+                        bail!("other failure: {:?}", e);
+                    }
+                },
             }
-        });
-    };
-    let set_local_i32 = Closure::wrap(Box::new(move |idx: i32, value: i32| {
-        record_local_change(idx as usize, value.into());
-    }) as Box<dyn Fn(i32, i32)>);
-    register_closure(debug_numbers, "set_local_i32", set_local_i32);
-
-    let set_local_f32 = Closure::wrap(Box::new(move |idx: i32, value: f32| {
-        record_local_change(idx as usize, value.into());
-    }) as Box<dyn Fn(i32, f32)>);
-    register_closure(debug_numbers, "set_local_f32", set_local_f32);
-
-    let set_local_i64 = Closure::wrap(Box::new(move |idx: i32, value: i64| {
-        record_local_change(idx as usize, value.into());
-    }) as Box<dyn Fn(i32, i64)>);
-    register_closure(debug_numbers, "set_local_i64", set_local_i64);
-
-    let set_local_f64 = Closure::wrap(Box::new(move |idx: i32, value: f64| {
-        record_local_change(idx as usize, value.into());
-    }) as Box<dyn Fn(i32, f64)>);
-    register_closure(debug_numbers, "set_local_f64", set_local_f64);
-}
-
-fn create_closure_memory_operations(debug_numbers: &Object) {
-    let record_memory_change = |addr: usize, value: WebAssemblyTypes| {
-        STATE.with(|cur_state| {
-            let mut state = cur_state.borrow_mut();
-            let step_idx = state.changes.len();
-            state
-                .sparse_changes
-                .push((step_idx, SparseChange::Memory(addr, value)));
-        });
-    };
-    let set_memory_i32 = Closure::wrap(Box::new(move |addr: i32, value: i32| {
-        record_memory_change(addr as usize, WebAssemblyTypes::I32(value));
-        // Return [addr, value]
-        let arr = js_sys::Array::new();
-        arr.push(&JsValue::from_f64(addr as f64));
-        arr.push(&JsValue::from_f64(value as f64));
-        arr
-    }) as Box<dyn Fn(i32, i32) -> js_sys::Array>);
-    register_closure(debug_numbers, "set_memory_i32", set_memory_i32);
-
-    let set_memory_f32 = Closure::wrap(Box::new(move |addr: i32, value: f32| {
-        record_memory_change(addr as usize, WebAssemblyTypes::F32(value));
-        let arr = js_sys::Array::new();
-        arr.push(&JsValue::from_f64(addr as f64));
-        arr.push(&JsValue::from_f64(value as f64));
-        arr
-    }) as Box<dyn Fn(i32, f32) -> js_sys::Array>);
-    register_closure(debug_numbers, "set_memory_f32", set_memory_f32);
-
-    let set_memory_i64 = Closure::wrap(Box::new(move |addr: i32, value: i64| {
-        record_memory_change(addr as usize, WebAssemblyTypes::I64(value));
-        let arr = js_sys::Array::new();
-        arr.push(&JsValue::from_f64(addr as f64));
-        arr.push(&JsValue::from_f64(value as f64));
-        arr
-    }) as Box<dyn Fn(i32, i64) -> js_sys::Array>);
-    register_closure(debug_numbers, "set_memory_i64", set_memory_i64);
-
-    let set_memory_f64 = Closure::wrap(Box::new(move |addr: i32, value: f64| {
-        record_memory_change(addr as usize, WebAssemblyTypes::F64(value));
-        let arr = js_sys::Array::new();
-        arr.push(&JsValue::from_f64(addr as f64));
-        arr.push(&JsValue::from_f64(value));
-        arr
-    }) as Box<dyn Fn(i32, f64) -> js_sys::Array>);
-    register_closure(debug_numbers, "set_memory_f64", set_memory_f64);
-}
-
-pub fn last_step() -> usize {
-    STATE.with(|cur_state| cur_state.borrow().changes.len().saturating_sub(1))
-}
-
-pub fn with_changes<T, F>(get_iter: F) -> T
-where
-    F: FnOnce(std::slice::Iter<'_, Change>) -> T,
-{
-    STATE.with(|cur_state| get_iter(cur_state.borrow().changes.iter()))
-}
-
-pub fn with_sparse_changes<T, F>(f: F) -> T
-where
-    F: FnOnce(&Vec<(usize, SparseChange)>) -> T,
-{
-    STATE.with(|cur_state| f(&cur_state.borrow().sparse_changes))
-}
-
-fn type_to_string(value: &WebAssemblyTypes) -> String {
-    match value {
-        WebAssemblyTypes::I32(v) => format!("i32({})", v),
-        WebAssemblyTypes::I64(v) => format!("i64({})", v),
-        WebAssemblyTypes::F32(v) => format!("f32({})", v),
-        WebAssemblyTypes::F64(v) => format!("f64({})", v),
-        WebAssemblyTypes::V128(v) => format!("v128({}", v),
+        }
+        Err(e) => bail!("reflection failure: {:?}", e),
     }
-}
-
-fn vec_to_array(cur_vec: &Vec<WebAssemblyTypes>) -> Array {
-    let output_arr = Array::new();
-    for value in cur_vec {
-        let result = type_to_string(value);
-        output_arr.push(&JsValue::from_str(&result));
-    }
-    output_arr
-}
-
-fn set_js_num(output: &Object, label: &str, num: f64) {
-    Reflect::set(output, &JsValue::from_str(label), &JsValue::from_f64(num)).ok();
-}
-
-fn set_js_vec(output: &Object, label: &str, vector: &Vec<WebAssemblyTypes>) {
-    Reflect::set(output, &JsValue::from_str(label), &vec_to_array(vector)).ok();
-}
-
-pub fn program_state_to_js(ps: &crate::editor::ProgramState) -> String {
-    let output = Object::new();
-    set_js_num(&output, "step#", ps.step_number as f64);
-    set_js_vec(&output, "stack", &ps.stack_state);
-    set_js_vec(&output, "locals", &ps.locals_state);
-    set_js_vec(&output, "globals", &ps.globals_state);
-    set_js_vec(&output, "mem", &ps.memory_state);
-    js_sys::JSON::stringify(&JsValue::from(output))
-        .ok()
-        .and_then(|s| s.as_string())
-        .unwrap_or_else(|| "{}".to_string())
 }

@@ -2,25 +2,22 @@
 
 use crate::{
     action_history::{ActionHistory, Edit, Selection},
-    debug::{
-        SparseChange, WebAssemblyTypes, last_step, make_imports, program_state_to_js, with_changes,
-        with_sparse_changes,
-    },
-    dom_canvas::{Action, DomCanvas},
+    debug::{run_binary, with_debug_state},
+    dom_canvas::DomCanvas,
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
         NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
-        compare_document_position, get_selection, now_ms, render_canvas, set_selection_range,
+        compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
-        find_frames, find_function_ranges, find_import_lines, fix_syntax,
+        find_function_ranges, find_import_lines, fix_syntax,
     },
-    utils::{FmtError, RawModule, ValidModule, str_to_binary},
+    utils::{FmtError, RawModule, indent_and_frame, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use itertools::Itertools;
@@ -30,7 +27,6 @@ use std::{
     ops::Deref,
     rc::Rc,
 };
-use wasm_bindgen::JsValue;
 use web_sys::{HtmlDivElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
@@ -46,27 +42,11 @@ type ComponentType = DomStruct<
 pub const LINE_SPACING: usize = 40;
 const STORAGE_ID: &str = "codillon_content";
 
-#[derive(Clone, Default)]
-pub struct ProgramState {
-    pub step_number: usize,
-    pub line_number: usize,
-    pub stack_state: Vec<WebAssemblyTypes>,
-    pub locals_state: Vec<WebAssemblyTypes>,
-    pub globals_state: Vec<WebAssemblyTypes>,
-    pub memory_state: Vec<WebAssemblyTypes>,
-    pub sparse_idx: usize,
-}
-
 struct _Editor {
     component: ComponentType,
     factory: ElementFactory,
     action_history: ActionHistory,
     storage: Option<StorageHandle>,
-
-    program_state: ProgramState,
-    function_locals: Vec<Vec<WebAssemblyTypes>>,
-    globals: Vec<WebAssemblyTypes>,
-    saved_states: Vec<Option<ProgramState>>,
     function_ranges: Vec<(usize, usize)>,
 }
 
@@ -91,10 +71,6 @@ impl Editor {
             factory,
             action_history: ActionHistory::default(),
             storage: StorageHandle::new(),
-            program_state: ProgramState::default(),
-            function_locals: Vec::new(),
-            globals: Vec::new(),
-            saved_states: Vec::new(),
             function_ranges: Vec::new(),
         };
 
@@ -127,8 +103,8 @@ impl Editor {
             let editor_ref = Rc::clone(&ret.0);
             ret.slider_mut().set_oninput(move |_| {
                 let editor = Editor(editor_ref.clone());
-                let step = editor.slider().inner().value_as_number().round() as usize;
-                editor.build_program_state(step);
+                let _step = editor.slider().inner().value_as_number().round() as usize;
+                //                editor.build_program_state(step);
             });
         }
 
@@ -154,7 +130,8 @@ impl Editor {
             ret.set_default_contents();
         }
 
-        ret.on_change().expect("well-formed initial contents");
+        // XXX temporarily disable second call to on_change until #187 (double concurrent execution) is fixed
+        //        ret.on_change().expect("well-formed initial contents");
 
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
@@ -532,14 +509,6 @@ impl Editor {
         RefMut::map(self.text_mut(), |c| &mut c[idx])
     }
 
-    fn program_state(&self) -> Ref<'_, ProgramState> {
-        Ref::map(self.0.borrow(), |c| &c.program_state)
-    }
-
-    fn program_state_mut(&self) -> RefMut<'_, ProgramState> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.program_state)
-    }
-
     fn slider(&self) -> Ref<'_, Slider> {
         Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
     }
@@ -569,9 +538,6 @@ impl Editor {
         // repair syntax
         fix_syntax(self);
 
-        // find frames in the function
-        find_frames(self);
-
         // Get function ranges
         self.0.borrow_mut().function_ranges = find_function_ranges(self);
 
@@ -580,15 +546,18 @@ impl Editor {
         let validized = raw_module.fix_validity(&wasm_bin, self, &find_import_lines(self))?;
         let types = validized.to_types_table(&wasm_bin)?;
 
+        // indent operators and find frames
+        indent_and_frame(self, &validized, &types);
+
         // XXX: render types of operators
         for i in 0..self.len() {
             self.line_mut(i).set_type_annotation(None);
         }
 
         // instrumentation
-        self.initialize_globals(&validized);
-        self.initialize_locals(&validized);
-        self.execute(&validized.build_executable_binary(&types, &self.0.borrow().function_ranges)?);
+        self.execute(
+            &validized.build_instrumented_binary(&types, &self.0.borrow().function_ranges)?,
+        );
 
         // save to local storage
         {
@@ -605,230 +574,40 @@ impl Editor {
     }
 
     fn execute(&self, binary: &[u8]) {
-        async fn run_binary(binary: &[u8], args: &js_sys::Array) -> Result<()> {
-            use js_sys::{Function, Reflect};
-            // Build import objects for the instrumented module.
-            let imports = make_imports().fmt_err()?;
-            let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
-            let js_value = wasm_bindgen_futures::JsFuture::from(promise)
-                .await
-                .fmt_err()?;
-            let instance = Reflect::get(&js_value, &JsValue::from_str("instance")).fmt_err()?;
-            let exports = Reflect::get(&instance, &JsValue::from_str("exports")).fmt_err()?;
-            // Call first function with default values for its params
-            match Reflect::get(&exports, &JsValue::from_str("main")) {
-                Ok(main) => {
-                    let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
-                        .context("main is not an exported function")?;
-                    match main.apply(&JsValue::null(), args) {
-                        Ok(val) if val.is_undefined() => Ok(()),
-                        Ok(val) => {
-                            bail!("unhandled return value from function: {:?}", val)
-                        }
-                        Err(e) => bail!("execution failure: {:?}", e),
-                    }
-                }
-                Err(e) => bail!("reflection failure: {:?}", e),
-            }
-        }
         let binary = binary.to_vec();
         let editor_handle = Editor(Rc::clone(&self.0));
         wasm_bindgen_futures::spawn_local(async move {
-            let first_func_locals: Vec<WebAssemblyTypes> = editor_handle
-                .0
-                .borrow()
-                .function_locals
-                .first()
-                .cloned()
-                .unwrap_or_default();
-            let args = js_sys::Array::new();
-            for val in first_func_locals {
-                let js_val = match val {
-                    WebAssemblyTypes::I32(v) => JsValue::from_f64(v as f64),
-                    WebAssemblyTypes::I64(v) => JsValue::from_f64(v as f64),
-                    WebAssemblyTypes::F32(v) => JsValue::from_f64(v as f64),
-                    WebAssemblyTypes::F64(v) => JsValue::from_f64(v),
-                    WebAssemblyTypes::V128(v) => JsValue::from_f64(v as f64),
-                };
-                args.push(&js_val);
-            }
-            run_binary(&binary, &args)
+            run_binary(&binary)
                 .await
                 .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
+            let max_step = with_debug_state(|state| state.completed_steps.len()).saturating_sub(1);
             // Update slider
             editor_handle
                 .slider_mut()
                 .inner_mut()
-                .set_attribute("max", &(last_step() + 1).to_string());
+                .set_attribute("max", &max_step.to_string());
             editor_handle
                 .slider_mut()
                 .inner_mut()
-                .set_value_as_number((last_step() + 1) as f64);
-            *editor_handle.program_state_mut() = ProgramState::default();
-            editor_handle.0.borrow_mut().saved_states = Vec::new();
-            editor_handle.build_program_state(last_step() + 1);
-        });
-    }
+                .set_value_as_number(max_step as f64);
 
-    fn valtype_default_editor(ty: &wasmparser::ValType) -> WebAssemblyTypes {
-        match ty {
-            wasmparser::ValType::I32 => WebAssemblyTypes::I32(0),
-            wasmparser::ValType::I64 => WebAssemblyTypes::I64(0),
-            wasmparser::ValType::F32 => WebAssemblyTypes::F32(0.0),
-            wasmparser::ValType::F64 => WebAssemblyTypes::F64(0.0),
-            wasmparser::ValType::V128 => WebAssemblyTypes::V128(0u128),
-            _ => panic!("unsupported valtype for locals"),
-        }
-    }
+            // print out steps for debugging
+            // XXX: render in UI
 
-    fn initialize_globals(&self, validized: &ValidModule) {
-        use wasmparser::Operator::*;
-        let mut globals: Vec<WebAssemblyTypes> = Vec::with_capacity(validized.globals.len());
-        for global in &validized.globals {
-            let mut init_reader = global.init_expr.get_operators_reader();
-            if let Ok(op) = init_reader.read() {
-                globals.push(match op {
-                    I32Const { value } => WebAssemblyTypes::I32(value),
-                    F32Const { value } => WebAssemblyTypes::F32(value.into()),
-                    I64Const { value } => WebAssemblyTypes::I64(value),
-                    F64Const { value } => WebAssemblyTypes::F64(value.into()),
-                    V128Const { value } => WebAssemblyTypes::V128(value.into()),
-                    _ => WebAssemblyTypes::I32(0),
-                });
-            }
-        }
-        self.0.borrow_mut().globals = globals;
-    }
-
-    fn initialize_locals(&self, validized: &ValidModule) {
-        let mut function_locals: Vec<Vec<WebAssemblyTypes>> =
-            Vec::with_capacity(validized.functions.len());
-        for (func_idx, func) in validized.functions.iter().enumerate() {
-            let mut locals: Vec<WebAssemblyTypes> =
-                Vec::with_capacity(validized.get_func_type(func_idx).params().len());
-            for param in validized.get_func_type(func_idx).params() {
-                locals.push(Self::valtype_default_editor(param));
-            }
-            for (count, local_type) in &func.locals {
-                for _ in 0..*count {
-                    locals.push(Self::valtype_default_editor(local_type));
+            with_debug_state(|state| {
+                log_1(
+                    &format!(
+                        "terminated after {} steps with status {:?}",
+                        state.completed_steps.len(),
+                        state.termination
+                    )
+                    .into(),
+                );
+                for (i, step) in state.completed_steps.iter().enumerate() {
+                    log_1(&format!("step #{i}: {:?}", step).into());
                 }
-            }
-            function_locals.push(locals);
-        }
-        self.0.borrow_mut().function_locals = function_locals;
-    }
-
-    fn build_program_state(&self, stop: usize) {
-        let mut actions: Vec<Action> = Vec::new();
-        // For backwards steps, reset program state
-        if stop < self.program_state().step_number {
-            *self.program_state_mut() = ProgramState::default();
-        }
-        let start = self.program_state().step_number;
-        let mut inner = self.0.borrow_mut();
-        let line_count = inner.component.get().1.0.inner().len();
-        inner.saved_states.resize(line_count, None);
-        if start == 0 {
-            inner.program_state.globals_state = inner.globals.clone();
-            if let Some((first_start, _first_end)) = inner.function_ranges.first().cloned() {
-                inner.saved_states[first_start] = Some(inner.program_state.clone());
-            }
-            actions.push(Action::Clear);
-            actions.push(Action::Color(0, 0, 0));
-            actions.push(Action::Radius(3.0));
-            actions.push(Action::Extent(-1.0, 1.0, -1.0, 1.0));
-        }
-        with_changes(|changes| {
-            with_sparse_changes(|sparse_changes| {
-                let mut sparse_idx = inner.program_state.sparse_idx;
-                for (i, change) in changes.enumerate().skip(start).take(stop - start) {
-                    inner.program_state.step_number = i + 1;
-                    inner.program_state.line_number = change.line_number;
-                    let func_idx = inner
-                        .function_ranges
-                        .iter()
-                        .position(|(s, e)| change.line_number >= *s && change.line_number <= *e)
-                        .expect("line inside function");
-                    let new_length = inner
-                        .program_state
-                        .stack_state
-                        .len()
-                        .saturating_sub(change.num_pops);
-                    inner.program_state.stack_state.truncate(new_length);
-                    for push in &change.stack_pushes {
-                        inner.program_state.stack_state.push(*push);
-                    }
-                    while sparse_idx < sparse_changes.len() && sparse_changes[sparse_idx].0 == i {
-                        match sparse_changes[sparse_idx].1 {
-                            SparseChange::Locals(ref vec) => {
-                                for (idx, val) in vec.iter() {
-                                    inner.function_locals[func_idx][*idx] = *val;
-                                }
-                            }
-                            SparseChange::Globals(idx, val) => {
-                                inner.program_state.globals_state[idx] = val;
-                            }
-                            SparseChange::Memory(idx, val) => {
-                                let memory = &mut inner.program_state.memory_state;
-                                if memory.len() <= idx {
-                                    memory.resize(idx + 1, WebAssemblyTypes::I32(0));
-                                }
-                                memory[idx] = val;
-                            }
-                            SparseChange::Point(x, y) => {
-                                actions.push(Action::Point(x, y));
-                            }
-                            SparseChange::Clear() => {
-                                actions.push(Action::Clear);
-                            }
-                            SparseChange::Color(r, g, b) => {
-                                actions.push(Action::Color(r, g, b));
-                            }
-                            SparseChange::Extent(xmin, xmax, ymin, ymax) => {
-                                actions.push(Action::Extent(xmin, xmax, ymin, ymax));
-                            }
-                            SparseChange::Radius(radius) => {
-                                actions.push(Action::Radius(radius));
-                            }
-                        }
-                        sparse_idx += 1;
-                    }
-                    inner.program_state.locals_state = inner.function_locals[func_idx].clone();
-                    inner.saved_states[change.line_number] = Some(inner.program_state.clone());
-                }
-                inner.program_state.sparse_idx = sparse_idx;
             });
         });
-        drop(inner);
-        self.update_debug_panel(&actions);
-    }
-
-    fn update_debug_panel(&self, actions: &[Action]) {
-        {
-            let inner = &mut self.0.borrow_mut();
-            let step = inner.program_state.step_number;
-            let line_num = inner.program_state.line_number;
-            let saved_states = inner.saved_states.clone();
-            let textentry = &mut inner.component.get_mut().1.0;
-            let lines: &mut TextType = textentry.inner_mut();
-            for i in 0..lines.len() {
-                lines[i].set_highlight(false);
-                if let Some(cur_state) = saved_states.get(i)
-                    && let Some(program_state) = &cur_state
-                    && program_state.step_number <= step
-                {
-                    lines[i].set_debug_annotation(Some(&program_state_to_js(program_state)));
-                } else {
-                    lines[i].set_debug_annotation(None);
-                }
-            }
-            lines[line_num].set_highlight(true);
-        }
-        render_canvas(
-            &mut self.0.borrow_mut().component.get_mut().1.1.1.0,
-            actions,
-        );
     }
 
     fn apply_selection(

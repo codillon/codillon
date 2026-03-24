@@ -32,7 +32,7 @@ impl PartialEq<bool> for Activity {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct LineInfo {
     pub kind: LineKind,
     pub active: Activity,
