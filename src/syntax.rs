@@ -593,10 +593,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         let line_kind = lines.info(line_no).kind.stripped_clone();
 
-        // Collect defined local and label symbolic references if there's any
-        collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
-        let line_label = collect_label_symbol(&lines.info(line_no).symbols);
-
         // Enforce correct symbolic reference consumption
         if lines.info(line_no).is_active() {
             // end/else must match the label of the frame being closed, not any enclosing frame
@@ -714,7 +710,10 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 // For a structured instruction that opens a frame, log this.
                 InstrKind::If | InstrKind::OtherStructured => {
                     lines.set_active_status(line_no, Active);
-                    frame_stack.push((instr_kind, line_label));
+                    frame_stack.push((
+                        instr_kind,
+                        collect_label_symbol(&lines.info(line_no).symbols),
+                    ));
                 }
 
                 // Fix #5: if an `else` appears outside an `if` frame, disable it
@@ -740,6 +739,11 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 ),
                 _ => (),
             }
+        }
+
+        // Collect defined local symbolic references if there's any
+        if lines.info(line_no).is_active() {
+            collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
         }
     }
 
