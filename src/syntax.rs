@@ -282,24 +282,24 @@ impl<'a> Parse<'a> for ModulePart {
                     kind: wast::core::GlobalKind::Inline(wast::core::Expression { instrs, .. }),
                     ty:
                         wast::core::GlobalType {
-                            ty: ty @ I32 | ty @ F32 | ty @ I64 | ty @ F64,
-                            shared: false,
-                            ..
+                            ty, shared: false, ..
                         },
                     ..
-                } => {
-                    if instrs.len() == 1 {
-                        match (ty, &instrs[0]) {
-                            (I32, Instruction::I32Const(_)) => Ok(ModulePart::Global),
-                            (F32, Instruction::F32Const(_)) => Ok(ModulePart::Global),
-                            (I64, Instruction::I64Const(_)) => Ok(ModulePart::Global),
-                            (F64, Instruction::F64Const(_)) => Ok(ModulePart::Global),
-                            _ => Err(parser.error("expected initializer matching global type")),
-                        }
-                    } else {
-                        Err(parser.error("expected single-instruction initializer"))
-                    }
-                }
+                } => match instrs.len() {
+                    0 => Err(parser.error("expected initializer")),
+                    1 => match (ty, &instrs[0]) {
+                        (I32, Instruction::I32Const(_)) => Ok(ModulePart::Global),
+                        (F32, Instruction::F32Const(_)) => Ok(ModulePart::Global),
+                        (I64, Instruction::I64Const(_)) => Ok(ModulePart::Global),
+                        (F64, Instruction::F64Const(_)) => Ok(ModulePart::Global),
+                        (I32, _) => Err(parser.error("expected i32.const initializer")),
+                        (F32, _) => Err(parser.error("expected f32.const initializer")),
+                        (I64, _) => Err(parser.error("expected i64.const initializer")),
+                        (F64, _) => Err(parser.error("expected f64.const initializer")),
+                        _ => Err(parser.error("unsupported global type")),
+                    },
+                    _ => Err(parser.error("expected single-instruction initializer")),
+                },
                 _ => Err(parser.error("unsupported global type")),
             })
         } else if parser.step(|cursor| match cursor.lparen()? {
