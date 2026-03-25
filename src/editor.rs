@@ -595,7 +595,7 @@ impl Editor {
                     editor_handle
                         .slider_mut()
                         .inner_mut()
-                        .set_value_as_number(step_count as f64);
+                        .set_value_as_number(step_count as f64 - 1.0);
                 } else {
                     editor_handle.slider_mut().inner_mut().hide();
                 }
