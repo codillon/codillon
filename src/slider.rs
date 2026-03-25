@@ -2,6 +2,7 @@ use crate::{
     dom_vec::DomVec,
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement},
 };
+use num_format::{Locale, ToFormattedString};
 use web_sys::{HtmlDataListElement, HtmlDivElement, HtmlInputElement, HtmlOptionElement};
 
 pub struct Slider {
@@ -70,10 +71,11 @@ impl Slider {
         assert!(last_step > 0); // logic error to use slider if there's only one step
         self.input.set_attribute("max", &last_step.to_string());
         self.ticks.remove_range(0, self.ticks.len());
+
         let tick = |step: usize, pos: f64| {
             let mut option = self.factory.option();
             option.set_attribute("value", &step.to_string());
-            option.set_attribute("label", &step.to_string());
+            option.set_attribute("label", &step.to_formatted_string(&Locale::en));
             let label_len = step.to_string().len() as f64;
             // Negative margin-right to cancel out own width
             option.set_attribute(
