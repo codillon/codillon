@@ -182,14 +182,23 @@ impl From<Instruction<'_>> for InstrKind {
     }
 }
 
+fn remap_diagnostic(s: String) -> String {
+    const TOKEN_MESSAGE: &str = "unexpected token, expected one of: `i32`, `i64`, `f32`, `f64`";
+    if s.starts_with(TOKEN_MESSAGE) {
+        return TOKEN_MESSAGE.to_string();
+    }
+    s.replace("expected a i", "expected an i")
+}
+
 impl From<Error> for LineKind {
     fn from(e: Error) -> Self {
-        LineKind::Malformed(format!("{e}").lines().next().unwrap_or_default().into())
+        LineKind::Malformed(remap_diagnostic(e.message()))
     }
 }
 
 impl<'a> Parse<'a> for ModulePart {
     fn parse(parser: Parser<'a>) -> Result<Self, Error> {
+        use ValType::*;
         // Prioritize fields of format "(...)" over single "(" token
 
         if parser.peek::<InlineExport>()? {
@@ -269,7 +278,29 @@ impl<'a> Parse<'a> for ModulePart {
                     kind: wast::core::GlobalKind::Import { .. },
                     ..
                 } => Err(parser.error("unsupported import kind")),
-                _ => Ok(ModulePart::Global),
+                Global {
+                    kind: wast::core::GlobalKind::Inline(wast::core::Expression { instrs, .. }),
+                    ty:
+                        wast::core::GlobalType {
+                            ty: ty @ I32 | ty @ F32 | ty @ I64 | ty @ F64,
+                            shared: false,
+                            ..
+                        },
+                    ..
+                } => {
+                    if instrs.len() == 1 {
+                        match (ty, &instrs[0]) {
+                            (I32, Instruction::I32Const(_)) => Ok(ModulePart::Global),
+                            (F32, Instruction::F32Const(_)) => Ok(ModulePart::Global),
+                            (I64, Instruction::I64Const(_)) => Ok(ModulePart::Global),
+                            (F64, Instruction::F64Const(_)) => Ok(ModulePart::Global),
+                            _ => Err(parser.error("expected initializer matching global type")),
+                        }
+                    } else {
+                        Err(parser.error("expected single-instruction initializer"))
+                    }
+                }
+                _ => Err(parser.error("unsupported global type")),
             })
         } else if parser.step(|cursor| match cursor.lparen()? {
             Some(rest) => Ok((true, rest)),
