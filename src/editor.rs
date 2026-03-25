@@ -4,7 +4,6 @@ use crate::{
     action_history::{ActionHistory, Edit, Selection},
     debug::{run_binary, with_debug_state},
     dom_canvas::DomCanvas,
-    dom_slider::DomSlider,
     dom_struct::DomStruct,
     dom_vec::DomVec,
     graphics::DomImage,
@@ -14,6 +13,7 @@ use crate::{
         compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
+    slider::Slider,
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         fix_syntax,
@@ -36,7 +36,7 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ReactiveComponent<DomSlider>, (DomCanvas, ())),
+            (ReactiveComponent<Slider>, (DomCanvas, ())),
         ),
     ),
     HtmlDivElement,
@@ -63,7 +63,7 @@ impl Editor {
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
                         (
-                            (ReactiveComponent::new(DomSlider::new(factory.clone()))),
+                            (ReactiveComponent::new(Slider::new(factory.clone()))),
                             (DomCanvas::new(factory.canvas()), ()),
                         ),
                     ),
@@ -504,11 +504,11 @@ impl Editor {
         RefMut::map(self.text_mut(), |c| &mut c[idx])
     }
 
-    fn slider(&self) -> Ref<'_, ReactiveComponent<DomSlider>> {
+    fn slider(&self) -> Ref<'_, ReactiveComponent<Slider>> {
         Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
     }
 
-    fn slider_mut(&self) -> RefMut<'_, ReactiveComponent<DomSlider>> {
+    fn slider_mut(&self) -> RefMut<'_, ReactiveComponent<Slider>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
     }
 

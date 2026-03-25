@@ -1,5 +1,4 @@
 pub mod dom_canvas;
-pub mod dom_slider;
 pub mod dom_struct;
 pub mod dom_text;
 pub mod dom_vec;
@@ -11,5 +10,6 @@ pub mod debug;
 pub mod editor;
 pub mod graphics;
 pub mod line;
+pub mod slider;
 pub mod symbolic;
 pub mod syntax;

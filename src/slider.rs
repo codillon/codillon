@@ -4,14 +4,14 @@ use crate::{
 };
 use web_sys::{HtmlDataListElement, HtmlDivElement, HtmlInputElement, HtmlOptionElement};
 
-pub struct DomSlider {
+pub struct Slider {
     container: ElementHandle<HtmlDivElement>,
     ticks: DomVec<ElementHandle<HtmlOptionElement>, HtmlDataListElement>,
     input: ElementHandle<HtmlInputElement>,
     factory: ElementFactory,
 }
 
-impl DomSlider {
+impl Slider {
     pub fn new(factory: ElementFactory) -> Self {
         let mut container = factory.div();
         let mut ticks = DomVec::new(factory.datalist());
@@ -105,7 +105,7 @@ impl DomSlider {
     }
 }
 
-impl Component for DomSlider {
+impl Component for Slider {
     fn audit(&self) {
         self.container.audit();
         self.input.audit();
@@ -113,7 +113,7 @@ impl Component for DomSlider {
     }
 }
 
-impl WithElement for DomSlider {
+impl WithElement for Slider {
     type Element = HtmlDivElement;
     fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
         self.container.with_element(f, g)
