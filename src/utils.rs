@@ -2591,6 +2591,28 @@ pub(crate) mod tests {
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
+        {
+            // issue #168
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(");
+            editor.push_line("(func");
+            editor.push_line("(local $x i32)");
+            editor.push_line("local.get $x");
+            editor.push_line("drop");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            // issue #191
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(");
+            editor.push_line("(func");
+            editor.push_line("(local $x i32) (local $y i32)");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
         Ok(())
     }
 
