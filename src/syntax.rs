@@ -1148,8 +1148,8 @@ mod tests {
             parse_line("i32.bogus"),
             malf("unknown operator or unexpected token")
         );
-        assert_eq!(parse_line("i32.const"), malf("expected a i32"));
-        assert_eq!(parse_line("i32.const x"), malf("expected a i32"));
+        assert_eq!(parse_line("i32.const"), malf("expected an i32"));
+        assert_eq!(parse_line("i32.const x"), malf("expected an i32"));
         //not well-formed "instructions": multiple instructions per line, folded instructions
         assert_eq!(
             parse_line("i32.const 4 i32.const 5"),
