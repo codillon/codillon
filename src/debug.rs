@@ -57,7 +57,7 @@ pub enum TerminationType {
     #[default]
     Running,
     TooManySteps,
-    HitInvalid(u32),
+    HitInvalid,
     HitBadImport,
     Error(String),
     Success,
@@ -65,7 +65,7 @@ pub enum TerminationType {
 
 #[derive(Default)]
 pub struct DebugState {
-    current_step: ExecutionStep,
+    pub current_step: ExecutionStep,
     pub completed_steps: Vec<ExecutionStep>,
     pub termination: TerminationType,
 }
@@ -80,10 +80,10 @@ impl DebugState {
 
 #[derive(Default, Debug)]
 pub struct ExecutionStep {
-    line_idx: u32,
-    slot_assignments: Vec<(u32, WasmValue)>, // slot idx, value
-                                             // XXX todo: memory
-                                             // XXX todo: canvas operations
+    pub line_num: u32,
+    pub slot_assignments: Vec<(u32, WasmValue)>, // slot idx, value
+                                                 // XXX todo: memory
+                                                 // XXX todo: canvas operations
 }
 
 fn register_closure<F>(obj: &Object, name: &str, func: Closure<F>)
@@ -114,7 +114,7 @@ fn make_imports() -> Result<Object, JsValue> {
     let step_closure = Closure::wrap(Box::new(move |line_num: u32| -> bool {
         use TerminationType::*;
         STATE.with_borrow_mut(|state| {
-            state.current_step.line_idx = line_num;
+            state.current_step.line_num = line_num;
 
             state
                 .completed_steps
@@ -123,9 +123,8 @@ fn make_imports() -> Result<Object, JsValue> {
             match state.termination {
                 Running => (),
                 TooManySteps => panic!("execution unexpectedly continued after TooManySteps"),
-                HitInvalid(_) => panic!("execution unexpectedly continued after HitInvalid"),
-                HitBadImport => return false,
-                Error(..) => panic!("execution unexpectedly continued after Error"),
+                HitInvalid | HitBadImport => return false,
+                Error(_) => panic!("execution unexpectedly continued after Error"),
                 Success => panic!("execution unexpectedly continued after Success"),
             }
 
@@ -140,9 +139,9 @@ fn make_imports() -> Result<Object, JsValue> {
     }) as Box<dyn Fn(u32) -> bool>);
     register_closure(&debug_numbers, "record_step", step_closure);
 
-    let record_invalid = Closure::wrap(Box::new(move |line_num: u32| {
-        STATE.with_borrow_mut(|state| state.termination = TerminationType::HitInvalid(line_num))
-    }) as Box<dyn Fn(u32)>);
+    let record_invalid = Closure::wrap(Box::new(move || {
+        STATE.with_borrow_mut(|state| state.termination = TerminationType::HitInvalid)
+    }) as Box<dyn Fn()>);
     register_closure(&debug_numbers, "record_invalid", record_invalid);
 
     let func_placeholder = Closure::wrap(Box::new(move || {
@@ -241,7 +240,7 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
                     STATE.with_borrow_mut(|state| match state.termination {
                         TerminationType::Running => state.termination = TerminationType::Success,
                         TerminationType::TooManySteps
-                        | TerminationType::HitInvalid(_)
+                        | TerminationType::HitInvalid
                         | TerminationType::HitBadImport
                         | TerminationType::Success
                         | TerminationType::Error(..) => {
@@ -260,7 +259,7 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
                             TerminationType::Running => {
                                 state.termination = TerminationType::Error(reason)
                             }
-                            TerminationType::HitInvalid(_)
+                            TerminationType::HitInvalid
                             | TerminationType::HitBadImport
                             | TerminationType::TooManySteps => {} // error is expected
                             TerminationType::Success | TerminationType::Error(..) => {

@@ -1,5 +1,6 @@
 use crate::syntax::{
     FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, ModulePart,
+    find_function_ranges, find_import_lines,
 };
 use EncoderInstruction::*;
 use anyhow::{Result, bail};
@@ -173,12 +174,9 @@ const CODILLON_WASM_FEATURES: WasmFeatures = WasmFeatures::WASM1
     .union(WasmFeatures::WIDE_ARITHMETIC);
 
 impl<'a> RawModule<'a> {
-    pub fn new(
-        editor: &impl LineInfos,
-        wasm_bin: &'a [u8],
-        function_ranges: &[(usize, usize)],
-    ) -> Result<Self> {
+    pub fn new(editor: &impl LineInfos, wasm_bin: &'a [u8]) -> Result<Self> {
         use wasmparser::*;
+        let function_ranges = find_function_ranges(editor);
         let parser = Parser::new(0);
         let mut functions: Vec<RawFunction> = Vec::new();
         let mut types: Vec<FuncType> = Vec::new();
@@ -273,7 +271,7 @@ impl<'a> RawModule<'a> {
         {
             // align locals
             let mut locals_iter = locals.iter_mut();
-            for line_no in *start_line..=*end_line {
+            for line_no in start_line..=end_line {
                 if editor.info(line_no).is_active()
                     && let LineKind::Other(parts) = &editor.info(line_no).kind
                     && let Some(ModulePart::Local(num)) = parts.first()
@@ -291,7 +289,7 @@ impl<'a> RawModule<'a> {
 
             // align ops
             let mut ops_iter = ops.iter_mut();
-            for line_no in *start_line..=*end_line {
+            for line_no in start_line..=end_line {
                 for _ in 0..editor.info(line_no).num_ops() {
                     ops_iter
                         .next()
@@ -304,7 +302,7 @@ impl<'a> RawModule<'a> {
                     line_idx,
                     inner: wasmparser::Operator::End,
                 }) => {
-                    *line_idx = *end_line;
+                    *line_idx = end_line;
                 }
                 Some(_) => {
                     bail!("too many ops in function");
@@ -334,11 +332,11 @@ impl<'a> RawModule<'a> {
 
     pub fn fix_validity(
         self,
-        wasm_bin: &'a [u8],
         editor: &mut impl LineInfosMut,
-        import_lines: &[usize],
+        wasm_bin: &'a [u8],
     ) -> Result<ValidModule<'a>> {
         let parser = wasmparser::Parser::new(0);
+        let import_lines = find_import_lines(editor);
         let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
 
@@ -796,11 +794,7 @@ impl<'a> ValidModule<'a> {
         Ok(ret)
     }
 
-    pub fn build_instrumented_binary(
-        self,
-        types: &TypedModule,
-        function_ranges: &[(usize, usize)],
-    ) -> Result<Vec<u8>> {
+    pub fn build_instrumented_binary(self, types: &TypedModule) -> Result<Vec<u8>> {
         use wasm_encoder::*;
         let mut module = Module::default();
 
@@ -974,13 +968,13 @@ impl<'a> ValidModule<'a> {
             let mut code_section = CodeSection::new();
 
             // First in code section: the original functions
-            for (func_idx, start_line) in function_ranges.iter().enumerate() {
+            for (valid_func, typed_func) in self.functions.iter().zip(&types.funcs) {
                 self.build_function(
-                    func_idx,
+                    valid_func,
+                    typed_func,
                     &mut code_section,
                     types,
                     &result_types_to_func_idx,
-                    start_line.0,
                     step_function_idx,
                 )?;
             }
@@ -1017,17 +1011,15 @@ impl<'a> ValidModule<'a> {
 
     fn build_function(
         &self,
-        func_idx: usize,
+        orig_function: &ValidFunction,
+        typed_function: &TypedFunction,
         code_section: &mut CodeSection,
         types: &TypedModule,
         result_types_to_func_idx: &IndexMap<Vec<ValType>, u32>,
-        start_line: usize,
         step_function_idx: u32,
     ) -> Result<()> {
         use wasm_encoder::Instruction::*;
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32; // also idx of step function
-        let orig_function = &self.functions[func_idx];
-        let typed_function = &types.funcs[func_idx];
         let mut new_function = wasm_encoder::Function::new_with_locals_types(
             orig_function
                 .locals
@@ -1069,7 +1061,7 @@ impl<'a> ValidModule<'a> {
         };
 
         let step_debug = |f: &mut wasm_encoder::Function, line_number: usize| {
-            // Step after each instruction evaluation
+            // Step before each operator evaluation
             f.instruction(&I32Const(line_number.try_into().expect("line_no -> i32")));
             f.instruction(&Call(step_function_idx));
         };
@@ -1087,16 +1079,10 @@ impl<'a> ValidModule<'a> {
             primitive_record(&mut new_function, local)?;
         }
 
-        if orig_function.operators.len() > 1
-            && let Some(Aligned { line_idx, .. }) = orig_function.operators.first()
-        {
-            step_debug(&mut new_function, *line_idx);
-        } else {
-            step_debug(&mut new_function, start_line + 1);
-        }
-
         // Record all operators, translating func idxes as necessary
         for (i, codillon_operator) in orig_function.operators.iter().enumerate() {
+            step_debug(&mut new_function, codillon_operator.line_idx);
+
             let mut op = RoundtripReencoder.instruction(codillon_operator.inner.op.clone())?;
             let op_type = &typed_function.ops[i];
 
@@ -1147,8 +1133,6 @@ impl<'a> ValidModule<'a> {
                 }
                 _ => {}
             }
-
-            step_debug(&mut new_function, codillon_operator.line_idx + 1);
         }
         code_section.function(&new_function);
         Ok(())
@@ -1832,15 +1816,11 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![],
         };
-        let function_ranges: Vec<(usize, usize)> = Vec::new();
-        let wasm_bin = valid_module.build_instrumented_binary(
-            &TypedModule {
-                slots: vec![],
-                globals: vec![],
-                funcs: vec![],
-            },
-            &function_ranges,
-        )?;
+        let wasm_bin = valid_module.build_instrumented_binary(&TypedModule {
+            slots: vec![],
+            globals: vec![],
+            funcs: vec![],
+        })?;
         let mem_payload = wasmparser::Parser::new(0)
             .parse_all(&wasm_bin)
             .nth(4)
@@ -1858,9 +1838,7 @@ pub(crate) mod tests {
 
     use crate::line::{Activity, LineInfo};
     use crate::symbolic::parse_line_symbols;
-    use crate::syntax::{
-        SyntheticWasm, find_function_ranges, find_import_lines, fix_syntax, parse_line,
-    };
+    use crate::syntax::{SyntheticWasm, fix_syntax, parse_line};
 
     #[derive(Default, Debug)]
     struct FakeTextLine {
@@ -1932,8 +1910,6 @@ pub(crate) mod tests {
 
         fix_syntax(editor);
 
-        let function_ranges = find_function_ranges(editor);
-
         // build text of module
         let mut well_formed_str = String::new();
         for line in editor.lines.iter() {
@@ -1948,17 +1924,16 @@ pub(crate) mod tests {
 
         let wasm_bin = str_to_binary(well_formed_str)?;
 
-        let raw_module =
-            RawModule::new(editor, &wasm_bin, &function_ranges).context("RawModule::new")?;
+        let raw_module = RawModule::new(editor, &wasm_bin).context("RawModule::new")?;
         let validized = raw_module
-            .fix_validity(&wasm_bin, editor, &find_import_lines(editor))
+            .fix_validity(editor, &wasm_bin)
             .context("fix_validity")?;
 
         let types = validized
             .to_types_table(&wasm_bin)
             .context("to_types_table")?;
         let runnable = validized
-            .build_instrumented_binary(&types, &function_ranges)
+            .build_instrumented_binary(&types)
             .context("build_executable_binary")?;
 
         let instrumented_text = wasmprinter::print_bytes(&runnable).context("print_bytes")?;
@@ -2016,7 +1991,7 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
-    i32.const 1
+    i32.const 0
     call 7
   )
 "# + EXPECTED_STEP
@@ -2050,7 +2025,7 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
-    i32.const 2
+    i32.const 1
     call 7
   )
 "# + EXPECTED_STEP
@@ -2121,6 +2096,7 @@ pub(crate) mod tests {
         }
 
         // syntax error (missing `end`) -- should be same as the well-formed block
+        // (with different line # for the function end)
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
@@ -2131,7 +2107,7 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + "  (func (type 0)\n"
-                + JUST_BLOCK_END
+                + &JUST_BLOCK_END.replace("i32.const 3", "i32.const 2") // different line # for function end
                 + EXPECTED_STEP
                 + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
@@ -2199,7 +2175,7 @@ pub(crate) mod tests {
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
   (export "main" (func 7))
   (func (type 0)
-    i32.const 7
+    i32.const 6
     call 8
   )
 "# + EXPECTED_STEP
@@ -2222,7 +2198,7 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + "  (func (type 0)\n"
-                + JUST_BLOCK_END
+                + &JUST_BLOCK_END.replace("i32.const 2\n", "i32.const 5\n")
                 + EXPECTED_STEP
                 + ")\n";
             let expected = expected.replace("i32.const 3", "i32.const 6");
@@ -2250,7 +2226,7 @@ pub(crate) mod tests {
       i32.const 2
       call 7
       loop ;; label = @2
-        i32.const 3
+        i32.const 4
         call 7
       end
       i32.const 5
@@ -2519,7 +2495,7 @@ pub(crate) mod tests {
     local.get 3
     i32.const 3
     call 5
-    i32.const 1
+    i32.const 4
     call 7
   )
 "# + EXPECTED_STEP

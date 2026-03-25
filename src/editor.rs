@@ -15,7 +15,7 @@ use crate::{
     line::{Activity, CodeLine, LineInfo, Position},
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
-        find_function_ranges, find_import_lines, fix_syntax,
+        fix_syntax,
     },
     utils::{FmtError, RawModule, indent_and_frame, str_to_binary},
 };
@@ -47,7 +47,6 @@ struct _Editor {
     factory: ElementFactory,
     action_history: ActionHistory,
     storage: Option<StorageHandle>,
-    function_ranges: Vec<(usize, usize)>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -71,7 +70,6 @@ impl Editor {
             factory,
             action_history: ActionHistory::default(),
             storage: StorageHandle::new(),
-            function_ranges: Vec::new(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -538,12 +536,9 @@ impl Editor {
         // repair syntax
         fix_syntax(self);
 
-        // Get function ranges
-        self.0.borrow_mut().function_ranges = find_function_ranges(self);
-
         let wasm_bin = str_to_binary(self.active_as_text().join(" "))?;
-        let raw_module = RawModule::new(self, &wasm_bin, &self.0.borrow().function_ranges)?;
-        let validized = raw_module.fix_validity(&wasm_bin, self, &find_import_lines(self))?;
+        let raw_module = RawModule::new(self, &wasm_bin)?;
+        let validized = raw_module.fix_validity(self, &wasm_bin)?;
         let types = validized.to_types_table(&wasm_bin)?;
 
         // indent operators and find frames
@@ -555,9 +550,7 @@ impl Editor {
         }
 
         // instrumentation
-        self.execute(
-            &validized.build_instrumented_binary(&types, &self.0.borrow().function_ranges)?,
-        );
+        self.execute(&validized.build_instrumented_binary(&types)?);
 
         // save to local storage
         {
@@ -595,6 +588,7 @@ impl Editor {
             // XXX: render in UI
 
             with_debug_state(|state| {
+                use crate::debug::TerminationType::*;
                 log_1(
                     &format!(
                         "terminated after {} steps with status {:?}",
@@ -603,6 +597,37 @@ impl Editor {
                     )
                     .into(),
                 );
+
+                match &state.termination {
+                    Running => log_1(
+                        &"abnormal exit (still running, maybe from an unhandled return value)"
+                            .into(),
+                    ),
+                    TooManySteps | Success => {}
+                    HitInvalid => log_1(
+                        &format!(
+                            "hit invalid @ line #{}",
+                            state.completed_steps.last().unwrap().line_num
+                        )
+                        .into(),
+                    ),
+                    HitBadImport => log_1(
+                        &format!(
+                            "hit bad import @ line #{}",
+                            state.completed_steps.iter().rev().nth(1).unwrap().line_num
+                        )
+                        .into(),
+                    ),
+                    Error(reason) => log_1(
+                        &format!(
+                            "hit error {} @ line #{}",
+                            reason,
+                            state.completed_steps.last().unwrap().line_num
+                        )
+                        .into(),
+                    ),
+                }
+
                 for (i, step) in state.completed_steps.iter().enumerate() {
                     log_1(&format!("step #{i}: {:?}", step).into());
                 }
