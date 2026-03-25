@@ -160,18 +160,13 @@ const DUMMY_OFFSET: usize = 1; // no need to track offsets, but validator has sa
 // current features (notable exceptions: SIMD, GC, function references, exceptions)
 const CODILLON_WASM_FEATURES: WasmFeatures = WasmFeatures::WASM1
     .union(WasmFeatures::BULK_MEMORY)
-    .union(WasmFeatures::REFERENCE_TYPES)
     .union(WasmFeatures::SIGN_EXTENSION)
     .union(WasmFeatures::SATURATING_FLOAT_TO_INT)
     .union(WasmFeatures::MULTI_VALUE)
     .union(WasmFeatures::CUSTOM_PAGE_SIZES)
-    .union(WasmFeatures::EXTENDED_CONST)
     .union(WasmFeatures::MEMORY64)
     .union(WasmFeatures::MULTI_MEMORY)
-    .union(WasmFeatures::RELAXED_SIMD)
-    .union(WasmFeatures::TAIL_CALL)
-    .union(WasmFeatures::THREADS)
-    .union(WasmFeatures::WIDE_ARITHMETIC);
+    .union(WasmFeatures::TAIL_CALL);
 
 impl<'a> RawModule<'a> {
     pub fn new(editor: &impl LineInfos, wasm_bin: &'a [u8]) -> Result<Self> {
@@ -753,7 +748,7 @@ impl<'a> ValidModule<'a> {
                 allocs = validator.into_allocations();
             }
         }
-        assert!(funcs_iter.next().is_none(), "too much funcs in ValidModule");
+        assert!(funcs_iter.next().is_none(), "too many funcs in ValidModule");
         Ok(ret)
     }
 

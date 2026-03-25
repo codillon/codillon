@@ -686,14 +686,16 @@ mod tests {
         assert_eq!(symbols.defines[0].space, IndexSpace::Global);
         assert!(symbols.consumes.is_empty());
 
-        line = "(global $x i32 (global.get $y))";
-        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
-        assert_eq!(symbols.defines.len(), 1);
-        assert_eq!(symbols.defines[0].name, "x");
-        assert_eq!(symbols.defines[0].space, IndexSpace::Global);
-        assert_eq!(symbols.consumes.len(), 1);
-        assert_eq!(symbols.consumes[0].name, "y");
-        assert_eq!(symbols.consumes[0].space, IndexSpace::Global);
+        /* disable test now that global initialization is syntactically restricted
+                line = "(global $x i32 (global.get $y))";
+                symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
+                assert_eq!(symbols.defines.len(), 1);
+                assert_eq!(symbols.defines[0].name, "x");
+                assert_eq!(symbols.defines[0].space, IndexSpace::Global);
+                assert_eq!(symbols.consumes.len(), 1);
+                assert_eq!(symbols.consumes[0].name, "y");
+                assert_eq!(symbols.consumes[0].space, IndexSpace::Global);
+        */
 
         line = "(table $t 1 (ref $ft))";
         symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
