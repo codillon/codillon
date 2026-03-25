@@ -370,7 +370,7 @@ impl ElementHandle<HtmlInputElement> {
     delegate! {
     to self.elem {
         pub fn value_as_number(&self) -> f64;
-        pub fn set_value_as_number(&self, value: f64);
+        pub fn set_value_as_number(&mut self, value: f64);
     }
     }
 }
@@ -527,6 +527,14 @@ impl ElementFactory {
 
     pub fn canvas(&self) -> ElementHandle<web_sys::HtmlCanvasElement> {
         ElementHandle::new(self.create_element("canvas"))
+    }
+
+    pub fn datalist(&self) -> ElementHandle<web_sys::HtmlDataListElement> {
+        ElementHandle::new(self.create_element("datalist"))
+    }
+
+    pub fn option(&self) -> ElementHandle<web_sys::HtmlOptionElement> {
+        ElementHandle::new(self.create_element("option"))
     }
 }
 

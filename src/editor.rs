@@ -8,11 +8,12 @@ use crate::{
     dom_vec::DomVec,
     graphics::DomImage,
     jet::{
-        AccessToken, Component, ControlHandlers, ElementFactory, ElementHandle, InputEventHandle,
-        NodeRef, RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
+        AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
+        RangeLike, ReactiveComponent, StaticRangeHandle, StorageHandle, WithElement,
         compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
+    slider::Slider,
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         fix_syntax,
@@ -30,11 +31,13 @@ use std::{
 use web_sys::{HtmlDivElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
-type Slider = ReactiveComponent<ElementHandle<web_sys::HtmlInputElement>>;
 type ComponentType = DomStruct<
     (
         DomImage,
-        (ReactiveComponent<TextType>, (Slider, (DomCanvas, ()))),
+        (
+            ReactiveComponent<TextType>,
+            (ReactiveComponent<Slider>, (DomCanvas, ())),
+        ),
     ),
     HtmlDivElement,
 >;
@@ -60,7 +63,7 @@ impl Editor {
                     (
                         ReactiveComponent::new(DomVec::new(factory.div())),
                         (
-                            (Slider::new(factory.input())),
+                            (ReactiveComponent::new(Slider::new(factory.clone()))),
                             (DomCanvas::new(factory.canvas()), ()),
                         ),
                     ),
@@ -107,12 +110,6 @@ impl Editor {
         }
 
         ret.image_mut().set_attribute("class", "annotations");
-        ret.slider_mut().inner_mut().set_attribute("type", "range");
-        ret.slider_mut().inner_mut().set_attribute("min", "0");
-        ret.slider_mut().inner_mut().set_value_as_number(0f64);
-        ret.slider_mut()
-            .inner_mut()
-            .set_attribute("class", "step-slider");
 
         // Restore from localStorage, or use default content
         if let Some(storage) = StorageHandle::new()
@@ -507,11 +504,11 @@ impl Editor {
         RefMut::map(self.text_mut(), |c| &mut c[idx])
     }
 
-    fn slider(&self) -> Ref<'_, Slider> {
+    fn slider(&self) -> Ref<'_, ReactiveComponent<Slider>> {
         Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
     }
 
-    fn slider_mut(&self) -> RefMut<'_, Slider> {
+    fn slider_mut(&self) -> RefMut<'_, ReactiveComponent<Slider>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
     }
 
@@ -573,17 +570,6 @@ impl Editor {
             run_binary(&binary)
                 .await
                 .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
-            let max_step = with_debug_state(|state| state.completed_steps.len()).saturating_sub(1);
-            // Update slider
-            editor_handle
-                .slider_mut()
-                .inner_mut()
-                .set_attribute("max", &max_step.to_string());
-            editor_handle
-                .slider_mut()
-                .inner_mut()
-                .set_value_as_number(max_step as f64);
-
             // print out steps for debugging
             // XXX: render in UI
 
@@ -597,6 +583,22 @@ impl Editor {
                     )
                     .into(),
                 );
+
+                // Update slider
+                let step_count = state.completed_steps.len();
+                if step_count > 1 {
+                    editor_handle.slider_mut().inner_mut().show();
+                    editor_handle
+                        .slider_mut()
+                        .inner_mut()
+                        .build_ticks(step_count - 1);
+                    editor_handle
+                        .slider_mut()
+                        .inner_mut()
+                        .set_value_as_number(step_count as f64 - 1.0);
+                } else {
+                    editor_handle.slider_mut().inner_mut().hide();
+                }
 
                 match &state.termination {
                     Running => log_1(

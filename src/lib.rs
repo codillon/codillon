@@ -10,5 +10,6 @@ pub mod debug;
 pub mod editor;
 pub mod graphics;
 pub mod line;
+pub mod slider;
 pub mod symbolic;
 pub mod syntax;
