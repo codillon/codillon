@@ -32,8 +32,21 @@ impl DomSlider {
         }
     }
 
+    pub fn show(&mut self) {
+        self.container.set_attribute("class", "slider-container")
+    }
+
+    pub fn hide(&mut self) {
+        self.container
+            .set_attribute("class", "slider-container slider-hidden")
+    }
+
     pub fn value_as_number(&self) -> f64 {
         self.input.value_as_number()
+    }
+
+    pub fn set_value_as_number(&mut self, value: f64) {
+        self.input.set_value_as_number(value)
     }
 
     fn tick_interval(last_step: usize) -> usize {
@@ -54,6 +67,7 @@ impl DomSlider {
     }
 
     pub fn build_ticks(&mut self, last_step: usize) {
+        assert!(last_step > 0); // logic error to use slider if there's only one step
         self.input.set_attribute("max", &last_step.to_string());
         self.ticks.remove_range(0, self.ticks.len());
         let tick = |step: usize, pos: f64| {

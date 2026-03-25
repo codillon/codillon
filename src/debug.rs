@@ -129,7 +129,7 @@ fn make_imports() -> Result<Object, JsValue> {
             }
 
             // Signal halt
-            if state.completed_steps.len() >= MAX_STEP_COUNT {
+            if state.completed_steps.len() > MAX_STEP_COUNT {
                 state.termination = TerminationType::TooManySteps;
                 return false;
             }

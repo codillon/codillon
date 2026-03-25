@@ -276,3 +276,7 @@ span.debug[data-debug]::after {
 .slider-container {
     margin: 0 20px;
 }
+
+.slider-hidden {
+    visibility: hidden;
+}
