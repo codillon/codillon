@@ -2608,6 +2608,15 @@ pub(crate) mod tests {
             test_editor_flow(&mut editor)?;
         }
 
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("call $f");
+            editor.push_line(")");
+            editor.push_line("(func $f (import \"x\" \"y\"))");
+            test_editor_flow(&mut editor)?;
+        }
+
         Ok(())
     }
 
