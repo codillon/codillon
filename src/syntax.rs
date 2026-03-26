@@ -610,18 +610,49 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     let mut module_symbol_defs = ModuleIdentifiers::default();
     let mut local_symbol_defs: HashSet<String> = HashSet::new();
 
-    // Collect module-level defined symbolic references
-    for line_no in 0..lines.len() {
-        collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
-    }
-
     assert!(lines.len() > 0);
 
+    // first pass: disable imports appearing after other module fields,
+    // and declare module-scope symbolic ids for any surviving lines.
+
+    // There are probably still cases that can produce a "bounce."
     for line_no in 0..lines.len() {
         lines.set_synthetic_before(line_no, SyntheticWasm::default());
         lines.set_active_status(line_no, Active);
         lines.set_invalid(line_no, None);
 
+        let line_kind = lines.info(line_no).kind.stripped_clone();
+
+        // Enforce no imports after other module fields
+        if let LineKind::Other(parts) = &line_kind {
+            let has_import = parts
+                .iter()
+                .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport));
+            let module_field = parts.iter().any(|&p| {
+                matches!(
+                    p,
+                    ModulePart::Memory
+                        | ModulePart::Table
+                        | ModulePart::Global
+                        | ModulePart::Export
+                )
+            });
+            if has_import && !before_imports {
+                lines.set_active_status(
+                    line_no,
+                    Inactive("imports must appear before other module fields"),
+                );
+                continue;
+            } else if module_field || (parts.contains(&ModulePart::RParen) && !has_import) {
+                before_imports = false;
+            }
+
+            collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
+        }
+    }
+
+    // second pass: disable other lines that would make module malformed
+    for line_no in 0..lines.len() {
         let line_kind = lines.info(line_no).kind.stripped_clone();
 
         // Enforce correct symbolic reference consumption
@@ -646,31 +677,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             ) {
                 lines.set_active_status(line_no, Inactive("undefined symbolic reference"));
                 continue;
-            }
-        }
-
-        // Enforce no imports after other module fields
-        if let LineKind::Other(parts) = &line_kind {
-            let has_import = parts
-                .iter()
-                .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport));
-            let module_field = parts.iter().any(|&p| {
-                matches!(
-                    p,
-                    ModulePart::Memory
-                        | ModulePart::Table
-                        | ModulePart::Global
-                        | ModulePart::Export
-                )
-            });
-            if has_import && !before_imports {
-                lines.set_active_status(
-                    line_no,
-                    Inactive("imports must appear before other module fields"),
-                );
-                continue;
-            } else if module_field || (parts.contains(&ModulePart::RParen) && !has_import) {
-                before_imports = false;
             }
         }
 
