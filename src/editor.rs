@@ -50,6 +50,8 @@ struct _Editor {
     factory: ElementFactory,
     action_history: ActionHistory,
     storage: Option<StorageHandle>,
+    pending_binary: Option<Vec<u8>>,
+    worker_running: bool,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -73,6 +75,8 @@ impl Editor {
             factory,
             action_history: ActionHistory::default(),
             storage: StorageHandle::new(),
+            pending_binary: None,
+            worker_running: false,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -125,8 +129,7 @@ impl Editor {
             ret.set_default_contents();
         }
 
-        // XXX temporarily disable second call to on_change until #187 (double concurrent execution) is fixed
-        //        ret.on_change().expect("well-formed initial contents");
+        ret.on_change().expect("well-formed initial contents");
 
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
@@ -559,76 +562,87 @@ impl Editor {
     }
 
     fn execute(&self, binary: &[u8]) {
-        let binary = binary.to_vec();
-        let editor_handle = Editor(Rc::clone(&self.0));
+        let inner = Rc::clone(&self.0);
+        inner.borrow_mut().pending_binary = Some(binary.to_vec());
+        if inner.borrow().worker_running {
+            return;
+        }
+        inner.borrow_mut().worker_running = true;
         wasm_bindgen_futures::spawn_local(async move {
-            run_binary(&binary)
-                .await
-                .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
-            // print out steps for debugging
-            // XXX: render in UI
+            loop {
+                let Some(binary) = inner.borrow_mut().pending_binary.take() else {
+                    break;
+                };
+                run_binary(&binary)
+                    .await
+                    .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
+                let editor_handle = Editor(Rc::clone(&inner));
+                // print out steps for debugging
+                // XXX: render in UI
 
-            with_debug_state(|state| {
-                use crate::debug::TerminationType::*;
-                log_1(
-                    &format!(
-                        "terminated after {} steps with status {:?}",
-                        state.completed_steps.len(),
-                        state.termination
-                    )
-                    .into(),
-                );
+                with_debug_state(|state| {
+                    use crate::debug::TerminationType::*;
+                    log_1(
+                        &format!(
+                            "terminated after {} steps with status {:?}",
+                            state.completed_steps.len(),
+                            state.termination
+                        )
+                        .into(),
+                    );
 
-                // Update slider
-                let step_count = state.completed_steps.len();
-                if step_count > 1 {
-                    editor_handle.slider_mut().inner_mut().show();
-                    editor_handle
-                        .slider_mut()
-                        .inner_mut()
-                        .build_ticks(step_count - 1);
-                    editor_handle
-                        .slider_mut()
-                        .inner_mut()
-                        .set_value_as_number(step_count as f64 - 1.0);
-                } else {
-                    editor_handle.slider_mut().inner_mut().hide();
-                }
+                    // Update slider
+                    let step_count = state.completed_steps.len();
+                    if step_count > 1 {
+                        editor_handle.slider_mut().inner_mut().show();
+                        editor_handle
+                            .slider_mut()
+                            .inner_mut()
+                            .build_ticks(step_count - 1);
+                        editor_handle
+                            .slider_mut()
+                            .inner_mut()
+                            .set_value_as_number(step_count as f64 - 1.0);
+                    } else {
+                        editor_handle.slider_mut().inner_mut().hide();
+                    }
 
-                match &state.termination {
-                    Running => log_1(
-                        &"abnormal exit (still running, maybe from an unhandled return value)"
+                    match &state.termination {
+                        Running => log_1(
+                            &"abnormal exit (still running, maybe from an unhandled return value)"
+                                .into(),
+                        ),
+                        TooManySteps | Success => {}
+                        HitInvalid => log_1(
+                            &format!(
+                                "hit invalid @ line #{}",
+                                state.completed_steps.last().unwrap().line_num
+                            )
                             .into(),
-                    ),
-                    TooManySteps | Success => {}
-                    HitInvalid => log_1(
-                        &format!(
-                            "hit invalid @ line #{}",
-                            state.completed_steps.last().unwrap().line_num
-                        )
-                        .into(),
-                    ),
-                    HitBadImport => log_1(
-                        &format!(
-                            "hit bad import @ line #{}",
-                            state.completed_steps.iter().rev().nth(1).unwrap().line_num
-                        )
-                        .into(),
-                    ),
-                    Error(reason) => log_1(
-                        &format!(
-                            "hit error {} @ line #{}",
-                            reason,
-                            state.completed_steps.last().unwrap().line_num
-                        )
-                        .into(),
-                    ),
-                }
+                        ),
+                        HitBadImport => log_1(
+                            &format!(
+                                "hit bad import @ line #{}",
+                                state.completed_steps.iter().rev().nth(1).unwrap().line_num
+                            )
+                            .into(),
+                        ),
+                        Error(reason) => log_1(
+                            &format!(
+                                "hit error {} @ line #{}",
+                                reason,
+                                state.completed_steps.last().unwrap().line_num
+                            )
+                            .into(),
+                        ),
+                    }
 
-                for (i, step) in state.completed_steps.iter().enumerate() {
-                    log_1(&format!("step #{i}: {:?}", step).into());
-                }
-            });
+                    for (i, step) in state.completed_steps.iter().enumerate() {
+                        log_1(&format!("step #{i}: {:?}", step).into());
+                    }
+                });
+            }
+            inner.borrow_mut().worker_running = false;
         });
     }
 
