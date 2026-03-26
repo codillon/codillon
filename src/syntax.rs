@@ -152,8 +152,7 @@ pub struct FrameInfo {
 
 pub trait FrameInfosMut: LineInfos {
     fn set_indent(&mut self, index: usize, num: usize);
-    fn set_frame_count(&mut self, count: usize);
-    fn set_frame_info(&mut self, num: usize, frame: FrameInfo);
+    fn set_frames(&mut self, frames: Vec<FrameInfo>);
 }
 
 impl LineKind {

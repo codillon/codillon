@@ -50,6 +50,10 @@ div.textentry:focus {
     counter-increment: codelines;
 }
 
+.invalid-line {
+    counter-increment: codelines;
+}
+
 .line::before {
     font-size: 20pt;
     color: darkred;

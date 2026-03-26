@@ -25,6 +25,7 @@ use itertools::Itertools;
 use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
+    collections::HashMap,
     ops::Deref,
     rc::Rc,
 };
@@ -832,12 +833,13 @@ impl FrameInfosMut for Editor {
         }
     }
 
-    fn set_frame_count(&mut self, count: usize) {
-        self.image_mut().set_frame_count(count)
-    }
-
-    fn set_frame_info(&mut self, num: usize, frame: FrameInfo) {
-        self.image_mut().set_frame(num, frame)
+    fn set_frames(&mut self, frames: Vec<FrameInfo>) {
+        let mut tagged_frames = HashMap::with_capacity(frames.len());
+        for frame in frames {
+            let id = self.line(frame.start).id();
+            tagged_frames.insert(id, frame);
+        }
+        self.image_mut().set_frames(tagged_frames);
     }
 }
 
