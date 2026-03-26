@@ -231,11 +231,6 @@ impl Editor {
                 }
             }
 
-            // Bounce on attempts to add whitespace at the prefix of a line
-            if start_pos == Position::begin() && new_str == " " {
-                self.line_mut(start_line).shake();
-            }
-
             // Return new cursor position
             new_pos
         } else if start_line < end_line {
