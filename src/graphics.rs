@@ -9,7 +9,10 @@ use crate::{
     syntax::{FrameInfo, InstrKind},
 };
 use delegate::delegate;
-use std::cmp::max;
+use std::{
+    cmp::{Reverse, max},
+    collections::HashMap,
+};
 use web_sys::{
     SvgDefsElement, SvgElement, SvgLineElement, SvgPathElement, SvgUseElement, SvggElement,
 };
@@ -25,14 +28,17 @@ type DomLine = DomStruct<
 
 // Store the FrameInfo alongside each line so that it can skip updates if there is no change.
 struct FrameLine {
-    info: Option<FrameInfo>,
+    info: FrameInfo,
     elem: DomLine,
 }
 
 impl FrameLine {
-    fn new(factory: &ElementFactory) -> Self {
+    fn new(factory: &ElementFactory, info: FrameInfo) -> Self {
         let mut ret = Self {
-            info: None,
+            info: FrameInfo {
+                indent: info.indent + 10,
+                ..info
+            },
             elem: DomStruct::new(
                 (factory.svg_line(), (factory.svg_use(), ())),
                 factory.svg_g(),
@@ -54,15 +60,15 @@ impl FrameLine {
         line.set_attribute("stroke-width", "3px");
         line.set_attribute("class", "annotation");
 
+        ret.update(info);
+
         ret
     }
 
     // Make the DOM SVG element reflect the new Wasm FrameInfo that it represents.
     // Store the "info" in the FrameLine so that we can short-circuit future updates if there is no change.
     fn update(&mut self, info: FrameInfo) {
-        if let Some(existing_info) = &self.info
-            && *existing_info == info
-        {
+        if self.info == info {
             return;
         }
 
@@ -131,6 +137,7 @@ pub struct DomImage {
     contents: CodillonSVG,
     height: usize,
     factory: ElementFactory,
+    frame_map: HashMap<u32, usize>, // frame identity -> block idx
 }
 
 impl WithElement for DomImage {
@@ -179,6 +186,7 @@ impl DomImage {
             ),
             height: 0,
             factory,
+            frame_map: Default::default(),
         };
 
         ret.contents.get_mut().0.push(icon);
@@ -194,22 +202,42 @@ impl DomImage {
         }
     }
 
-    pub fn set_frame(&mut self, num: usize, frame: FrameInfo) {
-        self.make_height_at_least(frame.end + 1);
-        match self.blocks_mut().get_mut(num) {
-            Some(frame_line) => frame_line.update(frame),
-            None => {
-                while self.blocks().len() <= num {
-                    let blocks = &mut self.contents.get_mut().1.0;
-                    blocks.push(FrameLine::new(&self.factory));
+    pub fn set_frames(&mut self, frames: HashMap<u32, FrameInfo>) {
+        /* delete frames that no longer exist */
+        {
+            let mut to_remove: Vec<(u32, usize)> = vec![];
+            for (id, idx) in &self.frame_map {
+                if !frames.contains_key(id) {
+                    to_remove.push((*id, *idx));
                 }
-                self.blocks_mut().get_mut(num).unwrap().update(frame)
+            }
+            to_remove.sort_by_key(|e| Reverse(e.1));
+            for (id, idx) in to_remove {
+                self.blocks_mut().remove(idx);
+                self.frame_map.remove(&id);
+                for other_idx in self.frame_map.values_mut() {
+                    if *other_idx >= idx {
+                        *other_idx -= 1;
+                    }
+                }
             }
         }
-    }
 
-    pub fn set_frame_count(&mut self, count: usize) {
-        self.blocks_mut().truncate(count);
+        /* update existing frames and add new ones */
+        for frame in frames {
+            self.make_height_at_least(frame.1.end + 1);
+            let index = self.frame_map.get(&frame.0).copied();
+            if let Some(idx) = index {
+                // update existing
+                self.blocks_mut().get_mut(idx).unwrap().update(frame.1);
+            } else {
+                // add new frame
+                let idx = self.blocks().len();
+                let blocks = &mut self.contents.get_mut().1.0;
+                blocks.push(FrameLine::new(&self.factory, frame.1));
+                self.frame_map.insert(frame.0, idx);
+            }
+        }
     }
 
     delegate! {

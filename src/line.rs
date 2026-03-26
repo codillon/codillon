@@ -12,6 +12,7 @@ use crate::{
     utils::find_comment,
 };
 use anyhow::{Result, bail};
+use std::cell::RefCell;
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
 
 type DomBr = DomStruct<(), HtmlBrElement>;
@@ -134,6 +135,7 @@ pub struct CodeLine {
     contents: LinePara,
     info: LineInfo,
     animation_state: AnimationState,
+    id: u32,
 }
 
 impl WithElement for CodeLine {
@@ -188,6 +190,10 @@ impl Component for CodeLine {
 
         self.contents.audit();
     }
+}
+
+thread_local! {
+    static NEXT_LINE_ID: RefCell<u32> = const { RefCell::new(0) };
 }
 
 impl CodeLine {
@@ -349,6 +355,11 @@ impl CodeLine {
             ),
             info: LineInfo::default(),
             animation_state: AnimationState::Normal,
+            id: NEXT_LINE_ID.with_borrow_mut(|id| {
+                let ret = *id;
+                *id += 1;
+                ret
+            }),
         };
 
         ret.contents.get_mut().0.set_attribute("class", "instr");
@@ -534,6 +545,10 @@ impl CodeLine {
 
     pub fn info(&self) -> &LineInfo {
         &self.info
+    }
+
+    pub fn id(&self) -> u32 {
+        self.id
     }
 
     pub fn position_to_node(&self, pos: Position) -> &DomText {

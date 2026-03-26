@@ -1220,111 +1220,90 @@ pub fn indent_and_frame(
     _module: &ValidModule,
     _types: &TypedModule,
 ) {
+    assert!(code.len() > 0);
+
     struct OpenFrame {
-        num: usize,
-        start: usize,
-        kind: InstrKind,
+        end: usize,
+        synthetic: bool,
     }
 
+    let mut frames: Vec<FrameInfo> = Vec::new();
     let mut frame_stack: Vec<OpenFrame> = Vec::new();
-    let mut frame_count = 0;
-
     let mut indent: i32 = 0;
-    for line_no in 0..code.len() {
-        let mut indent_adjustment: i32 = 0;
-        let ends_before = code.info(line_no).synthetic_before.end_opcodes;
+
+    for line_no in (0..code.len()).rev() {
+        let mut indent_above = indent;
+
+        let (active, line_kind, ends_before, paren_depths) = {
+            let l = code.info(line_no);
+            (
+                l.is_active(),
+                l.kind.stripped_clone(),
+                l.synthetic_before.end_opcodes,
+                l.paren_depths(),
+            )
+        };
+
+        if !active {
+            code.set_indent(line_no, indent.try_into().expect("indent -> i32"));
+            continue;
+        }
 
         for _ in 0..ends_before {
-            let f = frame_stack.pop().expect("frame ended before line");
-            indent -= 1;
-            code.set_frame_info(
-                f.num,
-                FrameInfo {
-                    indent: indent.try_into().expect("indent -> usize"),
-                    start: f.start,
-                    end: line_no,
-                    unclosed: true,
-                    kind: f.kind,
-                },
-            );
+            frame_stack.push(OpenFrame {
+                end: line_no,
+                synthetic: true,
+            });
+            indent_above += 1;
         }
-
-        let active = code.info(line_no).is_active();
-        let line_kind = code.info(line_no).kind.stripped_clone();
-        match line_kind {
-            LineKind::Instr(kind) if active => match kind {
-                InstrKind::If | InstrKind::OtherStructured => {
+        if let LineKind::Instr(kind) = line_kind {
+            match kind {
+                InstrKind::End => {
                     frame_stack.push(OpenFrame {
-                        num: frame_count,
+                        end: line_no,
+                        synthetic: false,
+                    });
+                    indent_above += 1;
+                }
+                InstrKind::OtherStructured | InstrKind::If => {
+                    indent -= 1;
+                    indent_above -= 1;
+                    let f = frame_stack.pop().expect("malformed frame stack");
+                    frames.push(FrameInfo {
+                        indent: indent.try_into().expect("indent -> usize"),
                         start: line_no,
+                        end: f.end,
+                        unclosed: f.synthetic,
                         kind,
                     });
-                    frame_count += 1;
-                    indent_adjustment = -1;
-                    indent += 1;
                 }
                 InstrKind::Else => {
-                    let Some(OpenFrame {
-                        num,
-                        start,
-                        kind: InstrKind::If,
-                    }) = frame_stack.pop()
-                    else {
-                        panic!("else outside if block");
-                    };
-                    indent_adjustment = -1;
                     indent -= 1;
-                    code.set_frame_info(
-                        num,
-                        FrameInfo {
-                            indent: indent.try_into().expect("indent -> usize"),
-                            start,
-                            end: line_no,
-                            unclosed: false,
-                            kind: InstrKind::If,
-                        },
-                    );
-                    frame_stack.push(OpenFrame {
-                        num: frame_count,
+                    let f = frame_stack.pop().expect("malformed frame stack");
+                    frames.push(FrameInfo {
+                        indent: indent.try_into().expect("indent -> usize"),
                         start: line_no,
-                        kind: InstrKind::Else,
+                        end: f.end,
+                        unclosed: f.synthetic,
+                        kind,
                     });
-                    indent += 1;
-                    frame_count += 1;
+                    frame_stack.push(OpenFrame {
+                        end: line_no,
+                        synthetic: false,
+                    });
                 }
-                InstrKind::End => {
-                    let Some(OpenFrame { num, start, kind }) = frame_stack.pop() else {
-                        panic!("unclosed frame");
-                    };
-                    indent -= 1;
-                    code.set_frame_info(
-                        num,
-                        FrameInfo {
-                            indent: indent.try_into().expect("indent -> usize"),
-                            start,
-                            end: line_no,
-                            unclosed: false,
-                            kind,
-                        },
-                    );
-                }
-                InstrKind::Other => {}
-            },
-            LineKind::Instr(_) | LineKind::Empty | LineKind::Malformed(_) | LineKind::Other(_) => {}
+                InstrKind::Other => (),
+            }
         }
+        indent_above -= paren_depths.0;
+        indent -= paren_depths.1;
+        indent_above -= paren_depths.1;
 
-        // adjust indentation
-        let paren_depths = code.info(line_no).paren_depths();
-        indent += paren_depths.0;
-        code.set_indent(
-            line_no,
-            (indent + indent_adjustment)
-                .try_into()
-                .expect("indent -> usize"),
-        );
-        indent += paren_depths.1;
+        code.set_indent(line_no, indent.try_into().expect("indent -> i32"));
+        indent = indent_above;
     }
-    code.set_frame_count(frame_count);
+
+    code.set_frames(frames);
 }
 
 pub trait FmtError {
