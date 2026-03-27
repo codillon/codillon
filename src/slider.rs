@@ -78,12 +78,11 @@ impl Slider {
         }
     }
 
-    pub fn build_ticks(&mut self, last_step: usize) {
+    pub fn build_ticks(&mut self, last_step: usize, current_step: usize) {
         assert!(last_step > 0); // logic error to use slider if there's only one step
         self.input.set_attribute("max", &last_step.to_string());
         self.ticks.remove_range(0, self.ticks.len());
         self.tick_labels.remove_range(0, self.tick_labels.len());
-        let current_step = self.value_as_number() as usize;
         let interval = Self::tick_interval(last_step);
         let remainder = last_step % interval;
         let mut step = 0;
@@ -116,11 +115,13 @@ impl Slider {
             }
             step += interval;
         }
-        add_tick(if current_step >= step - interval / 2 {
-            current_step
-        } else {
-            last_step
-        });
+        add_tick(
+            if current_step >= step - interval / 2 || current_step >= last_step - interval / 2 {
+                current_step
+            } else {
+                last_step
+            },
+        );
     }
 }
 

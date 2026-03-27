@@ -116,8 +116,9 @@ impl Editor {
             ret.slider_mut().set_oninput(move |_| {
                 let editor = Editor(editor_ref.clone());
                 let _step = editor.slider().inner().value_as_number().round() as usize;
-                let last_step = with_debug_state(|state| state.completed_steps.len());
-                editor.update_slider(last_step);
+                let step_count = with_debug_state(|state| state.completed_steps.len());
+                let current_step = editor.slider().inner().value_as_number() as usize;
+                editor.update_slider(step_count, current_step);
                 //                editor.build_program_state(step);
             });
 
@@ -564,6 +565,7 @@ impl Editor {
         fix_syntax(self);
 
         let wasm_bin = str_to_binary(self.active_as_text().join(" "))?;
+        let binary_hash = Self::hash_binary(&wasm_bin);
         let raw_module = RawModule::new(self, &wasm_bin)?;
         let validized = raw_module.fix_validity(self, &wasm_bin)?;
         let types = validized.to_types_table(&wasm_bin)?;
@@ -576,8 +578,13 @@ impl Editor {
             self.line_mut(i).set_type_annotation(None);
         }
 
+        let binary_changed = self.0.borrow().previous_binary_hash != binary_hash;
         // instrumentation
-        self.execute(&validized.build_instrumented_binary(&types)?);
+        self.execute(
+            &validized.build_instrumented_binary(&types)?,
+            binary_changed,
+        );
+        self.0.borrow_mut().previous_binary_hash = binary_hash;
         self.schedule_save(); // schedule save to local storage
 
         #[cfg(debug_assertions)]
@@ -603,7 +610,7 @@ impl Editor {
         self.0.borrow_mut().pending_save = Some(closure);
     }
 
-    fn execute(&self, binary: &[u8]) {
+    fn execute(&self, binary: &[u8], binary_changed: bool) {
         let inner = Rc::clone(&self.0);
         inner.borrow_mut().pending_binary = Some(binary.to_vec());
         if inner.borrow().worker_running {
@@ -633,17 +640,19 @@ impl Editor {
                         .into(),
                     );
 
-                    let last_step = state.completed_steps.len();
-                    // Move slider to the end if binary changed
-                    let binary_hash = Self::hash_binary(&binary);
-                    if inner.borrow().previous_binary_hash != binary_hash {
-                        editor_handle
-                            .slider_mut()
-                            .inner_mut()
-                            .set_value_as_number(last_step as f64);
+                    let step_count = state.completed_steps.len();
+                    if step_count > 1 {
+                        editor_handle.update_slider(step_count, step_count - 1);
+                        // Move slider to the end if binary changed
+                        if binary_changed {
+                            editor_handle
+                                .slider_mut()
+                                .inner_mut()
+                                .set_value_as_number(step_count as f64 - 1.0);
+                        }
+                    } else {
+                        editor_handle.update_slider(step_count, 0);
                     }
-                    inner.borrow_mut().previous_binary_hash = binary_hash;
-                    editor_handle.update_slider(last_step);
 
                     match &state.termination {
                         Running => log_1(
@@ -691,10 +700,12 @@ impl Editor {
         hasher.finish()
     }
 
-    fn update_slider(&self, last_step: usize) {
-        if last_step > 1 {
+    fn update_slider(&self, step_count: usize, current_step: usize) {
+        if step_count > 1 {
             self.slider_mut().inner_mut().show();
-            self.slider_mut().inner_mut().build_ticks(last_step - 1);
+            self.slider_mut()
+                .inner_mut()
+                .build_ticks(step_count - 1, current_step);
         } else {
             self.slider_mut().inner_mut().hide();
         }
