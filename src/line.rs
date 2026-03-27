@@ -230,6 +230,36 @@ impl CodeLine {
             && self.comment().get().chars().all(|c| c.is_whitespace())
     }
 
+    pub fn position_to_absolute_utf16_offset(&self, pos: Position) -> Result<usize> {
+        if pos.in_instr {
+            if pos.offset > self.instr().len_utf16() {
+                bail!("invalid instr offset");
+            }
+            Ok(pos.offset)
+        } else {
+            if pos.offset > self.comment().len_utf16() {
+                bail!("invalid comment offset");
+            }
+            Ok(self.instr().len_utf16() + pos.offset)
+        }
+    }
+
+    pub fn absolute_utf16_offset_to_position(&self, offset: usize) -> Result<Position> {
+        if offset <= self.instr().len_utf16() {
+            Ok(Position {
+                in_instr: true,
+                offset,
+            })
+        } else if offset <= self.instr().len_utf16() + self.comment().len_utf16() {
+            Ok(Position {
+                in_instr: false,
+                offset: offset - self.instr().len_utf16(),
+            })
+        } else {
+            bail!("invalid absolute offset");
+        }
+    }
+
     pub fn get_position(&self, node: NodeRef, offset: usize) -> Result<Position> {
         let instr_end = Position::instr(self.instr().len_utf16());
 

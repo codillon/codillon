@@ -262,8 +262,20 @@ impl Editor {
             // Step 1: Add surviving portion of end line to the start line.
             let end_pos_in_line = self.line(start_line).end_position();
             let s = self.line(end_line).suffix(end_pos)?;
+
+            // Save absolute offset for use later, because changing the line can
+            // move text between instr and comment and will invalidate existing Position.
+            let start_pos_absolute = self
+                .line(start_line)
+                .position_to_absolute_utf16_offset(start_pos)?;
+
             self.line_mut(start_line)
                 .replace_range(start_pos, end_pos_in_line, &s)?;
+
+            // Recompute start_pos based on new line contents
+            let start_pos = self
+                .line(start_line)
+                .absolute_utf16_offset_to_position(start_pos_absolute)?;
 
             // Step 2: Remove all lines after the start.
             self.text_mut().remove_range(start_line + 1, end_line + 1);
