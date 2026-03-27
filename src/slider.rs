@@ -83,7 +83,12 @@ impl Slider {
         self.input.set_attribute("max", &last_step.to_string());
         self.ticks.remove_range(0, self.ticks.len());
         self.tick_labels.remove_range(0, self.tick_labels.len());
-        let mut add_tick = |step: usize, pos: f64| {
+        let current_step = self.value_as_number() as usize;
+        let interval = Self::tick_interval(last_step);
+        let remainder = last_step % interval;
+        let mut step = 0;
+        let mut add_tick = |step: usize| {
+            let pos = step as f64 / last_step as f64 * 100.0;
             let mut span = self.factory.span();
             span.set_attribute("class", "slider-tick");
             span.set_attribute("style", &format!("left:calc({pos:.4}%)"));
@@ -95,21 +100,27 @@ impl Slider {
             option.set_attribute("value", &step.to_string());
             self.ticks.push(option);
         };
-        // Always include step 0 and last_step
-        add_tick(0, 0.0);
-        add_tick(last_step, 100.0);
-        let interval = Self::tick_interval(last_step);
-        let mut step = interval;
-        while step < last_step - interval {
-            add_tick(step, step as f64 / last_step as f64 * 100.0);
+        while step < last_step {
+            // Don't include the last interval tick if it is less than half an interval away from last step
+            // to avoid crowding the last interval tick with last step tick
+            if step + interval > last_step && remainder != 0 && remainder <= interval / 2 {
+                break;
+            }
+            // If current_step falls within half an interval of a regular tick, show current_step instead of regular tick value.
+            if step.saturating_sub(interval / 2) <= current_step
+                && current_step < step + interval.div_ceil(2)
+            {
+                add_tick(current_step);
+            } else {
+                add_tick(step);
+            }
             step += interval;
         }
-        // Only include the last interval tick if it is half an interval away from last step
-        // to avoid crowding the last interval tick with last step tick
-        let remainder = last_step % interval;
-        if remainder == 0 || remainder >= interval / 2 {
-            add_tick(step, step as f64 / last_step as f64 * 100.0);
-        }
+        add_tick(if current_step >= step - interval / 2 {
+            current_step
+        } else {
+            last_step
+        });
     }
 }
 
@@ -118,6 +129,7 @@ impl Component for Slider {
         self.container.audit();
         self.input.audit();
         self.ticks.audit();
+        self.tick_labels.audit();
     }
 }
 

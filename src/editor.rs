@@ -114,6 +114,8 @@ impl Editor {
             ret.slider_mut().set_oninput(move |_| {
                 let editor = Editor(editor_ref.clone());
                 let _step = editor.slider().inner().value_as_number().round() as usize;
+                let last_step = with_debug_state(|state| state.completed_steps.len());
+                editor.update_slider(last_step);
                 //                editor.build_program_state(step);
             });
 
@@ -630,20 +632,7 @@ impl Editor {
                     );
 
                     // Update slider
-                    let step_count = state.completed_steps.len();
-                    if step_count > 1 {
-                        editor_handle.slider_mut().inner_mut().show();
-                        editor_handle
-                            .slider_mut()
-                            .inner_mut()
-                            .build_ticks(step_count - 1);
-                        editor_handle
-                            .slider_mut()
-                            .inner_mut()
-                            .set_value_as_number(step_count as f64 - 1.0);
-                    } else {
-                        editor_handle.slider_mut().inner_mut().hide();
-                    }
+                    editor_handle.update_slider(state.completed_steps.len());
 
                     match &state.termination {
                         Running => log_1(
@@ -682,6 +671,15 @@ impl Editor {
             }
             inner.borrow_mut().worker_running = false;
         });
+    }
+
+    fn update_slider(&self, last_step: usize) {
+        if last_step > 1 {
+            self.slider_mut().inner_mut().show();
+            self.slider_mut().inner_mut().build_ticks(last_step - 1);
+        } else {
+            self.slider_mut().inner_mut().hide();
+        }
     }
 
     fn apply_selection(
