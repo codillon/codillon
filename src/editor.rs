@@ -54,6 +54,7 @@ struct _Editor {
     action_history: ActionHistory,
     storage: Option<StorageHandle>,
     pending_binary: Option<Vec<u8>>,
+    previous_binary_hash: u64,
     worker_running: bool,
     pending_save: Option<Closure<dyn Fn()>>,
 }
@@ -80,6 +81,7 @@ impl Editor {
             action_history: ActionHistory::default(),
             storage: StorageHandle::new(),
             pending_binary: None,
+            previous_binary_hash: 0,
             worker_running: false,
             pending_save: None,
         };
@@ -631,8 +633,17 @@ impl Editor {
                         .into(),
                     );
 
-                    // Update slider
-                    editor_handle.update_slider(state.completed_steps.len());
+                    let last_step = state.completed_steps.len();
+                    // Move slider to the end if binary changed
+                    let binary_hash = Self::hash_binary(&binary);
+                    if inner.borrow().previous_binary_hash != binary_hash {
+                        editor_handle
+                            .slider_mut()
+                            .inner_mut()
+                            .set_value_as_number(last_step as f64);
+                    }
+                    inner.borrow_mut().previous_binary_hash = binary_hash;
+                    editor_handle.update_slider(last_step);
 
                     match &state.termination {
                         Running => log_1(
@@ -671,6 +682,13 @@ impl Editor {
             }
             inner.borrow_mut().worker_running = false;
         });
+    }
+
+    fn hash_binary(binary: &[u8]) -> u64 {
+        use std::hash::{Hash, Hasher, DefaultHasher};
+        let mut hasher = DefaultHasher::new();
+        binary.hash(&mut hasher);
+        hasher.finish()
     }
 
     fn update_slider(&self, last_step: usize) {
