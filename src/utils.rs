@@ -5,14 +5,19 @@ use crate::syntax::{
 use EncoderInstruction::*;
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
+use itertools::Itertools;
+use std::{
+    cmp::{max, min},
+    collections::HashMap,
+};
 use wasm_encoder::{
     CodeSection, Instruction as EncoderInstruction, ValType as EncoderValType,
     reencode::{Reencode, RoundtripReencoder},
 };
 use wasm_tools::parse_binary_wasm;
 use wasmparser::{
-    FuncValidator, Global, GlobalType, HeapType, Operator, ValType, ValidPayload, Validator,
-    WasmFeatures, WasmModuleResources,
+    Frame, FrameKind, FuncValidator, Global, GlobalType, HeapType, Operator, ValType, ValidPayload,
+    Validator, WasmFeatures, WasmModuleResources,
 };
 use wast::{
     core::Module,
@@ -97,11 +102,19 @@ const HELPER_IMPORTS: &[(&str, &[HelperFunc])] = &[(
     ],
 )];
 
+#[derive(Debug, PartialEq)]
+pub enum OpInfo {
+    Normal,
+    FuncEnd,
+    SyntheticElse,
+}
+
 #[derive(Debug)]
 pub struct GeneralOperator<'a> {
     prepended: Vec<Operator<'a>>,
     op: Operator<'a>,
     untyped: bool,
+    info: OpInfo,
 }
 
 #[derive(Debug)]
@@ -149,6 +162,7 @@ impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
                 prepended: vec![],
                 op: val.inner,
                 untyped: false,
+                info: OpInfo::Normal,
             },
             line_idx: val.line_idx,
         }
@@ -399,8 +413,56 @@ impl<'a> RawModule<'a> {
                     match func_validator.try_op(DUMMY_OFFSET, &op.inner) {
                         Ok(()) => valid_function.operators.push(op.into()),
                         Err(e) => {
-                            editor.set_invalid(op.line_idx, Some(e.message().to_string()));
-                            /* make a valid version of this operator */
+                            let mut prepend_to_err = String::new();
+
+                            /* expand if-[...]-end to if-[...]-else-end */
+                            if op.inner == Operator::End
+                                && let Some(Frame {
+                                    kind: FrameKind::If,
+                                    ..
+                                }) = func_validator.get_control_frame(0)
+                            {
+                                /* does a plain "else" work here? */
+                                let plain_else = Aligned {
+                                    line_idx: op.line_idx,
+                                    inner: GeneralOperator {
+                                        prepended: vec![],
+                                        op: Operator::Else,
+                                        info: OpInfo::SyntheticElse,
+                                        untyped: false,
+                                    },
+                                };
+                                if func_validator
+                                    .try_op(DUMMY_OFFSET, &plain_else.inner.op)
+                                    .is_ok()
+                                {
+                                    valid_function.operators.push(plain_else);
+                                    prepend_to_err.push_str("implicit ‘else’ branch: ");
+                                // `else` was valid, but implicit else branch has invalid `end`
+                                } else {
+                                    /* otherwise, insert a valid version of the synthetic else operator */
+                                    let mut validized_else = Self::make_valid(
+                                        func_validator.clone(),
+                                        Aligned {
+                                            line_idx: op.line_idx,
+                                            inner: Operator::Else,
+                                        },
+                                    )?;
+                                    validized_else.inner.info = OpInfo::SyntheticElse;
+                                    for prepended_op in &validized_else.inner.prepended {
+                                        func_validator
+                                            .op(DUMMY_OFFSET, prepended_op)
+                                            .expect("prepended op to else is valid");
+                                    }
+                                    func_validator
+                                        .op(DUMMY_OFFSET, &validized_else.inner.op)
+                                        .expect("validized else now valid");
+                                    valid_function.operators.push(validized_else);
+                                }
+                            }
+
+                            /* make a valid version of the actual operator */
+                            let line_idx = op.line_idx;
                             let validized = Self::make_valid(func_validator.clone(), op)?;
                             for prepended_op in &validized.inner.prepended {
                                 func_validator
@@ -410,10 +472,19 @@ impl<'a> RawModule<'a> {
                             func_validator
                                 .op(DUMMY_OFFSET, &validized.inner.op)
                                 .expect("validized op now valid");
+
+                            editor.set_invalid(line_idx, Some(prepend_to_err + e.message()));
+
                             valid_function.operators.push(validized);
                         }
                     };
                 }
+
+                let last_op = &mut valid_function.operators.last_mut().unwrap().inner;
+
+                debug_assert_eq!(last_op.op, Operator::End);
+                debug_assert_eq!(last_op.info, OpInfo::Normal);
+                last_op.info = OpInfo::FuncEnd;
 
                 ret.functions.push(valid_function);
                 allocs = func_validator.into_allocations();
@@ -473,11 +544,14 @@ impl<'a> RawModule<'a> {
         // by replacing it with a nop unless it's the beginning of a block instruction,
         // in which case preserve the block structure.
         fn bailout(op: &Aligned<GeneralOperator<'_>>) -> Aligned<GeneralOperator<'static>> {
+            debug_assert!(op.inner.op != Operator::End);
+            debug_assert!(op.inner.op != Operator::Else);
             Aligned {
                 line_idx: op.line_idx,
                 inner: GeneralOperator {
                     prepended: vec![],
                     untyped: true,
+                    info: OpInfo::Normal,
                     op: match op.inner.op {
                         Operator::Block { .. } => Operator::Block {
                             blockty: wasmparser::BlockType::Empty,
@@ -508,6 +582,12 @@ impl<'a> RawModule<'a> {
         // "type mismatch" error message from the validator.
         loop {
             let mut validator_copy = func_validator.clone();
+
+            if general_op.inner.prepended.len() > 100 {
+                // bomb out instead of infinite loop
+                dbg!(general_op);
+                panic!();
+            }
 
             for prepended_op in &general_op.inner.prepended {
                 validator_copy
@@ -674,7 +754,7 @@ impl SimulatedStack {
             })
             .collect::<Vec<_>>();
 
-        for _ in 0..std::cmp::min(pop_count, accessible_operands) {
+        for _ in 0..min(pop_count, accessible_operands) {
             self.slot_idx_stack.pop();
         }
 
@@ -1099,6 +1179,13 @@ impl<'a> ValidModule<'a> {
                 _ => {}
             }
 
+            // the structural prepended operators (needed in the case of, e.g., inserting, `else`)
+            for pre_op in &codillon_operator.inner.prepended {
+                if matches!(pre_op, Operator::Else | Operator::Unreachable) {
+                    new_function.instruction(&RoundtripReencoder.instruction(pre_op.clone())?);
+                }
+            }
+
             // the operator itself
             new_function.instruction(&op);
 
@@ -1165,11 +1252,11 @@ impl<'a> ValidModule<'a> {
 
 // Slot represents anywhere that a value can go, e.g. a global, local, or stack operand.
 #[derive(Debug, PartialEq, Eq)]
-pub struct Slot(ValType);
+pub struct Slot(pub ValType);
 
 // A SlotUse represents any input from, or output to, a slot (identified by its global index).
 #[derive(Debug, PartialEq, Eq)]
-pub struct SlotUse(usize);
+pub struct SlotUse(pub usize);
 
 // An Expression represents a collection of Slots that are initiatialized on entry and restored on exit.
 // E.g. local Slots live in an Expression for the function's entire body, and stack operands
@@ -1215,25 +1302,60 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     }
 }
 
-pub fn indent_and_frame(
-    code: &mut impl FrameInfosMut,
-    _module: &ValidModule,
-    _types: &TypedModule,
-) {
+pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, types: &TypedModule) {
     assert!(code.len() > 0);
 
     struct OpenFrame {
         end: usize,
         synthetic: bool,
+        indent: usize,
+        slots: Vec<SlotUse>,
     }
 
     let mut frames: Vec<FrameInfo> = Vec::new();
     let mut frame_stack: Vec<OpenFrame> = Vec::new();
-    let mut indent: i32 = 0;
+
+    let mut func_ops_rev = module
+        .functions
+        .iter()
+        .rev()
+        .flat_map(|func| func.operators.iter().rev())
+        .zip_eq(
+            types
+                .funcs
+                .iter()
+                .rev()
+                .flat_map(|func| func.ops.iter().rev()),
+        )
+        .peekable();
+
+    let mut slot_map: HashMap<usize, usize> = HashMap::new(); // unfilled slot -> indent
+    let mut paren_indent: i32 = 0;
+
+    fn process_outputs(map: &mut HashMap<usize, usize>, outs: &Vec<SlotUse>) {
+        /* resolve dependencies */
+        for SlotUse(idx) in outs {
+            map.remove(idx);
+        }
+    }
+
+    fn process_inputs(
+        map: &mut HashMap<usize, usize>,
+        ins: &[Option<SlotUse>],
+        indent: usize,
+        frame_stack: &mut [OpenFrame],
+    ) {
+        /* insert dependencies */
+        for SlotUse(idx) in ins.iter().flatten() {
+            debug_assert!(!map.contains_key(idx));
+            map.insert(*idx, indent);
+            if let Some(f) = frame_stack.last_mut() {
+                f.slots.push(SlotUse(*idx));
+            }
+        }
+    }
 
     for line_no in (0..code.len()).rev() {
-        let mut indent_above = indent;
-
         let (active, line_kind, ends_before, paren_depths) = {
             let l = code.info(line_no);
             (
@@ -1244,64 +1366,191 @@ pub fn indent_and_frame(
             )
         };
 
+        /* compute indent */
+        let frame_indent = match frame_stack.last() {
+            Some(OpenFrame { indent, .. }) => *indent,
+            None => 0,
+        };
+
+        let mut instr_indent: usize = max(
+            frame_indent,
+            slot_map.values().max().copied().unwrap_or(frame_indent),
+        ) + 1;
+        let mut paren_indent_above = paren_indent;
+
+        paren_indent -= paren_depths.1;
+        paren_indent_above -= paren_depths.0;
+        paren_indent_above -= paren_depths.1;
+
+        let default_indent: usize = max(
+            match frame_stack.last() {
+                Some(OpenFrame { indent, .. }) => *indent + 1,
+                None => 0,
+            },
+            if paren_indent == 0 {
+                0
+            } else {
+                max(instr_indent, paren_indent.try_into().unwrap())
+            },
+        );
+
         if !active {
-            code.set_indent(line_no, indent.try_into().expect("indent -> i32"));
+            code.set_indent(line_no, default_indent);
             continue;
         }
 
-        for _ in 0..ends_before {
-            frame_stack.push(OpenFrame {
-                end: line_no,
-                synthetic: true,
-            });
-            indent_above += 1;
-        }
-        if let LineKind::Instr(kind) = line_kind {
-            match kind {
-                InstrKind::End => {
+        match line_kind {
+            LineKind::Instr(kind) => {
+                let typed_op = func_ops_rev.next().expect("next operator");
+                debug_assert_eq!(typed_op.0.line_idx, line_no);
+                debug_assert!(typed_op.0.inner.info == OpInfo::Normal);
+
+                match kind {
+                    InstrKind::End => {
+                        debug_assert_eq!(typed_op.0.inner.op, Operator::End);
+                        frame_stack.push(OpenFrame {
+                            end: line_no,
+                            synthetic: false,
+                            indent: instr_indent,
+                            slots: vec![],
+                        });
+
+                        /* process synthetic else if present */
+                        if let Some((Aligned { line_idx, inner }, OperatorType { inputs, outputs })) =
+                            func_ops_rev.peek()
+                            && *line_idx == line_no
+                        {
+                            debug_assert!(inner.op == Operator::Else);
+                            debug_assert!(inner.info == OpInfo::SyntheticElse);
+                            process_outputs(&mut slot_map, outputs);
+                            process_inputs(&mut slot_map, inputs, instr_indent, &mut frame_stack);
+                            func_ops_rev.next();
+                        }
+                    }
+                    InstrKind::OtherStructured | InstrKind::If => {
+                        debug_assert!(matches!(
+                            typed_op.0.inner.op,
+                            Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. }
+                        ));
+                        let f = frame_stack.pop().expect("malformed frame stack");
+                        frames.push(FrameInfo {
+                            indent: f.indent,
+                            start: line_no,
+                            end: f.end,
+                            unclosed: f.synthetic,
+                            kind,
+                        });
+                        instr_indent = f.indent;
+                        process_outputs(&mut slot_map, &f.slots); // clear open slots
+                    }
+                    InstrKind::Else => {
+                        debug_assert!(typed_op.0.inner.op == Operator::Else);
+                        let f = frame_stack.pop().expect("malformed frame stack");
+                        frames.push(FrameInfo {
+                            indent: f.indent,
+                            start: line_no,
+                            end: f.end,
+                            unclosed: f.synthetic,
+                            kind,
+                        });
+                        process_outputs(&mut slot_map, &f.slots); // clear open slots
+                        frame_stack.push(OpenFrame {
+                            end: line_no,
+                            synthetic: false,
+                            indent: f.indent,
+                            slots: vec![],
+                        });
+                        instr_indent = f.indent;
+                    }
+                    InstrKind::Other => {
+                        debug_assert!(!matches!(
+                            typed_op.0.inner.op,
+                            Operator::Block { .. }
+                                | Operator::Loop { .. }
+                                | Operator::If { .. }
+                                | Operator::Else
+                                | Operator::End
+                        ));
+                    }
+                }
+
+                process_outputs(&mut slot_map, &typed_op.1.outputs);
+                process_inputs(
+                    &mut slot_map,
+                    &typed_op.1.inputs,
+                    instr_indent,
+                    &mut frame_stack,
+                );
+                code.set_indent(line_no, instr_indent);
+            }
+            LineKind::Malformed(_) => {
+                debug_assert!(ends_before == 0);
+                code.set_indent(line_no, default_indent);
+            }
+            LineKind::Empty | LineKind::Other(_) => {
+                /* not an instruction */
+
+                /* process function end */
+                if let Some((
+                    Aligned {
+                        inner:
+                            GeneralOperator {
+                                info: OpInfo::FuncEnd,
+                                ..
+                            },
+                        line_idx,
+                    },
+                    OperatorType { inputs, .. },
+                )) = func_ops_rev.peek()
+                    && *line_idx == line_no
+                {
+                    debug_assert!(frame_stack.is_empty());
+                    slot_map.clear();
+                    process_inputs(&mut slot_map, inputs, 0, &mut frame_stack);
+                    func_ops_rev.next();
+                }
+
+                /* handle synthetic ends-of-frames */
+                for _ in 0..ends_before {
                     frame_stack.push(OpenFrame {
                         end: line_no,
-                        synthetic: false,
+                        synthetic: true,
+                        indent: (frame_stack.len() + 1),
+                        slots: vec![],
                     });
-                    indent_above += 1;
+
+                    let next_synthetic_end = func_ops_rev.next().expect("next synthetic end");
+                    debug_assert_eq!(next_synthetic_end.0.inner.op, Operator::End);
+                    debug_assert_eq!(next_synthetic_end.0.line_idx, line_no);
+                    process_outputs(&mut slot_map, &next_synthetic_end.1.outputs);
+                    process_inputs(
+                        &mut slot_map,
+                        &next_synthetic_end.1.inputs,
+                        0,
+                        &mut frame_stack,
+                    );
+
+                    /* discard prepended else if present */
+                    if let Some((Aligned { line_idx, inner }, OperatorType { inputs, outputs })) =
+                        func_ops_rev.peek()
+                        && *line_idx == line_no
+                        && inner.info == OpInfo::SyntheticElse
+                    {
+                        debug_assert!(inner.op == Operator::Else);
+                        process_outputs(&mut slot_map, outputs);
+                        process_inputs(&mut slot_map, inputs, 0, &mut frame_stack);
+                        func_ops_rev.next();
+                    }
                 }
-                InstrKind::OtherStructured | InstrKind::If => {
-                    indent -= 1;
-                    indent_above -= 1;
-                    let f = frame_stack.pop().expect("malformed frame stack");
-                    frames.push(FrameInfo {
-                        indent: indent.try_into().expect("indent -> usize"),
-                        start: line_no,
-                        end: f.end,
-                        unclosed: f.synthetic,
-                        kind,
-                    });
-                }
-                InstrKind::Else => {
-                    indent -= 1;
-                    let f = frame_stack.pop().expect("malformed frame stack");
-                    frames.push(FrameInfo {
-                        indent: indent.try_into().expect("indent -> usize"),
-                        start: line_no,
-                        end: f.end,
-                        unclosed: f.synthetic,
-                        kind,
-                    });
-                    frame_stack.push(OpenFrame {
-                        end: line_no,
-                        synthetic: false,
-                    });
-                }
-                InstrKind::Other => (),
+
+                code.set_indent(line_no, default_indent);
             }
         }
-        indent_above -= paren_depths.0;
-        indent -= paren_depths.1;
-        indent_above -= paren_depths.1;
 
-        code.set_indent(line_no, indent.try_into().expect("indent -> i32"));
-        indent = indent_above;
+        paren_indent = paren_indent_above;
     }
+
+    debug_assert!(func_ops_rev.next().is_none());
 
     code.set_frames(frames);
 }
@@ -1363,33 +1612,29 @@ pub(crate) mod tests {
         type CodillonInstruction<'a> = Aligned<Operator<'a>>;
         use ValType::*;
 
-        fn ins(inputs: Vec<SlotUse>) -> OperatorType {
+        fn ins(inputs: Vec<usize>) -> OperatorType {
             OperatorType {
-                inputs: inputs.into_iter().map(Some).collect(),
+                inputs: inputs.into_iter().map(|x| Some(SlotUse(x))).collect(),
                 outputs: Vec::new(),
             }
         }
 
-        fn outs(outputs: Vec<SlotUse>) -> OperatorType {
+        fn outs(outputs: Vec<usize>) -> OperatorType {
             OperatorType {
                 inputs: Vec::new(),
-                outputs,
+                outputs: outputs.into_iter().map(|x| SlotUse(x)).collect(),
             }
         }
 
-        fn inout(inputs: Vec<SlotUse>, outputs: Vec<SlotUse>) -> OperatorType {
+        fn inout(inputs: Vec<usize>, outputs: Vec<usize>) -> OperatorType {
             OperatorType {
-                inputs: inputs.into_iter().map(Some).collect(),
-                outputs,
+                inputs: inputs.into_iter().map(|x| Some(SlotUse(x))).collect(),
+                outputs: outputs.into_iter().map(|x| SlotUse(x)).collect(),
             }
         }
 
         fn os(ty: ValType) -> Slot {
             Slot(ty)
-        }
-
-        fn slot(idx: usize) -> SlotUse {
-            SlotUse(idx)
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
@@ -1425,12 +1670,12 @@ pub(crate) mod tests {
                 params: vec![],
                 locals: vec![],
                 ops: vec![
-                    outs(vec![slot(0)]),
-                    outs(vec![slot(1)]),
-                    inout(vec![slot(0), slot(1)], vec![slot(2), slot(3)]),
-                    inout(vec![slot(2), slot(3)], vec![slot(4)]),
-                    inout(vec![slot(4)], vec![slot(5)]),
-                    ins(vec![slot(5)]),
+                    outs(vec![0]),
+                    outs(vec![1]),
+                    inout(vec![0, 1], vec![2, 3]),
+                    inout(vec![2, 3], vec![4]),
+                    inout(vec![4], vec![5]),
+                    ins(vec![5]),
                     ins(vec![]),
                 ],
             }],
@@ -1495,13 +1740,13 @@ pub(crate) mod tests {
                 params: vec![],
                 locals: vec![],
                 ops: vec![
-                    outs(vec![slot(0)]),
-                    ins(vec![slot(0)]),
-                    outs(vec![slot(1)]),
-                    ins(vec![slot(1)]),
-                    outs(vec![slot(2)]),
-                    inout(vec![slot(2)], vec![slot(3)]),
-                    ins(vec![slot(3)]),
+                    outs(vec![0]),
+                    ins(vec![0]),
+                    outs(vec![1]),
+                    ins(vec![1]),
+                    outs(vec![2]),
+                    inout(vec![2], vec![3]),
+                    ins(vec![3]),
                     ins(vec![]),
                 ],
             }],
@@ -1569,14 +1814,14 @@ pub(crate) mod tests {
                 params: vec![],
                 locals: vec![],
                 ops: vec![
-                    outs(vec![slot(0)]),
-                    inout(vec![slot(0)], vec![slot(1)]),
-                    outs(vec![slot(2)]),
-                    inout(vec![slot(1), slot(2)], vec![slot(3)]),
-                    ins(vec![slot(3)]),
-                    outs(vec![slot(4)]),
-                    inout(vec![slot(4)], vec![slot(5)]),
-                    ins(vec![slot(5)]),
+                    outs(vec![0]),
+                    inout(vec![0], vec![1]),
+                    outs(vec![2]),
+                    inout(vec![1, 2], vec![3]),
+                    ins(vec![3]),
+                    outs(vec![4]),
+                    inout(vec![4], vec![5]),
+                    ins(vec![5]),
                     ins(vec![]),
                 ],
             }],
@@ -1648,15 +1893,15 @@ pub(crate) mod tests {
                 params: vec![],
                 locals: vec![],
                 ops: vec![
-                    outs(vec![slot(0)]),
-                    inout(vec![slot(0)], vec![slot(1)]),
-                    ins(vec![slot(1)]),
-                    outs(vec![slot(2)]),
-                    ins(vec![slot(2)]),
-                    outs(vec![slot(3)]),
-                    inout(vec![slot(3)], vec![slot(4)]),
-                    inout(vec![slot(4)], vec![slot(5)]),
-                    ins(vec![slot(5)]),
+                    outs(vec![0]),
+                    inout(vec![0], vec![1]),
+                    ins(vec![1]),
+                    outs(vec![2]),
+                    ins(vec![2]),
+                    outs(vec![3]),
+                    inout(vec![3], vec![4]),
+                    inout(vec![4], vec![5]),
+                    ins(vec![5]),
                     ins(vec![]),
                 ],
             }],
@@ -1879,6 +2124,11 @@ pub(crate) mod tests {
         }
     }
 
+    impl FrameInfosMut for FakeTextBuffer {
+        fn set_indent(&mut self, _index: usize, _num: usize) {}
+        fn set_frames(&mut self, _frames: Vec<FrameInfo>) {}
+    }
+
     fn test_editor_flow(editor: &mut FakeTextBuffer) -> Result<String> {
         use anyhow::Context;
 
@@ -1906,6 +2156,9 @@ pub(crate) mod tests {
         let types = validized
             .to_types_table(&wasm_bin)
             .context("to_types_table")?;
+
+        indent_and_frame(editor, &validized, &types);
+
         let runnable = validized
             .build_instrumented_binary(&types)
             .context("build_executable_binary")?;
@@ -2593,6 +2846,56 @@ pub(crate) mod tests {
             editor.push_line("call $f");
             editor.push_line(")");
             editor.push_line("(func $f (import \"x\" \"y\"))");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            // end that does double duty (implicit else + end)
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("if (result i32)");
+            editor.push_line("end");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            // end that does double duty (implicit else + end) II
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("if (result i32)");
+            editor.push_line("i32.const 4");
+            editor.push_line("end");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            // end that does double duty (implicit else + end) III
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("if (result i32 i64 f32)");
+            editor.push_line("f32.const 4.0");
+            editor.push_line("end");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("if (param f64) (result i64)");
+            editor.push_line("end");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("i32.const 6");
+            editor.push_line("if (param i64)");
+            editor.push_line(")");
             test_editor_flow(&mut editor)?;
         }
 
