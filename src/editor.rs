@@ -685,7 +685,7 @@ impl Editor {
     }
 
     fn hash_binary(binary: &[u8]) -> u64 {
-        use std::hash::{Hash, Hasher, DefaultHasher};
+        use std::hash::{DefaultHasher, Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         binary.hash(&mut hasher);
         hasher.finish()
