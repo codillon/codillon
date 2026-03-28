@@ -732,20 +732,20 @@ impl Editor {
         let editor_ref = Rc::clone(&self.0);
         let closure = Closure::new(move || {
             let editor = Editor(editor_ref.clone());
+            let content = editor.buffer_as_text().join("");
             let success = {
                 let mut inner = editor_ref.borrow_mut();
                 inner.pending_save = None;
-                let success = inner
+                inner
                     .storage
                     .as_ref()
-                    .map(|s| s.try_set_item(STORAGE_ID, &editor.buffer_as_text().join("")))
-                    .unwrap_or(false);
-                editor.save_status_mut().notify_save_result(success);
-                success
+                    .map(|s| s.try_set_item(STORAGE_ID, &content))
+                    .unwrap_or(false)
             };
+            editor.save_status_mut().notify_save_result(success);
             // Retry if unsuccessful
             if !success {
-                Editor(editor_ref.clone()).attempt_save(RETRY_STORE_MS);
+                editor.attempt_save(RETRY_STORE_MS);
             }
         });
         StorageHandle::set_timeout_with_callback(&closure, delay_ms);

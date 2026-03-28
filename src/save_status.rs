@@ -4,10 +4,9 @@ use crate::{
     jet::{AccessToken, Component, ElementFactory, WithElement, now_ms},
 };
 use std::time::Duration;
-use web_sys::{HtmlDivElement, HtmlSpanElement};
+use web_sys::HtmlDivElement;
 
-type IconSpan = DomStruct<(DomText, ()), HtmlSpanElement>;
-type StatusDiv = DomStruct<(IconSpan, ()), HtmlDivElement>;
+type StatusDiv = DomStruct<(DomText, ()), HtmlDivElement>;
 
 pub struct SaveStatus {
     contents: StatusDiv,
@@ -16,20 +15,13 @@ pub struct SaveStatus {
 
 impl SaveStatus {
     pub fn new(factory: &ElementFactory) -> Self {
-        let mut icon_span = DomStruct::new((DomText::new(""), ()), factory.span());
-        icon_span.set_attribute("class", "save-icon");
-
-        let mut contents = DomStruct::new((icon_span, ()), factory.div());
-        contents.set_attribute("class", "save-status save-status-dirty");
+        let mut contents = DomStruct::new((DomText::new(""), ()), factory.div());
+        contents.set_attribute("class", "save-status");
 
         Self {
             contents,
             fail_save_ms: None,
         }
-    }
-
-    fn icon_text(&mut self) -> &mut DomText {
-        &mut self.contents.get_mut().0.get_mut().0
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -48,12 +40,11 @@ impl SaveStatus {
     pub fn refresh(&mut self) {
         if let Some(time) = self.fail_save_ms {
             let seconds = ((now_ms() - time) / 1000.0) as u64;
-            self.icon_text().set_data(&format!(
+            self.contents.get_mut().0.set_data(&format!(
                 "\u{2717} Last saved {} ago",
                 humantime::format_duration(Duration::from_secs(seconds))
             ));
-            self.contents
-                .set_attribute("class", "save-status save-status-dirty");
+            self.contents.set_attribute("class", "save-status dirty");
         } else {
             self.contents.set_attribute("class", "save-status");
         }

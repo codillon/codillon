@@ -305,7 +305,7 @@ span.debug[data-debug]::after {
     visibility: hidden;
 }
 
-.save-status.save-status-dirty {
+.save-status.dirty {
     color: darkred;
     visibility: visible;
 }
