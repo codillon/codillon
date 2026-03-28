@@ -13,6 +13,7 @@ use crate::{
         compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position},
+    save_status::SaveStatus,
     slider::Slider,
     syntax::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
@@ -30,7 +31,7 @@ use std::{
     rc::Rc,
 };
 use wasm_bindgen::closure::Closure;
-use web_sys::{HtmlDivElement, console::log_1};
+use web_sys::{BeforeUnloadEvent, HtmlDivElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<
@@ -38,7 +39,7 @@ type ComponentType = DomStruct<
         DomImage,
         (
             ReactiveComponent<TextType>,
-            (ReactiveComponent<Slider>, (DomCanvas, ())),
+            (ReactiveComponent<Slider>, (DomCanvas, (SaveStatus, ()))),
         ),
     ),
     HtmlDivElement,
@@ -47,6 +48,7 @@ type ComponentType = DomStruct<
 pub const LINE_SPACING: usize = 40;
 const STORAGE_ID: &str = "codillon_content";
 const SCHEDULE_STORE_MS: i32 = 500;
+const RETRY_STORE_MS: i32 = 2000;
 
 struct _Editor {
     component: ComponentType,
@@ -71,7 +73,10 @@ impl Editor {
                         ReactiveComponent::new(DomVec::new(factory.div())),
                         (
                             (ReactiveComponent::new(Slider::new(factory.clone()))),
-                            (DomCanvas::new(factory.canvas()), ()),
+                            (
+                                DomCanvas::new(factory.canvas()),
+                                (SaveStatus::new(&factory), ()),
+                            ),
                         ),
                     ),
                 ),
@@ -122,11 +127,10 @@ impl Editor {
                 //                editor.build_program_state(step);
             });
 
-            let editor_ref = Rc::clone(&ret.0);
-            let beforeunload = Closure::new(move || {
-                let editor = Editor(editor_ref.clone());
-                if let Some(storage) = &editor_ref.borrow().storage {
-                    storage.set_item(STORAGE_ID, &editor.buffer_as_text().join(""));
+            let editor = Editor(Rc::clone(&ret.0));
+            let beforeunload = Closure::new(move |ev: BeforeUnloadEvent| {
+                if editor.save_status().is_dirty() {
+                    ev.prevent_default();
                 }
             });
             StorageHandle::set_onbeforeunload(&beforeunload);
@@ -543,6 +547,10 @@ impl Editor {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
     }
 
+    fn save_status(&self) -> Ref<'_, SaveStatus> {
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.1.1.0)
+    }
+
     // get the user-entered text buffer (doesn't include synthetic Wasm)
     fn buffer_as_text(&self) -> impl Iterator<Item = Ref<'_, str>> {
         UserTextIterator {
@@ -597,16 +605,38 @@ impl Editor {
         if self.0.borrow().pending_save.is_some() {
             return;
         }
+        self.attempt_save(SCHEDULE_STORE_MS);
+    }
+
+    fn attempt_save(&self, delay_ms: i32) {
         let editor_ref = Rc::clone(&self.0);
         let closure = Closure::new(move || {
             let editor_content = Editor(editor_ref.clone()).buffer_as_text().join("");
-            let mut inner = editor_ref.borrow_mut();
-            if let Some(storage) = &inner.storage {
-                storage.set_item(STORAGE_ID, &editor_content);
+            let success = {
+                let mut inner = editor_ref.borrow_mut();
                 inner.pending_save = None;
+                let success = inner
+                    .storage
+                    .as_ref()
+                    .map(|s| s.try_set_item(STORAGE_ID, &editor_content))
+                    .unwrap_or(false);
+                inner
+                    .component
+                    .get_mut()
+                    .1
+                    .1
+                    .1
+                    .1
+                    .0
+                    .notify_save_result(success);
+                success
+            };
+            // Retry if unsuccessful
+            if !success {
+                Editor(editor_ref.clone()).attempt_save(RETRY_STORE_MS);
             }
         });
-        StorageHandle::set_timeout_with_callback(&closure, SCHEDULE_STORE_MS);
+        StorageHandle::set_timeout_with_callback(&closure, delay_ms);
         self.0.borrow_mut().pending_save = Some(closure);
     }
 
