@@ -13,8 +13,8 @@ use std::{
 };
 use wasm_bindgen::closure::Closure;
 use web_sys::{
-    Element, HtmlBodyElement, HtmlElement, HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent,
-    wasm_bindgen::JsCast,
+    BeforeUnloadEvent, Element, HtmlBodyElement, HtmlElement, HtmlInputElement, InputEvent,
+    KeyboardEvent, MouseEvent, wasm_bindgen::JsCast,
 };
 
 // Traits that give "raw" access to an underlying node or element,
@@ -797,6 +797,11 @@ impl StorageHandle {
             .map(StorageHandle)
     }
 
+    // Placeholder for real save attempt
+    pub fn try_set_item(&self, key: &str, value: &str) -> bool {
+        self.0.set_item(key, value).is_ok()
+    }
+
     pub fn set_timeout_with_callback(callback: &Closure<dyn Fn()>, delay_ms: i32) -> i32 {
         web_sys::window()
             .expect("window")
@@ -807,7 +812,7 @@ impl StorageHandle {
             .expect("set_timeout")
     }
 
-    pub fn set_onbeforeunload(callback: &Closure<dyn Fn()>) {
+    pub fn set_onbeforeunload(callback: &Closure<dyn Fn(BeforeUnloadEvent)>) {
         web_sys::window()
             .expect("window")
             .set_onbeforeunload(Some(callback.as_ref().unchecked_ref()));

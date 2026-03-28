@@ -297,3 +297,15 @@ span.debug[data-debug]::after {
 .autocomplete-item:first-child {
     border-left: none;
 }
+
+.save-status{
+    position: absolute;
+    right: 20px;
+    top: 0;
+    visibility: hidden;
+}
+
+.save-status.save-status-dirty {
+    color: darkred;
+    visibility: visible;
+}
