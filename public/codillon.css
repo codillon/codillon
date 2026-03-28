@@ -264,3 +264,15 @@ span.debug[data-debug]::after {
 .slider-hidden {
     visibility: hidden;
 }
+
+.save-status{
+    position: absolute;
+    right: 20px;
+    top: 0;
+    visibility: hidden;
+}
+
+.save-status.save-status-dirty {
+    color: darkred;
+    visibility: visible;
+}
