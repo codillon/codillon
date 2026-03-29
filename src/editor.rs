@@ -19,7 +19,7 @@ use crate::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         fix_syntax,
     },
-    utils::{FmtError, RawModule, indent_and_frame, str_to_binary},
+    utils::{FmtError, OperatorType, RawModule, indent_and_frame, str_to_binary},
 };
 use anyhow::{Context, Result, bail};
 use itertools::Itertools;
@@ -649,9 +649,47 @@ impl Editor {
         // indent operators and find frames
         indent_and_frame(self, &validized, &types);
 
-        // XXX: render types of operators
-        for i in 0..self.len() {
-            self.line_mut(i).set_type_annotation(None);
+        let mut last_line_no = 0;
+        for i in 0..validized.functions.len() {
+            for (op, OperatorType { inputs, outputs }) in
+                std::iter::zip(&validized.functions[i].operators, &types.funcs[i].ops)
+            {
+                let mut type_str = String::new();
+
+                for t in inputs {
+                    match t {
+                        Some(ty) => type_str
+                            .push_str(&(types.slots[ty.0].0.to_string() + ":" + &ty.0.to_string())),
+                        None => type_str.push('?'),
+                    }
+                    type_str.push(' ');
+                }
+                if inputs.is_empty() {
+                    type_str.push_str("𝜖 ");
+                }
+
+                type_str.push('→');
+                for t in outputs {
+                    type_str.push(' ');
+                    type_str.push_str(&(types.slots[t.0].0.to_string() + ":" + &t.0.to_string()));
+                }
+                if outputs.is_empty() {
+                    type_str.push_str(" 𝜖");
+                }
+
+                while last_line_no < op.line_idx {
+                    self.line_mut(last_line_no).set_debug_annotation(None);
+                    last_line_no += 1;
+                }
+                last_line_no += 1;
+
+                self.line_mut(op.line_idx)
+                    .set_debug_annotation(Some(&type_str));
+            }
+        }
+
+        for i in last_line_no..self.len() {
+            self.line_mut(i).set_debug_annotation(None);
         }
 
         let binary_changed = self.0.borrow().previous_binary_hash != binary_hash;
@@ -760,9 +798,11 @@ impl Editor {
                         ),
                     }
 
-                    for (i, step) in state.completed_steps.iter().enumerate() {
-                        log_1(&format!("step #{i}: {:?}", step).into());
-                    }
+                    /*
+                            for (i, step) in state.completed_steps.iter().enumerate() {
+                                log_1(&format!("step #{i}: {:?}", step).into());
+                        }
+                    */
                 });
             }
             inner.borrow_mut().worker_running = false;
