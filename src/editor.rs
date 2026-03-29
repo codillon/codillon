@@ -721,10 +721,12 @@ impl Editor {
         Ok(())
     }
 
-    fn schedule_save(&self) {
+    fn schedule_save(&mut self) {
         if self.0.borrow().pending_save.is_some() {
+            // A save or retry already in flight
             return;
         }
+        self.save_status_mut().mark_dirty();
         self.attempt_save(SCHEDULE_STORE_MS);
     }
 
