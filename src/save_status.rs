@@ -11,7 +11,8 @@ type StatusDiv = DomStruct<(DomText, ()), HtmlDivElement>;
 pub struct SaveStatus {
     contents: StatusDiv,
     fail_save_ms: Option<f64>,
-    dirty: bool,
+    version: u64,
+    saved_version: u64,
 }
 
 impl SaveStatus {
@@ -22,24 +23,31 @@ impl SaveStatus {
         Self {
             contents,
             fail_save_ms: None,
-            dirty: false,
+            version: 0,
+            saved_version: 0,
         }
     }
 
     pub fn mark_dirty(&mut self) {
-        self.dirty = true;
+        self.version += 1;
+        self.refresh();
     }
 
     pub fn is_dirty(&self) -> bool {
+        assert!(self.saved_version <= self.version);
         // Content has changed since last confirmed save
-        self.dirty
+        self.version != self.saved_version
     }
 
-    pub fn notify_save_result(&mut self, success: bool) {
+    pub fn get_version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn notify_save_result(&mut self, success: bool, version: u64) {
         if success {
-            self.dirty = false;
+            self.saved_version = self.saved_version.max(version);
             self.fail_save_ms = None;
-        } else if self.fail_save_ms.is_none() {
+        } else if self.is_dirty() && self.fail_save_ms.is_none() {
             self.fail_save_ms = Some(now_ms());
         }
         self.refresh();

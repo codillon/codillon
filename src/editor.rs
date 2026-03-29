@@ -722,31 +722,41 @@ impl Editor {
     }
 
     fn schedule_save(&mut self) {
+        self.save_status_mut().mark_dirty();
         if self.0.borrow().pending_save.is_some() {
             // A save or retry already in flight
             return;
         }
-        self.save_status_mut().mark_dirty();
         self.attempt_save(SCHEDULE_STORE_MS);
     }
 
     fn attempt_save(&self, delay_ms: i32) {
         let editor_ref = Rc::clone(&self.0);
         let closure = Closure::new(move || {
-            let editor = Editor(editor_ref.clone());
+            let mut editor = Editor(editor_ref.clone());
+            let saved_version = editor.save_status().get_version();
             let content = editor.buffer_as_text().join("");
             let success = {
                 let mut inner = editor_ref.borrow_mut();
                 inner.pending_save = None;
+                // Currently synchronous and atomic but could be asynchronous in the future
                 inner
                     .storage
                     .as_ref()
                     .map(|s| s.try_set_item(STORAGE_ID, &content))
                     .unwrap_or(false)
             };
-            editor.save_status_mut().notify_save_result(success);
-            // Retry if unsuccessful
-            if !success {
+            editor
+                .save_status_mut()
+                .notify_save_result(success, saved_version);
+
+            if success {
+                // Schedule save again if version number was updated during save
+                if editor.save_status().is_dirty() {
+                    editor.schedule_save();
+                }
+            } else {
+                // Retry if unsuccessful
                 editor.attempt_save(RETRY_STORE_MS);
             }
         });
