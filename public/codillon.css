@@ -264,3 +264,36 @@ span.debug[data-debug]::after {
 .slider-hidden {
     visibility: hidden;
 }
+
+.autocomplete-hint-bar {
+    background-color: #fffff0;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    height: 40px;
+    border-top: 2px solid burlywood;
+    border-right: 2px solid burlywood;
+    display: flex;
+    overflow-x: scroll;
+    max-width: 100%;
+}
+
+.autocomplete-item {
+    padding: 0 15px;
+    border-left: 1px solid burlywood;
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 12pt;
+    color: darkred;
+    cursor: pointer;
+    height: 100%;
+    align-items: center;
+    display: flex;
+}
+
+.autocomplete-item:hover {
+    background: linen;
+}
+
+.autocomplete-item:first-child {
+    border-left: none;
+}

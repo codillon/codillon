@@ -13,7 +13,8 @@ use std::{
 };
 use wasm_bindgen::closure::Closure;
 use web_sys::{
-    Element, HtmlBodyElement, HtmlElement, HtmlInputElement, KeyboardEvent, wasm_bindgen::JsCast,
+    Element, HtmlBodyElement, HtmlElement, HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent,
+    wasm_bindgen::JsCast,
 };
 
 // Traits that give "raw" access to an underlying node or element,
@@ -125,9 +126,10 @@ impl TextHandle {
 // Event handlers on an element
 #[derive(Default)]
 pub struct Handlers {
-    beforeinput: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
-    input: Option<Closure<dyn Fn(web_sys::InputEvent)>>,
-    keydown: Option<Closure<dyn Fn(web_sys::KeyboardEvent)>>,
+    beforeinput: Option<Closure<dyn Fn(InputEvent)>>,
+    input: Option<Closure<dyn Fn(InputEvent)>>,
+    keydown: Option<Closure<dyn Fn(KeyboardEvent)>>,
+    mousedown: Option<Closure<dyn Fn(MouseEvent)>>,
 }
 
 impl Handlers {
@@ -135,6 +137,7 @@ impl Handlers {
         audit_handler(&self.beforeinput, elem.as_ref().onbeforeinput());
         audit_handler(&self.input, elem.as_ref().oninput());
         audit_handler(&self.keydown, elem.as_ref().onkeydown());
+        audit_handler(&self.mousedown, elem.as_ref().onmousedown());
 
         fn audit_handler<EventType>(
             expected: &Option<Closure<dyn Fn(EventType)>>,
@@ -205,6 +208,25 @@ impl Handlers {
             TOKEN,
         );
     }
+
+    pub fn set_onmousedown<E: WithElement, F: Fn(MouseEvent) + 'static>(
+        &mut self,
+        elem: &mut E,
+        handler: F,
+    ) where
+        E::Element: AsRef<HtmlElement>,
+    {
+        self.mousedown = Some(Closure::new(handler));
+        elem.with_element(
+            |elem| {
+                let html: &HtmlElement = elem.as_ref();
+                html.set_onmousedown(Some(
+                    self.mousedown.as_ref().unwrap().as_ref().unchecked_ref(),
+                ))
+            },
+            TOKEN,
+        );
+    }
 }
 
 pub struct ReactiveComponent<T: ElementComponent> {
@@ -236,6 +258,7 @@ pub trait ControlHandlers {
     fn set_onbeforeinput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
     fn set_oninput<F: Fn(InputEventHandle) + 'static>(&mut self, handler: F);
     fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F);
+    fn set_onmousedown<F: Fn(MouseEvent) + 'static>(&mut self, handler: F);
 }
 
 impl<T: ElementComponent> ControlHandlers for ReactiveComponent<T>
@@ -251,6 +274,9 @@ where
     }
     fn set_onkeydown<F: Fn(KeyboardEvent) + 'static>(&mut self, handler: F) {
         self.handlers.set_onkeydown(&mut self.component, handler);
+    }
+    fn set_onmousedown<F: Fn(MouseEvent) + 'static>(&mut self, handler: F) {
+        self.handlers.set_onmousedown(&mut self.component, handler);
     }
 }
 
@@ -633,7 +659,7 @@ impl StaticRangeHandle {
 }
 
 // Wrapper for an InputEvent (giving access to its target as a StaticRangeHandle)
-pub struct InputEventHandle(web_sys::InputEvent);
+pub struct InputEventHandle(InputEvent);
 
 impl InputEventHandle {
     delegate! {
