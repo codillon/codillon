@@ -60,22 +60,12 @@ fn all_operator_names() -> &'static [String] {
         .as_slice()
 }
 
-pub fn suggest(prefix: &str) -> Vec<String> {
-    all_operator_names()
-        .iter()
-        .filter(|name| name.starts_with(prefix) && name.as_str() != prefix)
-        .cloned()
-        .collect()
-}
-
 type HintItem = ReactiveComponent<DomStruct<(DomText, ()), HtmlDivElement>>;
 
 pub struct Autocomplete {
     bar: DomVec<HintItem, HtmlDivElement>,
     factory: ElementFactory,
     handler: Rc<dyn Fn(&str)>,
-    suggestions: Vec<String>,
-    prefix: String,
 }
 
 impl Autocomplete {
@@ -87,40 +77,26 @@ impl Autocomplete {
             bar,
             factory: factory.clone(),
             handler: Rc::new(|_| {}),
-            suggestions: Vec::new(),
-            prefix: String::new(),
         }
     }
 
-    pub fn set_onselect<F: Fn(&str) + 'static>(&mut self, f: F) {
+    pub fn set_handler<F: Fn(&str) + 'static>(&mut self, f: F) {
         self.handler = Rc::new(f);
     }
 
-    pub fn get_suffix(&mut self, accepted: &str) -> String {
-        let suffix = accepted[self.prefix.len()..].to_owned();
-        self.hide();
-        suffix
+    pub fn first_suggestion(&self) -> Option<&str> {
+        Some(self.bar.get(0)?.inner().get().0.get())
     }
 
-    pub fn get_suggestions(&self) -> &[String] {
-        &self.suggestions
-    }
-
-    pub fn show(&mut self, prefix: String, suggestions: Vec<String>) {
-        self.prefix = prefix;
-        self.suggestions = suggestions.clone();
-        self.update(&suggestions);
-    }
-
-    pub fn hide(&mut self) {
-        self.suggestions.clear();
-        self.prefix.clear();
-        self.update(&[]);
-    }
-
-    fn update(&mut self, suggestions: &[String]) {
+    pub fn update(&mut self, prefix: &str) {
         self.bar.truncate(0);
-        if suggestions.is_empty() {
+
+        let mut suggestions = all_operator_names()
+            .iter()
+            .filter(|name| name.starts_with(prefix) && name.as_str() != prefix)
+            .peekable();
+
+        if prefix.is_empty() || suggestions.peek().is_none() {
             self.bar.set_attribute("style", "display:none");
             return;
         }
@@ -129,11 +105,11 @@ impl Autocomplete {
             let mut item =
                 ReactiveComponent::new(DomStruct::new((DomText::new(s), ()), self.factory.div()));
             item.inner_mut().set_attribute("class", "autocomplete-item");
-            let (handler, accepted) = (Rc::clone(&self.handler), s.clone());
+            let (handler, accepted) = (Rc::clone(&self.handler), s);
             item.set_onmousedown(move |ev: MouseEvent| {
                 ev.prevent_default();
                 ev.stop_propagation();
-                handler(&accepted);
+                handler(accepted);
             });
             self.bar.push(item);
         }

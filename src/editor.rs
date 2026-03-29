@@ -2,7 +2,7 @@
 
 use crate::{
     action_history::{ActionHistory, Edit, Selection},
-    autocomplete::{Autocomplete, suggest},
+    autocomplete::Autocomplete,
     debug::{run_binary, with_debug_state},
     dom_canvas::DomCanvas,
     dom_struct::DomStruct,
@@ -117,13 +117,15 @@ impl Editor {
 
             let editor_ref = Rc::clone(&ret.0);
             text.set_onmousedown(move |_| {
-                Editor(editor_ref.clone()).autocomplete_mut().hide();
+                Editor(editor_ref.clone()).autocomplete_mut().update("");
             });
         }
         {
             let editor_ref = Rc::clone(&ret.0);
-            ret.autocomplete_mut().set_onselect(move |accepted| {
-                Editor(Rc::clone(&editor_ref)).accept_autocomplete(accepted);
+            ret.autocomplete_mut().set_handler(move |accepted| {
+                Editor(Rc::clone(&editor_ref))
+                    .accept_autocomplete(accepted)
+                    .expect("autocomplete handler")
             });
 
             let editor_ref = Rc::clone(&ret.0);
@@ -417,7 +419,7 @@ impl Editor {
             )),
         }?;
 
-        self.show_autocomplete();
+        self.show_autocomplete()?;
 
         Ok(())
     }
@@ -427,7 +429,7 @@ impl Editor {
     // div, so try to prevent this. And it skips lines on ArrowLeft if the previous line is completely empty.
     fn handle_keydown(&mut self, ev: web_sys::KeyboardEvent) -> Result<()> {
         if ev.key().starts_with("Arrow") || ev.key() == "Escape" {
-            self.autocomplete_mut().hide();
+            self.autocomplete_mut().update("");
         }
 
         match ev.key().as_str() {
@@ -488,12 +490,11 @@ impl Editor {
                 }
             }
 
-            "Enter" | "Tab" => {
-                let accepted = self.autocomplete_mut().get_suggestions().first().cloned();
+            "Tab" => {
+                let accepted = self.autocomplete().first_suggestion().map(String::from);
                 if let Some(accepted) = accepted {
                     ev.prevent_default();
-                    self.accept_autocomplete(&accepted);
-                    return Ok(());
+                    self.accept_autocomplete(&accepted)?;
                 }
             }
             _ => {}
@@ -502,39 +503,41 @@ impl Editor {
         Ok(())
     }
 
-    fn accept_autocomplete(&mut self, accepted: &str) {
-        let suffix = &self.autocomplete_mut().get_suffix(accepted);
+    fn accept_autocomplete(&mut self, accepted: &str) -> Result<()> {
         let selection = get_selection();
-        if !suffix.is_empty() && selection.is_collapsed() {
-            let _ = Editor(Rc::clone(&self.0)).replace_range(&selection, suffix);
+        if selection.is_collapsed() {
+            let (_, pos) = self.find_idx_and_utf16_pos(
+                selection.focus_node().context("focus")?,
+                selection.focus_offset(),
+            )?;
+
+            if pos.in_instr && pos.offset < accepted.len() {
+                Editor(Rc::clone(&self.0)).replace_range(&selection, &accepted[pos.offset..])?;
+            }
         }
+        self.autocomplete_mut().update("");
+        Ok(())
     }
 
-    fn show_autocomplete(&self) {
-        let result = (|| {
-            let selection = get_selection();
-            if !selection.is_collapsed() {
-                return None;
-            }
-            let (line_idx, pos) = self
-                .find_idx_and_utf16_pos(selection.focus_node()?, selection.focus_offset())
-                .ok()?;
-            let line_text = self.line(line_idx).suffix(Position::begin()).ok()?;
-            let prefix = line_text.get(..pos.offset)?;
-            let last_word = prefix.split_whitespace().last()?;
-            let suggestions = suggest(last_word);
-            if suggestions.is_empty() {
-                None
-            } else {
-                Some((last_word.to_string(), suggestions))
-            }
-        })();
-        let mut autocomplete = self.autocomplete_mut();
-        if let Some((last_word, suggestions)) = result {
-            autocomplete.show(last_word, suggestions);
-        } else {
-            autocomplete.hide();
+    fn show_autocomplete(&self) -> Result<()> {
+        let selection = get_selection();
+        if !selection.is_collapsed() {
+            self.autocomplete_mut().update("");
+            return Ok(());
         }
+
+        let (line_idx, pos) = self.find_idx_and_utf16_pos(
+            selection.focus_node().context("focus")?,
+            selection.focus_offset(),
+        )?;
+        if !pos.in_instr {
+            self.autocomplete_mut().update("");
+            return Ok(());
+        }
+
+        let prefix = self.line(line_idx).instr().get()[..pos.offset].to_string();
+        self.autocomplete_mut().update(&prefix);
+        Ok(())
     }
 
     // Given a node and offset, find the line index and (UTF-16) position within that line.
@@ -604,6 +607,10 @@ impl Editor {
 
     fn slider_mut(&self) -> RefMut<'_, ReactiveComponent<Slider>> {
         RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
+    }
+
+    fn autocomplete(&self) -> Ref<'_, Autocomplete> {
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.1.1.0)
     }
 
     fn autocomplete_mut(&self) -> RefMut<'_, Autocomplete> {
