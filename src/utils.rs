@@ -1622,14 +1622,14 @@ pub(crate) mod tests {
         fn outs(outputs: Vec<usize>) -> OperatorType {
             OperatorType {
                 inputs: Vec::new(),
-                outputs: outputs.into_iter().map(|x| SlotUse(x)).collect(),
+                outputs: outputs.into_iter().map(SlotUse).collect(),
             }
         }
 
         fn inout(inputs: Vec<usize>, outputs: Vec<usize>) -> OperatorType {
             OperatorType {
                 inputs: inputs.into_iter().map(|x| Some(SlotUse(x))).collect(),
-                outputs: outputs.into_iter().map(|x| SlotUse(x)).collect(),
+                outputs: outputs.into_iter().map(SlotUse).collect(),
             }
         }
 
