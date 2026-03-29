@@ -105,11 +105,11 @@ impl Autocomplete {
             let mut item =
                 ReactiveComponent::new(DomStruct::new((DomText::new(s), ()), self.factory.div()));
             item.inner_mut().set_attribute("class", "autocomplete-item");
-            let (handler, accepted) = (Rc::clone(&self.handler), s);
+            let handler = Rc::clone(&self.handler);
             item.set_onmousedown(move |ev: MouseEvent| {
                 ev.prevent_default();
                 ev.stop_propagation();
-                handler(accepted);
+                handler(s);
             });
             self.bar.push(item);
         }
