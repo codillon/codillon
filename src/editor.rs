@@ -493,9 +493,9 @@ impl Editor {
             "Tab" => {
                 let accepted = self.autocomplete().first_suggestion().map(String::from);
                 if let Some(accepted) = accepted {
-                    ev.prevent_default();
                     self.accept_autocomplete(&accepted)?;
                 }
+                ev.prevent_default();
             }
             _ => {}
         }
