@@ -47,7 +47,6 @@ type ComponentType = DomStruct<
 
 pub const LINE_SPACING: usize = 40;
 const STORAGE_ID: &str = "codillon_content";
-const AUTOCOMPLETE_LIMIT: usize = 10;
 const SCHEDULE_STORE_MS: i32 = 500;
 
 struct _Editor {
@@ -523,7 +522,7 @@ impl Editor {
             let line_text = self.line(line_idx).suffix(Position::begin()).ok()?;
             let prefix = line_text.get(..pos.offset)?;
             let last_word = prefix.split_whitespace().last()?;
-            let suggestions = suggest(last_word, AUTOCOMPLETE_LIMIT);
+            let suggestions = suggest(last_word);
             if suggestions.is_empty() {
                 None
             } else {

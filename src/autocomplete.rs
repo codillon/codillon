@@ -10,22 +10,34 @@ use std::{rc::Rc, sync::OnceLock};
 use wasmparser::for_each_operator;
 use web_sys::{HtmlDivElement, MouseEvent};
 
-macro_rules! define_visited_operators {
-    ($( @$payload:ident $op:ident $({ $($arg:ident: $argty:ty),* })? => $visit:ident ($($arity:tt)*) )*) => {
-        const VISITED_OPERATOR_NAMES: &[&str] = &[$( stringify!($visit), )*];
-    }
+// At compile time, iterate through the "visit_" function names for Wasm features we support.
+macro_rules! define_supported_op_visitors {
+    ($( @$proposal:ident $op:ident $({ $($arg:ident: $argty:ty),* })? => $visit:ident ($($arity:tt)*) )*) => {
+        const VISITOR_NAMES: &[&str] = &[$(
+	    define_supported_op_visitors!(visit_one @$proposal $visit)
+	),*];
+    };
+
+    (visit_one @mvp $visit:ident) => { stringify!($visit) };
+    (visit_one @tail_call $visit:ident) => { stringify!($visit) };
+    (visit_one @sign_extension $visit:ident) => { stringify!($visit) };
+    (visit_one @saturating_float_to_int $visit:ident) => { stringify!($visit) };
+    (visit_one @bulk_memory $visit:ident) => { stringify!($visit) };
+    (visit_one @$proposal:ident $visit:ident) => { "" };
 }
 
-for_each_operator!(define_visited_operators);
+for_each_operator!(define_supported_op_visitors);
 
-fn all_instruction_names() -> &'static [String] {
+// At runtime, strip off the "visit_" prefix and replace initial period with an underscore
+// to match the operator name.
+fn all_operator_names() -> &'static [String] {
     static NAMES: OnceLock<Vec<String>> = OnceLock::new();
     NAMES
         .get_or_init(|| {
-            VISITED_OPERATOR_NAMES
+            VISITOR_NAMES
                 .iter()
-                .map(|name| {
-                    let name = name.strip_prefix("visit_").unwrap_or(name);
+                .filter_map(|name| {
+                    let name = name.strip_prefix("visit_")?;
                     let dotted_prefixes = [
                         "i32", "i64", "f32", "f64", "v128", "memory", "table", "global", "local",
                         "ref", "elem", "data",
@@ -38,21 +50,20 @@ fn all_instruction_names() -> &'static [String] {
                             s.push_str(prefix);
                             s.push('.');
                             s.push_str(&name[prefix.len() + 1..]);
-                            return s;
+                            return Some(s);
                         }
                     }
-                    name.to_string()
+                    Some(name.to_string())
                 })
                 .collect()
         })
         .as_slice()
 }
 
-pub fn suggest(prefix: &str, limit: usize) -> Vec<String> {
-    all_instruction_names()
+pub fn suggest(prefix: &str) -> Vec<String> {
+    all_operator_names()
         .iter()
         .filter(|name| name.starts_with(prefix) && name.as_str() != prefix)
-        .take(limit)
         .cloned()
         .collect()
 }
