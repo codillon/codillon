@@ -1,5 +1,10 @@
 // Structures and utilities to support multi-function/multi-module text buffers.
 
+use crate::line::LineInfo;
+use crate::symbolic::{
+    ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
+    symbols_resolved,
+};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::ops::Deref;
@@ -12,12 +17,6 @@ use wast::{
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
     token::Id,
-};
-
-use crate::line::{Activity, LineInfo};
-use crate::symbolic::{
-    ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
-    symbols_resolved,
 };
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -479,10 +478,6 @@ impl SyntaxState {
         info: &LineInfo,
         mut callback: impl FnMut(&SyntaxState),
     ) -> Result<(), &'static str> {
-        if matches!(info.active, Activity::Inactive(_)) {
-            return Ok(());
-        }
-
         if info.synthetic_before.module_syntax_first {
             for part in &info.synthetic_before.module_field_syntax {
                 self.transit_state_from_module_part(*part)?;
@@ -501,6 +496,10 @@ impl SyntaxState {
                 self.transit_state_from_module_part(*part)?;
                 callback(self);
             }
+        }
+
+        if !info.is_active() {
+            return Ok(());
         }
 
         let mut hit_initial = false;
