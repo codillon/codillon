@@ -20,6 +20,8 @@ type TextSpan = DomStruct<(DomText, ()), HtmlSpanElement>;
 type EmptySpan = DomStruct<(), HtmlSpanElement>;
 type LinePara = DomStruct<(TextSpan, (TextSpan, (EmptySpan, (DomBr, ())))), HtmlDivElement>;
 
+pub const INDENT_PX: usize = 25;
+
 #[derive(Default, Copy, Clone, PartialEq, Debug)]
 pub enum Activity {
     #[default]
@@ -67,7 +69,9 @@ impl LineInfo {
         self.is_active()
             && matches!(
                 self.kind,
-                LineKind::Instr(InstrKind::If) | LineKind::Instr(InstrKind::OtherStructured)
+                LineKind::Instr(InstrKind::If)
+                    | LineKind::Instr(InstrKind::Loop)
+                    | LineKind::Instr(InstrKind::OtherStructured)
             )
     }
 
@@ -176,13 +180,13 @@ impl Component for CodeLine {
         assert_eq!(self.contents.get_attribute("class").unwrap(), &self.class());
         let comment = self.contents.get().1.0.get_attribute("data-commentary");
         if let LineKind::Malformed(reason) = &self.info.kind {
-            assert_eq!(comment, Some(reason));
+            assert_eq!(comment, Some(reason.as_str()));
         } else if let Activity::Inactive(reason) = &self.info.active
             && !reason.is_empty()
         {
-            assert_eq!(comment, Some(reason.to_string()).as_ref());
+            assert_eq!(comment, Some(*reason));
         } else if let Some(reason) = &self.info.invalid {
-            assert_eq!(comment, Some(reason.to_string()).as_ref());
+            assert_eq!(comment, Some(reason.as_str()));
         } else {
             assert_eq!(comment, None);
         }
@@ -594,7 +598,7 @@ impl CodeLine {
         self.contents
             .get_mut()
             .0
-            .set_attribute("style", &format!("margin-left: {}px;", val * 25));
+            .set_attribute("style", &format!("margin-left: {}px;", val * INDENT_PX));
 
         old_indent.is_some() && old_indent != self.info.indent && !self.all_whitespace()
     }

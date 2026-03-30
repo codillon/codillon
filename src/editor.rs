@@ -49,7 +49,7 @@ type ComponentType = DomStruct<
     HtmlDivElement,
 >;
 
-pub const LINE_SPACING: usize = 40;
+pub const LINE_SPACING: usize = 45;
 const STORAGE_ID: &str = "codillon_content";
 const SCHEDULE_STORE_MS: i32 = 500;
 const RETRY_STORE_MS: i32 = 2000;
@@ -1059,7 +1059,8 @@ impl FrameInfosMut for Editor {
             let id = self.line(frame.start).id();
             tagged_frames.insert(id, frame);
         }
-        self.image_mut().set_frames(tagged_frames);
+        let animated = self.0.borrow().component.get_attribute("class") == Some("animated");
+        self.image_mut().set_frames(tagged_frames, animated);
     }
 }
 

@@ -24,7 +24,8 @@ pub enum InstrKind {
     If,
     Else,
     End,
-    OtherStructured, // block, loop, or try_table
+    Loop,
+    OtherStructured, // block or try_table
     Other,           // any other instruction
 }
 
@@ -169,9 +170,8 @@ impl From<Instruction<'_>> for InstrKind {
             Instruction::If(_) => InstrKind::If,
             Instruction::Else(_) => InstrKind::Else,
             Instruction::End(_) => InstrKind::End,
-            Instruction::Block(_) | Instruction::Loop(_) | Instruction::TryTable(_) => {
-                InstrKind::OtherStructured
-            }
+            Instruction::Loop(_) => InstrKind::Loop,
+            Instruction::Block(_) | Instruction::TryTable(_) => InstrKind::OtherStructured,
             Instruction::Try(_) | Instruction::Catch(_) | Instruction::CatchAll => {
                 panic!("legacy-exceptions not supported");
             }
@@ -743,7 +743,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         if let LineKind::Instr(instr_kind) = line_kind {
             match instr_kind {
                 // For a structured instruction that opens a frame, log this.
-                InstrKind::If | InstrKind::OtherStructured => {
+                InstrKind::If | InstrKind::Loop | InstrKind::OtherStructured => {
                     lines.set_active_status(line_no, Active);
                     frame_stack.push((
                         instr_kind,
@@ -772,7 +772,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                         Inactive("nothing to end")
                     },
                 ),
-                _ => (),
+                InstrKind::Other => (),
             }
         }
 
