@@ -2065,7 +2065,7 @@ pub(crate) mod tests {
         info: LineInfo,
     }
 
-    #[derive(Default)]
+    #[derive(Default, Debug)]
     struct FakeTextBuffer {
         lines: Vec<FakeTextLine>,
     }
@@ -2147,7 +2147,6 @@ pub(crate) mod tests {
         }
 
         let wasm_bin = str_to_binary(well_formed_str)?;
-
         let raw_module = RawModule::new(editor, &wasm_bin).context("RawModule::new")?;
         let validized = raw_module
             .fix_validity(editor, &wasm_bin)
@@ -2247,6 +2246,23 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(");
+            let expected = String::from("(module\n")
+                + EXPECTED_TYPES
+                + EXPECTED_IMPORTS
+                + EXPECTED_MAIN
+                + r#"  (func (type 0)
+    i32.const 1
+    call 7
+  )
+"# + EXPECTED_STEP
+                + ")\n";
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // syntax error (first operator is `else`)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("else");
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS

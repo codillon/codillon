@@ -72,10 +72,6 @@ impl LineInfo {
     }
 
     pub fn paren_depths(&self) -> (i32, i32) {
-        if !self.is_active() {
-            return (0, 0);
-        }
-
         // indent change before first displayed char, other indent changes
         let mut initial = 0;
         for part in &self.synthetic_before.module_field_syntax {
@@ -87,7 +83,9 @@ impl LineInfo {
         }
 
         let mut rest = 0;
-        if let LineKind::Other(parts) = &self.kind {
+        if self.is_active()
+            && let LineKind::Other(parts) = &self.kind
+        {
             let mut first_letter = true;
             for part in parts {
                 match part {

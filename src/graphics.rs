@@ -113,6 +113,8 @@ impl FrameLine {
                 _ => "darkgray",
             },
         );
+
+        self.info = info;
     }
 }
 
