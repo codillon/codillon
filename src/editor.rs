@@ -706,12 +706,10 @@ impl Editor {
             let version = self.0.borrow().version;
             self.execute(instrumented_binary, version);
             self.0.borrow_mut().previous_instrumented_binary_hash = instrumented_binary_hash;
+        } else if step_count() > 0 {
+            self.update_live_info(step_count(), self.current_step());
         } else {
-            if step_count() > 0 {
-                self.update_live_info(step_count(), self.current_step());
-            } else {
-                self.image_mut().set_arrow_location(None);
-            }
+            self.image_mut().set_arrow_location(None);
         }
 
         self.schedule_save(); // schedule save to local storage
