@@ -1302,6 +1302,9 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     }
 }
 
+pub const FRAME_MARGIN: usize = 3;
+pub const BLOCK_BOUNDARY_INDENT: usize = 3;
+
 pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, types: &TypedModule) {
     assert!(code.len() > 0);
 
@@ -1373,9 +1376,9 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
         };
 
         let mut instr_indent: usize = max(
-            frame_indent,
-            slot_map.values().max().copied().unwrap_or(frame_indent),
-        ) + 1;
+            frame_indent + FRAME_MARGIN,
+            slot_map.values().max().copied().unwrap_or(0) + 1,
+        );
         let mut paren_indent_above = paren_indent;
 
         paren_indent -= paren_depths.1;
@@ -1426,8 +1429,9 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                             process_inputs(&mut slot_map, inputs, instr_indent, &mut frame_stack);
                             func_ops_rev.next();
                         }
+                        instr_indent += BLOCK_BOUNDARY_INDENT;
                     }
-                    InstrKind::OtherStructured | InstrKind::If => {
+                    InstrKind::If | InstrKind::Loop | InstrKind::OtherStructured => {
                         debug_assert!(matches!(
                             typed_op.0.inner.op,
                             Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. }
@@ -1440,7 +1444,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                             unclosed: f.synthetic,
                             kind,
                         });
-                        instr_indent = f.indent;
+                        instr_indent = f.indent + BLOCK_BOUNDARY_INDENT;
                         process_outputs(&mut slot_map, &f.slots); // clear open slots
                     }
                     InstrKind::Else => {
@@ -1460,7 +1464,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                             indent: f.indent,
                             slots: vec![],
                         });
-                        instr_indent = f.indent;
+                        instr_indent = f.indent + BLOCK_BOUNDARY_INDENT;
                     }
                     InstrKind::Other => {
                         debug_assert!(!matches!(
@@ -1512,10 +1516,15 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
 
                 /* handle synthetic ends-of-frames */
                 for _ in 0..ends_before {
+                    let frame_indent = match frame_stack.last() {
+                        Some(OpenFrame { indent, .. }) => *indent,
+                        None => 0,
+                    };
+
                     frame_stack.push(OpenFrame {
                         end: line_no,
                         synthetic: true,
-                        indent: (frame_stack.len() + 1),
+                        indent: frame_indent + FRAME_MARGIN,
                         slots: vec![],
                     });
 

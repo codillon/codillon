@@ -49,6 +49,8 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         pub fn is_empty(&self) -> bool;
         pub fn get(&self, index: usize) -> Option<&Child>;
         pub fn get_mut(&mut self, index: usize) -> Option<&mut Child>;
+        pub fn last(&self) -> Option<&Child>;
+        pub fn last_mut(&mut self) -> Option<&mut Child>;
         pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Child>;
     pub fn binary_search_by<'a, F>(&'a self, f: F) -> Result<usize, usize>
     where
@@ -57,7 +59,7 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
     to self.elem {
     pub fn set_attribute(&mut self, name: &str, value: &str);
     pub fn remove_attribute(&mut self, name: &str);
-    pub fn get_attribute(&self, name: &str) -> Option<&String>;
+    pub fn get_attribute(&self, name: &str) -> Option<&str>;
     pub fn scroll_into_view(&self);
     }
     }

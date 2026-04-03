@@ -212,16 +212,6 @@ span.debug[data-debug]::after {
     position: absolute;
 }
 
-.animated .annotation {
-    transition: all 0.25s;
-}
-
-.annotation {
-    transform-origin: top;
-    transform-box: fill-box;
-    transform: scaleY(0) translateX(0) translateY(0);
-}
-
 .graph-canvas {
     background-color: #fff;
     display: block; 

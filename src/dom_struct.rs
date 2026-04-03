@@ -70,11 +70,15 @@ impl<Child: Structure, Element: AnyElement> DomStruct<Child, Element> {
         self.contents = new_contents;
     }
 
+    pub fn elem(&self) -> &ElementHandle<Element> {
+        &self.elem
+    }
+
     delegate! {
     to self.elem {
     pub fn set_attribute(&mut self, name: &str, value: &str);
     pub fn remove_attribute(&mut self, name: &str);
-    pub fn get_attribute(&self, name: &str) -> Option<&String>;
+    pub fn get_attribute(&self, name: &str) -> Option<&str>;
     pub fn scroll_into_view(&self);
     }
     }

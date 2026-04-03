@@ -11,10 +11,11 @@ use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
 };
-use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{JsValue, closure::Closure};
 use web_sys::{
     BeforeUnloadEvent, Element, HtmlBodyElement, HtmlElement, HtmlInputElement, InputEvent,
-    KeyboardEvent, MouseEvent, wasm_bindgen::JsCast,
+    KeyboardEvent, MouseEvent, SvgAnimateElement, SvgAnimatedLength, SvgLineElement, SvgUseElement,
+    wasm_bindgen::JsCast,
 };
 
 // Traits that give "raw" access to an underlying node or element,
@@ -374,8 +375,8 @@ impl<T: AnyElement> ElementHandle<T> {
         }
     }
 
-    pub fn get_attribute(&self, name: &str) -> Option<&String> {
-        self.attributes.get(name)
+    pub fn get_attribute(&self, name: &str) -> Option<&str> {
+        self.attributes.get(name).map(|x| x.as_str())
     }
 
     pub fn get_child_node_list(&self) -> NodeListHandle {
@@ -397,6 +398,34 @@ impl ElementHandle<HtmlInputElement> {
     to self.elem {
         pub fn value_as_number(&self) -> f64;
         pub fn set_value_as_number(&mut self, value: f64);
+    }
+    }
+}
+
+impl ElementHandle<SvgAnimateElement> {
+    delegate! {
+    to self.elem {
+        pub fn begin_element(&self) -> Result<(), JsValue>;
+    }
+    }
+}
+
+impl ElementHandle<SvgLineElement> {
+    delegate! {
+    to self.elem {
+        pub fn x1(&self) -> SvgAnimatedLength;
+        pub fn x2(&self) -> SvgAnimatedLength;
+        pub fn y1(&self) -> SvgAnimatedLength;
+        pub fn y2(&self) -> SvgAnimatedLength;
+    }
+    }
+}
+
+impl ElementHandle<SvgUseElement> {
+    delegate! {
+    to self.elem {
+        pub fn x(&self) -> SvgAnimatedLength;
+        pub fn y(&self) -> SvgAnimatedLength;
     }
     }
 }
@@ -521,6 +550,10 @@ impl ElementFactory {
 
     pub fn svg_line(&self) -> ElementHandle<web_sys::SvgLineElement> {
         ElementHandle::new(self.create_svg_element("line"))
+    }
+
+    pub fn svg_animate(&self) -> ElementHandle<web_sys::SvgAnimateElement> {
+        ElementHandle::new(self.create_svg_element("animate"))
     }
 
     pub fn svg_defs(&self) -> ElementHandle<web_sys::SvgDefsElement> {
