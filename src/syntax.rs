@@ -1199,10 +1199,7 @@ mod tests {
             parse_line("   block   "),
             LineKind::Instr(InstrKind::OtherStructured)
         );
-        assert_eq!(
-            parse_line("   loop   "),
-            LineKind::Instr(InstrKind::OtherStructured)
-        );
+        assert_eq!(parse_line("   loop   "), LineKind::Instr(InstrKind::Loop));
         assert_eq!(
             parse_line("   try_table   "),
             LineKind::Instr(InstrKind::OtherStructured)
