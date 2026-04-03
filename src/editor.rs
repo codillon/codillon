@@ -20,10 +20,13 @@ use crate::{
         FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, SyntheticWasm,
         fix_syntax,
     },
-    utils::{FmtError, OperatorType, RawModule, indent_and_frame, str_to_binary},
+    utils::{
+        FmtError, OperatorType, RawModule, Slot, SlotUse, TypedModule, ValidModule,
+        find_connections, indent_and_frame, str_to_binary,
+    },
 };
 use anyhow::{Context, Result, bail};
-use itertools::Itertools;
+use itertools::{Itertools, zip_eq};
 use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
@@ -288,6 +291,14 @@ impl Editor {
             let end_pos_in_line = self.line(start_line).end_position();
             let s = self.line(end_line).suffix(end_pos)?;
 
+            // Special case: if end line contributes 100% of the text, preserve its ID
+            if end_pos == Position::begin() && start_pos == Position::begin() {
+                let start_id = self.line(start_line).id();
+                let end_id = self.line(end_line).id();
+                self.line_mut(start_line).set_id(end_id);
+                self.line_mut(end_line).set_id(start_id);
+            }
+
             // Save absolute offset for use later, because changing the line can
             // move text between instr and comment and will invalidate existing Position.
             let start_pos_absolute = self
@@ -326,7 +337,16 @@ impl Editor {
                     let rest = self.line(fixup_line).suffix(pos)?;
                     let end_pos = self.line(fixup_line).end_position();
                     self.line_mut(fixup_line).replace_range(pos, end_pos, "")?;
-                    let newline = CodeLine::new(&rest[1..], &self.0.borrow().factory);
+                    let mut newline = CodeLine::new(&rest[1..], &self.0.borrow().factory);
+
+                    // preserve identity in one special case
+                    if pos == Position::begin() {
+                        let old_id = self.line(fixup_line).id();
+                        let new_id = newline.id();
+                        self.line_mut(fixup_line).set_id(new_id);
+                        newline.set_id(old_id);
+                    }
+
                     new_cursor_pos = Position::begin();
                     fixup_line += 1;
                     self.text_mut().insert(fixup_line, newline);
@@ -334,7 +354,7 @@ impl Editor {
             }
         }
 
-        // Is the new module well-formed? Otherwise, revert this entire change.
+        // Is the new module well-formed and "validizable"? Otherwise, revert this entire change.
         match self.on_change() {
             Ok(()) => {
                 self.line(fixup_line).set_cursor_position(new_cursor_pos);
@@ -663,51 +683,15 @@ impl Editor {
         // indent operators and find frames
         indent_and_frame(self, &validized, &types);
 
-        let mut last_line_no = 0;
-        for i in 0..validized.functions.len() {
-            for (op, OperatorType { inputs, outputs }) in
-                std::iter::zip(&validized.functions[i].operators, &types.funcs[i].ops)
-            {
-                let mut type_str = String::new();
+        // update visual types of params, locals, and operators
+        self.update_displayed_types(&validized, &types)?;
 
-                for t in inputs {
-                    match t {
-                        Some(ty) => type_str
-                            .push_str(&(types.slots[ty.0].0.to_string() + ":" + &ty.0.to_string())),
-                        None => type_str.push('?'),
-                    }
-                    type_str.push(' ');
-                }
-                if inputs.is_empty() {
-                    type_str.push_str("𝜖 ");
-                }
+        // make connections
+        self.image_mut()
+            .set_connections(find_connections(&validized, &types));
 
-                type_str.push('→');
-                for t in outputs {
-                    type_str.push(' ');
-                    type_str.push_str(&(types.slots[t.0].0.to_string() + ":" + &t.0.to_string()));
-                }
-                if outputs.is_empty() {
-                    type_str.push_str(" 𝜖");
-                }
-
-                while last_line_no < op.line_idx {
-                    self.line_mut(last_line_no).set_debug_annotation(None);
-                    last_line_no += 1;
-                }
-                last_line_no += 1;
-
-                self.line_mut(op.line_idx)
-                    .set_debug_annotation(Some(&type_str));
-            }
-        }
-
-        for i in last_line_no..self.len() {
-            self.line_mut(i).set_debug_annotation(None);
-        }
-
-        let binary_changed = self.0.borrow().previous_binary_hash != binary_hash;
         // instrumentation
+        let binary_changed = self.0.borrow().previous_binary_hash != binary_hash;
         self.execute(
             &validized.build_instrumented_binary(&types)?,
             binary_changed,
@@ -718,6 +702,128 @@ impl Editor {
         #[cfg(debug_assertions)]
         self.audit();
 
+        Ok(())
+    }
+
+    fn update_displayed_types<'a>(
+        &mut self,
+        validized: &ValidModule<'a>,
+        types: &TypedModule,
+    ) -> Result<()> {
+        // set types
+        let line_count = self.len();
+        self.image_mut().set_type_count(line_count);
+        let mut last_line_no = 0;
+        for (func, func_types) in zip_eq(&validized.functions, &types.funcs) {
+            // set types of params
+            let start_line = func.lines.0;
+            while last_line_no < start_line {
+                self.image_mut().clear_type(last_line_no);
+                last_line_no += 1;
+            }
+
+            if !func_types.params.is_empty() {
+                let param_types: Vec<Option<Slot>> = func_types
+                    .params
+                    .iter()
+                    .map(|SlotUse(x)| Some(types.slots[*x].clone()))
+                    .collect();
+                self.image_mut()
+                    .set_type(start_line, 0, param_types, vec![]);
+                last_line_no = start_line + 1;
+            }
+
+            // set types of locals
+            {
+                let mut local_line_idx: Option<usize> = None;
+                let mut local_slots = vec![];
+                for (local, SlotUse(slot_idx)) in zip_eq(&func.locals, &func_types.locals) {
+                    match local_line_idx {
+                        Some(line_idx) if line_idx == local.line_idx => local_slots.push(*slot_idx),
+                        None => {
+                            local_line_idx = Some(local.line_idx);
+                            debug_assert!(local_slots.is_empty());
+                            local_slots.push(*slot_idx);
+                        }
+                        Some(line_idx) => {
+                            // flush
+                            while last_line_no < line_idx {
+                                self.image_mut().clear_type(last_line_no);
+                                last_line_no += 1;
+                            }
+
+                            let indent = self.info(line_idx).indent.unwrap_or(0);
+                            self.image_mut().set_type(
+                                line_idx,
+                                indent,
+                                vec![],
+                                local_slots
+                                    .iter()
+                                    .map(|x| types.slots[*x].clone())
+                                    .collect(),
+                            );
+
+                            local_line_idx = Some(local.line_idx);
+                            local_slots.truncate(0);
+                            local_slots.push(*slot_idx);
+
+                            last_line_no = line_idx + 1;
+                        }
+                    }
+                }
+                // flush
+                if let Some(local_line_idx) = local_line_idx {
+                    while last_line_no < local_line_idx {
+                        self.image_mut().clear_type(last_line_no);
+                        last_line_no += 1;
+                    }
+                    let indent = self.info(local_line_idx).indent.unwrap_or(0);
+                    self.image_mut().set_type(
+                        local_line_idx,
+                        indent,
+                        vec![],
+                        local_slots
+                            .iter()
+                            .map(|x| types.slots[*x].clone())
+                            .collect(),
+                    );
+                    last_line_no = local_line_idx + 1;
+                }
+            }
+
+            // set types of ops
+            for (op, OperatorType { inputs, outputs }) in zip_eq(&func.operators, &func_types.ops) {
+                while last_line_no < op.line_idx {
+                    self.image_mut().clear_type(last_line_no);
+                    last_line_no += 1;
+                }
+                let in_tys: Vec<Option<Slot>> = inputs
+                    .iter()
+                    .map(|x| x.as_ref().map(|SlotUse(y)| types.slots[*y].clone()))
+                    .collect();
+                let out_tys: Vec<Slot> = outputs
+                    .iter()
+                    .map(|SlotUse(x)| types.slots[*x].clone())
+                    .collect();
+
+                let indent = self.info(op.line_idx).indent.unwrap_or(0);
+
+                if !func_types.params.is_empty() && op.line_idx == start_line {
+                    // special case: for an empty func, don't override the param types with the function end type
+                    if !inputs.is_empty() {
+                        bail!("unexpected non-empty end op on same line as function start");
+                    }
+                } else {
+                    self.image_mut()
+                        .set_type(op.line_idx, indent, in_tys, out_tys);
+                }
+
+                last_line_no = op.line_idx + 1;
+            }
+        }
+        for i in last_line_no..line_count {
+            self.image_mut().clear_type(i);
+        }
         Ok(())
     }
 

@@ -43,6 +43,7 @@ div.textentry:focus {
 
 .meta-line {
     color: indigo;
+    counter-increment: codelines;
 }
 
 .instr-line {

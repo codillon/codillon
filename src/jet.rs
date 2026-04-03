@@ -361,6 +361,10 @@ impl<T: AnyElement> ElementHandle<T> {
         self.elem.element().replace_children_with_node(&children.0);
     }
 
+    pub fn set_attr_num(&mut self, name: &str, value: impl ToString) {
+        self.set_attribute(name, &value.to_string())
+    }
+
     pub fn set_attribute(&mut self, name: &str, value: &str) {
         match self.attributes.insert(name.to_string(), value.to_string()) {
             None => self.elem.element().set_attribute(name, value).unwrap(),
