@@ -60,44 +60,83 @@ impl InstrImports {
     ];
 }
 
-struct HelperFunc {
+#[derive(PartialEq, Eq)]
+enum HelperImportKind<'a> {
+    Func {
+        params: &'a [ValType],
+        results: &'a [ValType],
+    },
+    Global(wasmparser::GlobalType),
+    Memory(wasmparser::MemoryType),
+}
+
+struct HelperImport<'a> {
     name: &'static str,
-    params: &'static [wasmparser::ValType],
-    results: &'static [wasmparser::ValType],
+    kind: HelperImportKind<'a>,
     reason: &'static str,
 }
-const HELPER_IMPORTS: &[(&str, &[HelperFunc])] = &[(
+const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[(
     "helpers",
     &[
-        HelperFunc {
+        HelperImport {
             name: "draw_point",
-            params: &[ValType::F64, ValType::F64],
-            results: &[],
+            kind: HelperImportKind::Func {
+                params: &[ValType::F64, ValType::F64],
+                results: &[],
+            },
             reason: "expected type (f64, f64) -> ()",
         },
-        HelperFunc {
+        HelperImport {
             name: "clear_canvas",
-            params: &[],
-            results: &[],
+            kind: HelperImportKind::Func {
+                params: &[],
+                results: &[],
+            },
             reason: "expected type () -> ()",
         },
-        HelperFunc {
+        HelperImport {
             name: "set_color",
-            params: &[ValType::I32, ValType::I32, ValType::I32],
-            results: &[],
+            kind: HelperImportKind::Func {
+                params: &[ValType::I32, ValType::I32, ValType::I32],
+                results: &[],
+            },
             reason: "expected type (i32, i32, i32) -> ()",
         },
-        HelperFunc {
+        HelperImport {
             name: "set_extent",
-            params: &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
-            results: &[],
+            kind: HelperImportKind::Func {
+                params: &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
+                results: &[],
+            },
             reason: "expected type (f64, f64, f64, f64) -> ()",
         },
-        HelperFunc {
+        HelperImport {
             name: "set_radius",
-            params: &[ValType::F64],
-            results: &[],
+            kind: HelperImportKind::Func {
+                params: &[ValType::F64],
+                results: &[],
+            },
             reason: "expected type (f64) -> ()",
+        },
+        HelperImport {
+            name: "num_samples",
+            kind: HelperImportKind::Global(wasmparser::GlobalType {
+                content_type: ValType::I32,
+                mutable: false,
+                shared: false,
+            }),
+            reason: "expected (global i32)",
+        },
+        HelperImport {
+            name: "listen_memory",
+            kind: HelperImportKind::Memory(wasmparser::MemoryType {
+                memory64: false,
+                shared: false,
+                initial: 1,
+                maximum: None,
+                page_size_log2: None,
+            }),
+            reason: "expected (memory 1)",
         },
     ],
 )];
@@ -351,25 +390,61 @@ impl<'a> RawModule<'a> {
 
         /* Disable unlinkable imports */
         let mut imports = Vec::new();
-        let placeholder_import = wasmparser::Import {
+        let placeholder_func_import = wasmparser::Import {
             module: "codillon_debug",
             name: "func_placeholder",
             ty: wasmparser::TypeRef::Func(self.types.len() as u32), // empty type is first added type
         };
+        let placeholder_global_import = wasmparser::Import {
+            module: "codillon_debug",
+            name: "global_placeholder",
+            ty: wasmparser::TypeRef::Global(wasmparser::GlobalType {
+                content_type: wasmparser::ValType::I32,
+                mutable: false,
+                shared: false,
+            }),
+        };
+        let placeholder_memory_import = wasmparser::Import {
+            module: "codillon_debug",
+            name: "memory_placeholder",
+            ty: wasmparser::TypeRef::Memory(wasmparser::MemoryType {
+                memory64: false,
+                shared: false,
+                initial: 0,
+                maximum: None,
+                page_size_log2: None,
+            }),
+        };
         for (import_idx, import @ wasmparser::Import { module, name, ty }) in
             self.imports.into_iter().enumerate()
         {
-            match ty {
+            let (kind, placeholder) = match ty {
                 wasmparser::TypeRef::Func(type_idx) => {
-                    match Self::check_func_import(module, name, &self.types[type_idx as usize]) {
-                        None => imports.push(import),
-                        Some(reason) => {
-                            editor.set_invalid(import_lines[import_idx], Some(reason));
-                            imports.push(placeholder_import);
-                        }
-                    }
+                    let func_type = &self.types[type_idx as usize];
+                    (
+                        &HelperImportKind::Func {
+                            params: func_type.params(),
+                            results: func_type.results(),
+                        },
+                        placeholder_func_import,
+                    )
                 }
+                wasmparser::TypeRef::Global(global_type) => (
+                    &HelperImportKind::Global(global_type),
+                    placeholder_global_import,
+                ),
+                wasmparser::TypeRef::Memory(memory_type) => (
+                    &HelperImportKind::Memory(memory_type),
+                    placeholder_memory_import,
+                ),
                 _ => unreachable!("unsupported import kind (forbidden syntactically)"),
+            };
+            match Self::check_import(module, name, kind) {
+                None => imports.push(import),
+                Some(reason) => {
+                    editor.set_invalid(import_lines[import_idx], Some(reason));
+                    imports.push(placeholder);
+                }
             };
         }
 
@@ -664,25 +739,19 @@ impl<'a> RawModule<'a> {
         Ok(())
     }
 
-    fn check_func_import(
+    fn check_import(
         import_module: &str,
         import_name: &str,
-        ty: &wasmparser::FuncType,
+        import_kind: &HelperImportKind,
     ) -> Option<String> {
         // Check if module name exists
         for (module, components) in HELPER_IMPORTS {
             if *module == import_module {
-                for HelperFunc {
-                    name,
-                    params,
-                    results,
-                    reason,
-                } in *components
-                {
+                for HelperImport { name, kind, reason } in *components {
                     // Check if component name exists
                     if *name == import_name {
                         // Check if function type matches
-                        return if ty.params() == *params && ty.results() == *results {
+                        return if import_kind == kind {
                             None
                         } else {
                             Some(reason.to_string())
@@ -894,6 +963,7 @@ impl<'a> ValidModule<'a> {
             for orig_import in &self.imports {
                 match orig_import.ty {
                     wasmparser::TypeRef::Func(_) => num_func_imports += 1,
+                    wasmparser::TypeRef::Global(_) | wasmparser::TypeRef::Memory(_) => {}
                     _ => panic!("unexpected import type"),
                 }
                 RoundtripReencoder.parse_import(&mut import_section, *orig_import)?;
@@ -2985,7 +3055,7 @@ pub(crate) mod tests {
             );
         }
 
-        //Test case 5: interleave valid and invalid imports
+        // Test case 5: interleave valid and invalid imports
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"a\" \"b\" (func $fake_func1))");
@@ -3062,6 +3132,40 @@ pub(crate) mod tests {
                     }
             }
             */
+        }
+
+        // Test case 6: valid global and memory imports
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"helpers\" \"num_samples\" (global i32))");
+            editor.push_line("(import \"helpers\" \"listen_memory\" (memory 1))");
+            let _ = test_editor_flow(&mut editor)?;
+            assert!(
+                editor.lines[0].info.invalid.is_none(),
+                "num_samples global should be valid"
+            );
+            assert!(
+                editor.lines[1].info.invalid.is_none(),
+                "listen_memory memory should be valid"
+            );
+        }
+
+        // Test case 7: wrong types for global and memory imports
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"helpers\" \"num_samples\" (global (mut i32)))");
+            editor.push_line("(import \"helpers\" \"listen_memory\" (memory 2))");
+            let _ = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                editor.lines[0].info.invalid.as_deref(),
+                Some("expected (global i32)"),
+                "num_samples with wrong mutability should be invalid"
+            );
+            assert_eq!(
+                editor.lines[1].info.invalid.as_deref(),
+                Some("expected (memory 1)"),
+                "listen_memory with wrong size should be invalid"
+            );
         }
 
         Ok(())

@@ -214,7 +214,10 @@ impl<'a> Parse<'a> for ModulePart {
                             wast::core::ImportItems::Single {
                                 sig:
                                     wast::core::ItemSig {
-                                        kind: wast::core::ItemKind::Func { .. },
+                                        kind:
+                                            wast::core::ItemKind::Func { .. }
+                                            | wast::core::ItemKind::Global(_)
+                                            | wast::core::ItemKind::Memory(_),
                                         ..
                                     },
                                 ..
@@ -259,7 +262,7 @@ impl<'a> Parse<'a> for ModulePart {
                 Memory {
                     kind: wast::core::MemoryKind::Import { .. },
                     ..
-                } => Err(parser.error("unsupported import kind")),
+                } => Ok(ModulePart::Import),
                 _ => Ok(ModulePart::Memory),
             })
         } else if parser.peek2::<kw::table>()? {
@@ -275,7 +278,7 @@ impl<'a> Parse<'a> for ModulePart {
                 Global {
                     kind: wast::core::GlobalKind::Import { .. },
                     ..
-                } => Err(parser.error("unsupported import kind")),
+                } => Ok(ModulePart::Import),
                 Global {
                     kind: wast::core::GlobalKind::Inline(wast::core::Expression { instrs, .. }),
                     ty:
