@@ -16,7 +16,7 @@ delegate = "0.13.5"
 js-sys = "0.3.91"
 str_indices = "0.4.4"
 wasm-bindgen = "0.2.114"
-web-sys = { version = "0.3.91", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "MouseEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "SvgElement", "SvgLineElement", "SvgDefsElement", "SvgMarkerElement", "SvggElement", "SvgCircleElement", "SvgUseElement", "SvgPathElement", "HtmlInputElement", "HtmlCanvasElement", "HtmlDataListElement", "HtmlOptionElement", "CanvasRenderingContext2d", "Performance", "Storage", "BeforeUnloadEvent", "SvgAnimateElement", "SvgAnimatedLength", "SvgLength"] }
+web-sys = { version = "0.3.91", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "MouseEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "SvgElement", "SvgLineElement", "SvgDefsElement", "SvgMarkerElement", "SvggElement", "SvgCircleElement", "SvgUseElement", "SvgPathElement", "HtmlInputElement", "HtmlCanvasElement", "HtmlDataListElement", "HtmlOptionElement", "HtmlButtonElement", "CanvasRenderingContext2d", "Performance", "Storage", "BeforeUnloadEvent", "SvgAnimateElement", "SvgAnimatedLength", "SvgLength"] }
 wasm-bindgen-futures = "0.4.64"
 wasm-encoder = { version = "0.245.1", features = ["wasmparser"] }
 itertools = "0.14.0"

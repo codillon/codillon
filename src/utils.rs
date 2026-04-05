@@ -355,7 +355,7 @@ impl<'a> RawModule<'a> {
         self,
         editor: &mut impl LineInfosMut,
         wasm_bin: &'a [u8],
-    ) -> Result<ValidModule<'a>> {
+    ) -> Result<(ValidModule<'a>, Option<usize>)> {
         let parser = wasmparser::Parser::new(0);
         let import_lines = find_import_lines(editor);
         let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
@@ -505,7 +505,14 @@ impl<'a> RawModule<'a> {
             }
         }
 
-        Ok(ret)
+        let function_ranges = find_function_ranges(editor);
+        let go_button_line_idx = if !function_ranges.is_empty() {
+            Some(function_ranges[0].0)
+        } else {
+            None
+        };
+
+        Ok((ret, go_button_line_idx))
     }
 
     // Take an invalid Operator and make it valid, either by
@@ -2273,7 +2280,7 @@ pub(crate) mod tests {
 
         let wasm_bin = str_to_binary(well_formed_str)?;
         let raw_module = RawModule::new(editor, &wasm_bin).context("RawModule::new")?;
-        let validized = raw_module
+        let (validized, _) = raw_module
             .fix_validity(editor, &wasm_bin)
             .context("fix_validity")?;
 

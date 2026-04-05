@@ -599,6 +599,10 @@ impl ElementFactory {
     pub fn option(&self) -> ElementHandle<web_sys::HtmlOptionElement> {
         ElementHandle::new(self.create_element("option"))
     }
+
+    pub fn button(&self) -> ElementHandle<web_sys::HtmlButtonElement> {
+        ElementHandle::new(self.create_element("button"))
+    }
 }
 
 // Wrapper for a DOM NodeList, allowing audit that each entry matches an expected node.
