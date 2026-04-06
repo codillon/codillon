@@ -77,6 +77,7 @@ impl<Child: Structure, Element: AnyElement> DomStruct<Child, Element> {
     delegate! {
     to self.elem {
     pub fn set_attribute(&mut self, name: &str, value: &str);
+    pub fn set_attr_num(&mut self, name: &str, value: impl ToString);
     pub fn remove_attribute(&mut self, name: &str);
     pub fn get_attribute(&self, name: &str) -> Option<&str>;
     pub fn scroll_into_view(&self);

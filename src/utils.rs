@@ -5,7 +5,7 @@ use crate::syntax::{
 use EncoderInstruction::*;
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
-use itertools::Itertools;
+use itertools::{Itertools, zip_eq};
 use std::{
     cmp::{max, min},
     collections::HashMap,
@@ -125,7 +125,8 @@ pub struct Aligned<T> {
 
 pub struct RawFunction<'a> {
     pub type_idx: u32,
-    pub params: Vec<ValType>,
+    pub lines: (usize, usize),
+    pub params: Vec<Aligned<ValType>>,
     pub locals: Vec<Aligned<ValType>>,
     pub operators: Vec<Aligned<Operator<'a>>>,
 }
@@ -133,7 +134,8 @@ pub struct RawFunction<'a> {
 #[derive(Debug)]
 pub struct ValidFunction<'a> {
     pub type_idx: u32,
-    pub params: Vec<ValType>,
+    pub lines: (usize, usize),
+    pub params: Vec<Aligned<ValType>>,
     pub locals: Vec<Aligned<ValType>>,
     pub operators: Vec<Aligned<GeneralOperator<'a>>>,
 }
@@ -193,7 +195,7 @@ impl<'a> RawModule<'a> {
         let mut imports: Vec<Import> = Vec::new();
         let mut memory: Vec<MemoryType> = Vec::new();
         let mut globals: Vec<Aligned<Global>> = Vec::new();
-        type FuncInfo<'a> = (Vec<Aligned<ValType>>, Vec<Aligned<Operator<'a>>>);
+        type FuncInfo<'a> = (Vec<Aligned<ValType>>, Vec<Aligned<Operator<'a>>>); // locals, ops
         let mut funcs: Vec<FuncInfo> = Vec::with_capacity(function_ranges.len());
 
         for payload in parser.parse_all(wasm_bin) {
@@ -275,9 +277,20 @@ impl<'a> RawModule<'a> {
             "function count mismatch"
         );
 
-        for (func_idx, ((mut locals, mut ops), (start_line, end_line))) in
+        for (func_idx, ((mut locals, mut operators), (start_line, end_line))) in
             funcs.into_iter().zip(function_ranges).enumerate()
         {
+            // align params
+            let params = types[func_type_indices[func_idx] as usize]
+                .params()
+                .to_vec()
+                .into_iter()
+                .map(|ty| Aligned {
+                    line_idx: start_line,
+                    inner: ty,
+                })
+                .collect();
+
             // align locals
             let mut locals_iter = locals.iter_mut();
             for line_no in start_line..=end_line {
@@ -297,7 +310,7 @@ impl<'a> RawModule<'a> {
             assert!(locals_iter.next().is_none(), "too many locals in function");
 
             // align ops
-            let mut ops_iter = ops.iter_mut();
+            let mut ops_iter = operators.iter_mut();
             for line_no in start_line..=end_line {
                 for _ in 0..editor.info(line_no).num_ops() {
                     ops_iter
@@ -322,11 +335,10 @@ impl<'a> RawModule<'a> {
             }
             functions.push(RawFunction {
                 type_idx: func_type_indices[func_idx],
-                params: types[func_type_indices[func_idx] as usize]
-                    .params()
-                    .to_vec(),
+                lines: (start_line, end_line),
+                params,
                 locals,
-                operators: ops,
+                operators,
             });
         }
 
@@ -385,16 +397,17 @@ impl<'a> RawModule<'a> {
 
         /* "Validize" each function */
         for payload in parser.parse_all(wasm_bin) {
-            if let ValidPayload::Func(func, body) = validator.payload(&payload?)? {
+            if let ValidPayload::Func(func, _body) = validator.payload(&payload?)? {
                 let RawFunction {
                     type_idx,
+                    lines,
                     params,
                     locals,
                     operators,
                 } = raw_functions.next().expect("function count mismatch");
 
                 #[cfg(debug_assertions)]
-                Self::assert_bodies_match(&locals, &operators, &body)?;
+                Self::assert_bodies_match(&locals, &operators, &_body)?;
 
                 let mut func_validator = func.into_validator(allocs);
 
@@ -404,6 +417,7 @@ impl<'a> RawModule<'a> {
 
                 let mut valid_function = ValidFunction {
                     type_idx,
+                    lines,
                     params,
                     locals,
                     operators: Vec::with_capacity(operators.len()),
@@ -583,10 +597,10 @@ impl<'a> RawModule<'a> {
         loop {
             let mut validator_copy = func_validator.clone();
 
-            if general_op.inner.prepended.len() > 100 {
+            if general_op.inner.prepended.len() > 1000 {
                 // bomb out instead of infinite loop
                 dbg!(general_op);
-                panic!();
+                bail!("too many prepended ops to fix");
             }
 
             for prepended_op in &general_op.inner.prepended {
@@ -639,6 +653,7 @@ impl<'a> RawModule<'a> {
         }
     }
 
+    #[cfg(debug_assertions)]
     fn assert_bodies_match(
         locals: &[Aligned<ValType>],
         ops: &[Aligned<Operator<'a>>],
@@ -726,6 +741,7 @@ impl SimulatedStack {
         validator: &mut wasmparser::FuncValidator<wasmparser::ValidatorResources>,
         slots: &mut Vec<Slot>,
         untyped: bool,
+        is_user_op: bool,
     ) -> Result<OperatorType> {
         let (pop_count, push_count) = op
             .operator_arity(&validator.visitor(DUMMY_OFFSET))
@@ -742,10 +758,19 @@ impl SimulatedStack {
             pop_count
         };
 
+        let is_select = matches!(op, Operator::Select | Operator::TypedSelect { .. });
+
         let inputs = (0..pop_count)
             .map(|i| {
                 if untyped || (pop_count - i - 1) >= accessible_operands {
-                    None
+                    // XXX special-case for select. Should handle in more principled/general way.
+                    if is_select && i == 2 && pop_count - 1 < accessible_operands {
+                        Some(SlotUse(
+                            self.slot_idx_stack[pre_instr_height + i - pop_count],
+                        ))
+                    } else {
+                        None
+                    }
                 } else {
                     Some(SlotUse(
                         self.slot_idx_stack[pre_instr_height + i - pop_count],
@@ -771,14 +796,20 @@ impl SimulatedStack {
 
         let outputs = (0..push_count)
             .map(|i| {
-                slots.push(Slot(
-                    validator
-                        .get_operand_type(push_count - i - 1)
-                        .flatten()
-                        .expect("result operand"),
-                ));
+                slots.push(Slot {
+                    ty: if is_select {
+                        // XXX should handle in more principled/general way
+                        inputs[0]
+                            .as_ref()
+                            .and_then(|SlotUse(x)| slots.get(*x).and_then(|y| y.ty))
+                    } else {
+                        validator.get_operand_type(push_count - i - 1).flatten()
+                    },
+                    written: is_user_op,
+                });
                 self.slot_idx_stack.push(slots.len() - 1);
                 // XXX: advisory connection to "original" global or local slot for a {global/local}.get?
+                // XXX: advisory connection to `end` or `loop` op for a br/br_[x]?
                 SlotUse(slots.len() - 1)
             })
             .collect::<Vec<_>>();
@@ -809,7 +840,10 @@ impl<'a> ValidModule<'a> {
             ..
         } in &self.globals
         {
-            ret.slots.push(Slot(*content_type));
+            ret.slots.push(Slot {
+                ty: Some(*content_type),
+                written: true,
+            });
             ret.globals.push(SlotUse(ret.slots.len() - 1));
         }
 
@@ -818,12 +852,8 @@ impl<'a> ValidModule<'a> {
             if let ValidPayload::Func(func, _) = validator.payload(&payload?)? {
                 let valid_func = funcs_iter.next().expect("not enough funcs in ValidModule");
                 let mut validator = func.into_validator(allocs);
-                let types = Self::function_into_types_table(
-                    &mut validator,
-                    &self.types,
-                    valid_func,
-                    &mut ret.slots,
-                )?;
+                let types =
+                    Self::function_into_types_table(&mut validator, valid_func, &mut ret.slots)?;
                 ret.funcs.push(types);
                 allocs = validator.into_allocations();
             }
@@ -834,7 +864,6 @@ impl<'a> ValidModule<'a> {
 
     fn function_into_types_table(
         func_validator: &mut wasmparser::FuncValidator<wasmparser::ValidatorResources>,
-        types: &[wasmparser::FuncType],
         valid_func: &ValidFunction<'_>,
         slots: &mut Vec<Slot>,
     ) -> Result<TypedFunction> {
@@ -844,14 +873,20 @@ impl<'a> ValidModule<'a> {
             ops: Vec::with_capacity(valid_func.operators.len()),
         };
 
-        for param_ty in types[valid_func.type_idx as usize].params() {
-            slots.push(Slot(*param_ty));
+        for param_ty in valid_func.params.iter() {
+            slots.push(Slot {
+                ty: Some(param_ty.inner),
+                written: true,
+            });
             ret.params.push(SlotUse(slots.len() - 1));
         }
 
         for ty in &valid_func.locals {
             func_validator.define_locals(DUMMY_OFFSET, 1, ty.inner)?;
-            slots.push(Slot(ty.inner));
+            slots.push(Slot {
+                ty: Some(ty.inner),
+                written: true, // XXX deal with non-defaultable locals and local init stack in Wasm >=3
+            });
             ret.locals.push(SlotUse(slots.len() - 1));
         }
 
@@ -859,11 +894,13 @@ impl<'a> ValidModule<'a> {
 
         for op in &valid_func.operators {
             for pre in &op.inner.prepended {
-                stack.op(pre, func_validator, slots, false)?;
+                stack.op(pre, func_validator, slots, false, false)?;
             }
 
-            ret.ops
-                .push(stack.op(&op.inner.op, func_validator, slots, op.inner.untyped)?);
+            let operator_ty =
+                stack.op(&op.inner.op, func_validator, slots, op.inner.untyped, true)?;
+
+            ret.ops.push(operator_ty);
         }
 
         Ok(ret)
@@ -966,7 +1003,7 @@ impl<'a> ValidModule<'a> {
                 for OperatorType { outputs, .. } in &func.ops {
                     let results = outputs
                         .iter()
-                        .map(|SlotUse(idx)| types.slots[*idx].0)
+                        .filter_map(|SlotUse(idx)| types.slots[*idx].ty)
                         .collect::<Vec<_>>();
                     if !results.is_empty() && !result_types_to_func_idx.contains_key(&results) {
                         // Make function-section entry for new "transparent" instrumentation function
@@ -1105,7 +1142,11 @@ impl<'a> ValidModule<'a> {
 
         let transparent_record_results =
             |f: &mut wasm_encoder::Function, results: &Vec<SlotUse>| {
-                if results.is_empty() {
+                if results.is_empty()
+                    || results
+                        .iter()
+                        .any(|SlotUse(x)| types.slots[*x].ty.is_none())
+                {
                     return;
                 }
                 for SlotUse(slot_idx) in results {
@@ -1114,7 +1155,7 @@ impl<'a> ValidModule<'a> {
                 f.instruction(&Call(
                     result_types_to_func_idx[&results
                         .iter()
-                        .map(|SlotUse(slot_idx)| types.slots[*slot_idx].0)
+                        .filter_map(|SlotUse(slot_idx)| types.slots[*slot_idx].ty)
                         .collect::<Vec<_>>()],
                 ));
             };
@@ -1123,14 +1164,15 @@ impl<'a> ValidModule<'a> {
             use InstrImports::*;
             use ValType::*;
             let SlotUse(slot_idx) = operand;
-            f.instruction(&I32Const((*slot_idx).try_into().expect("slot -> i32"))); // slot
-            let rec_function = match types.slots[*slot_idx].0 {
-                I32 => RecordI32,
-                F32 => RecordF32,
-                I64 => RecordI64,
-                F64 => RecordF64,
+            let rec_function = match types.slots[*slot_idx].ty {
+                Some(I32) => RecordI32,
+                Some(F32) => RecordF32,
+                Some(I64) => RecordI64,
+                Some(F64) => RecordF64,
+                None => return Ok(()), /* don't try to record unknown types in unreachable code */
                 _ => bail!("unhandled ValType for primitive_record"),
             };
+            f.instruction(&I32Const((*slot_idx).try_into().expect("slot -> i32"))); // slot
             f.instruction(&Call(rec_function as u32));
             Ok(())
         };
@@ -1251,8 +1293,11 @@ impl<'a> ValidModule<'a> {
 }
 
 // Slot represents anywhere that a value can go, e.g. a global, local, or stack operand.
-#[derive(Debug, PartialEq, Eq)]
-pub struct Slot(pub ValType);
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Slot {
+    pub ty: Option<ValType>,
+    pub written: bool,
+}
 
 // A SlotUse represents any input from, or output to, a slot (identified by its global index).
 #[derive(Debug, PartialEq, Eq)]
@@ -1281,6 +1326,48 @@ pub struct TypedModule {
     pub slots: Vec<Slot>,
     pub globals: Vec<SlotUse>,
     pub funcs: Vec<TypedFunction>,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct Coordinate {
+    pub line_idx: usize,
+    pub operand_num: usize,
+}
+
+pub struct OperandConnections {
+    pub written: Vec<Option<Coordinate>>, // same index space as Slot #
+    pub read: Vec<Option<Coordinate>>,
+}
+
+pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> OperandConnections {
+    let mut cx = OperandConnections {
+        written: vec![None; tys.slots.len()],
+        read: vec![None; tys.slots.len()],
+    };
+
+    for (func, func_tys) in zip_eq(&module.functions, &tys.funcs) {
+        for (Aligned { line_idx, .. }, OperatorType { inputs, outputs }) in
+            zip_eq(&func.operators, &func_tys.ops)
+        {
+            for (operand_num, SlotUse(idx)) in outputs.iter().enumerate() {
+                cx.written[*idx] = Some(Coordinate {
+                    line_idx: *line_idx,
+                    operand_num,
+                });
+            }
+
+            for (operand_num, maybe_slot) in inputs.iter().enumerate() {
+                if let Some(SlotUse(idx)) = maybe_slot {
+                    cx.read[*idx] = Some(Coordinate {
+                        line_idx: *line_idx,
+                        operand_num,
+                    });
+                }
+            }
+        }
+    }
+
+    cx
 }
 
 pub fn str_to_binary(mut txt: String) -> Result<Vec<u8>> {
@@ -1315,7 +1402,22 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
         slots: Vec<SlotUse>,
     }
 
-    let mut frames: Vec<FrameInfo> = Vec::new();
+    let mut frames: Vec<FrameInfo> = module
+        .functions
+        .iter()
+        .map(|ValidFunction { lines, .. }| FrameInfo {
+            indent: 0,
+            start: lines.0,
+            end: lines.1,
+            unclosed: false,
+            kind: InstrKind::OtherStructured,
+            wide: !code
+                .info(lines.0)
+                .synthetic_before
+                .module_field_syntax
+                .is_empty(),
+        })
+        .collect();
     let mut frame_stack: Vec<OpenFrame> = Vec::new();
 
     let mut func_ops_rev = module
@@ -1375,8 +1477,9 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
             None => 0,
         };
 
+        let margined_indent = frame_indent + if frame_indent == 0 { 0 } else { FRAME_MARGIN };
         let mut instr_indent: usize = max(
-            frame_indent + FRAME_MARGIN,
+            margined_indent,
             slot_map.values().max().copied().unwrap_or(0) + 1,
         );
         let mut paren_indent_above = paren_indent;
@@ -1390,7 +1493,9 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                 Some(OpenFrame { indent, .. }) => *indent + 1,
                 None => 0,
             },
-            if paren_indent == 0 {
+            if let LineKind::Other(_) = line_kind {
+                paren_indent.try_into().unwrap()
+            } else if paren_indent == 0 {
                 0
             } else {
                 max(instr_indent, paren_indent.try_into().unwrap())
@@ -1429,7 +1534,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                             process_inputs(&mut slot_map, inputs, instr_indent, &mut frame_stack);
                             func_ops_rev.next();
                         }
-                        instr_indent += BLOCK_BOUNDARY_INDENT;
+                        instr_indent += FRAME_MARGIN;
                     }
                     InstrKind::If | InstrKind::Loop | InstrKind::OtherStructured => {
                         debug_assert!(matches!(
@@ -1443,6 +1548,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                             end: f.end,
                             unclosed: f.synthetic,
                             kind,
+                            wide: false,
                         });
                         instr_indent = f.indent + BLOCK_BOUNDARY_INDENT;
                         process_outputs(&mut slot_map, &f.slots); // clear open slots
@@ -1456,6 +1562,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                             end: f.end,
                             unclosed: f.synthetic,
                             kind,
+                            wide: false,
                         });
                         process_outputs(&mut slot_map, &f.slots); // clear open slots
                         frame_stack.push(OpenFrame {
@@ -1524,7 +1631,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                     frame_stack.push(OpenFrame {
                         end: line_no,
                         synthetic: true,
-                        indent: frame_indent + FRAME_MARGIN,
+                        indent: frame_indent + 1,
                         slots: vec![],
                     });
 
@@ -1643,7 +1750,10 @@ pub(crate) mod tests {
         }
 
         fn os(ty: ValType) -> Slot {
-            Slot(ty)
+            Slot {
+                ty: Some(ty),
+                written: true,
+            }
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
@@ -1657,7 +1767,8 @@ pub(crate) mod tests {
 
             for func in raw.functions {
                 let mut valid = ValidFunction {
-                    type_idx: 0,
+                    type_idx: func.type_idx,
+                    lines: func.lines,
                     params: func.params,
                     locals: func.locals,
                     operators: vec![],
@@ -1700,6 +1811,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                lines: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -1770,6 +1882,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                lines: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -1845,6 +1958,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                lines: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -1925,6 +2039,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                lines: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -2000,6 +2115,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
+                lines: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -2920,6 +3036,25 @@ pub(crate) mod tests {
             editor.push_line("(func");
             editor.push_line("i32.const 6");
             editor.push_line("if (param i64)");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            // invalid select
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("select");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            // unreachable select
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("unreachable");
+            editor.push_line("select");
             editor.push_line(")");
             test_editor_flow(&mut editor)?;
         }

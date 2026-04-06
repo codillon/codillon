@@ -148,6 +148,7 @@ pub struct FrameInfo {
     pub end: usize,
     pub unclosed: bool,
     pub kind: InstrKind,
+    pub wide: bool,
 }
 
 pub trait FrameInfosMut: LineInfos {
@@ -504,6 +505,7 @@ impl SyntaxState {
 
         let mut hit_initial = false;
         let mut has_local = false;
+        let mut has_result = false;
         match &info.kind {
             LineKind::Empty | LineKind::Malformed(_) => {}
             LineKind::Instr(_) => {
@@ -529,12 +531,18 @@ impl SyntaxState {
                             return Err("fields must be on separate lines");
                         }
                     }
+                    if matches!(part, ModulePart::Result) {
+                        has_result = true;
+                    }
 
                     self.transit_state_from_module_part(*part)?;
                     callback(self);
 
                     if *self == SyntaxState::Initial {
                         hit_initial = true;
+                        if has_result {
+                            return Err("function with results must end on another line");
+                        }
                     }
                 }
             }

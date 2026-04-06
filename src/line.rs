@@ -185,7 +185,9 @@ impl Component for CodeLine {
             && !reason.is_empty()
         {
             assert_eq!(comment, Some(*reason));
-        } else if let Some(reason) = &self.info.invalid {
+        } else if let Some(reason) = &self.info.invalid
+            && !reason.is_empty()
+        {
             assert_eq!(comment, Some(reason.as_str()));
         } else {
             assert_eq!(comment, None);
@@ -324,7 +326,7 @@ impl CodeLine {
             match self.info.kind {
                 LineKind::Malformed(_) => "line malformed-line",
                 LineKind::Empty => "line",
-                LineKind::Other(_) => "line meta-line",
+                LineKind::Other(_) => "line meta-line numbered-line",
                 LineKind::Instr(_) => "line instr-line numbered-line",
             }
         }
@@ -420,7 +422,9 @@ impl CodeLine {
                 .1
                 .0
                 .set_attribute("data-commentary", reason);
-        } else if let Some(reason) = &self.info.invalid {
+        } else if let Some(reason) = &self.info.invalid
+            && !reason.is_empty()
+        {
             self.contents
                 .get_mut()
                 .1
@@ -584,6 +588,10 @@ impl CodeLine {
         self.id
     }
 
+    pub fn set_id(&mut self, new_id: u32) {
+        self.id = new_id;
+    }
+
     pub fn position_to_node(&self, pos: Position) -> &DomText {
         match pos.in_instr {
             true => self.instr(),
@@ -595,10 +603,10 @@ impl CodeLine {
     pub fn set_indent(&mut self, val: usize) -> bool {
         let old_indent = self.info.indent;
         self.info.indent = Some(val.try_into().unwrap_or(u16::MAX));
-        self.contents
-            .get_mut()
-            .0
-            .set_attribute("style", &format!("margin-left: {}px;", val * INDENT_PX));
+        self.contents.get_mut().0.set_attribute(
+            "style",
+            &format!("margin-left: {}px;", (4 + val) * INDENT_PX),
+        );
 
         old_indent.is_some() && old_indent != self.info.indent && !self.all_whitespace()
     }
@@ -608,7 +616,15 @@ impl CodeLine {
     }
 
     pub fn set_invalid(&mut self, reason: Option<String>) {
-        self.info.invalid = reason;
+        if let Some(ref reason) = reason
+            && (reason.starts_with("type mismatch: expected ")
+                || reason.starts_with("type mismatch: values remaining"))
+        {
+            // ignore; UI shows visually
+            self.info.invalid = Some(String::new());
+        } else {
+            self.info.invalid = reason;
+        }
         self.conform();
     }
 
