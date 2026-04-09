@@ -810,7 +810,6 @@ impl SimulatedStack {
         validator: &mut wasmparser::FuncValidator<wasmparser::ValidatorResources>,
         slots: &mut Vec<Slot>,
         untyped: bool,
-        is_user_op: bool,
     ) -> Result<OperatorType> {
         let (pop_count, push_count) = op
             .operator_arity(&validator.visitor(DUMMY_OFFSET))
@@ -874,7 +873,6 @@ impl SimulatedStack {
                     } else {
                         validator.get_operand_type(push_count - i - 1).flatten()
                     },
-                    written: is_user_op,
                 });
                 self.slot_idx_stack.push(slots.len() - 1);
                 // XXX: advisory connection to "original" global or local slot for a {global/local}.get?
@@ -911,7 +909,6 @@ impl<'a> ValidModule<'a> {
         {
             ret.slots.push(Slot {
                 ty: Some(*content_type),
-                written: true,
             });
             ret.globals.push(SlotUse(ret.slots.len() - 1));
         }
@@ -945,17 +942,13 @@ impl<'a> ValidModule<'a> {
         for param_ty in valid_func.params.iter() {
             slots.push(Slot {
                 ty: Some(param_ty.inner),
-                written: true,
             });
             ret.params.push(SlotUse(slots.len() - 1));
         }
 
         for ty in &valid_func.locals {
             func_validator.define_locals(DUMMY_OFFSET, 1, ty.inner)?;
-            slots.push(Slot {
-                ty: Some(ty.inner),
-                written: true, // XXX deal with non-defaultable locals and local init stack in Wasm >=3
-            });
+            slots.push(Slot { ty: Some(ty.inner) });
             ret.locals.push(SlotUse(slots.len() - 1));
         }
 
@@ -963,11 +956,10 @@ impl<'a> ValidModule<'a> {
 
         for op in &valid_func.operators {
             for pre in &op.inner.prepended {
-                stack.op(pre, func_validator, slots, false, false)?;
+                stack.op(pre, func_validator, slots, false)?;
             }
 
-            let operator_ty =
-                stack.op(&op.inner.op, func_validator, slots, op.inner.untyped, true)?;
+            let operator_ty = stack.op(&op.inner.op, func_validator, slots, op.inner.untyped)?;
 
             ret.ops.push(operator_ty);
         }
@@ -1366,7 +1358,6 @@ impl<'a> ValidModule<'a> {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Slot {
     pub ty: Option<ValType>,
-    pub written: bool,
 }
 
 // A SlotUse represents any input from, or output to, a slot (identified by its global index).
@@ -1407,6 +1398,12 @@ pub struct Coordinate {
 pub struct OperandConnections {
     pub written: Vec<Option<Coordinate>>, // same index space as Slot #
     pub read: Vec<Option<Coordinate>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct SlotInfo {
+    pub slot: Slot,
+    pub used: bool,
 }
 
 pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> OperandConnections {
@@ -1820,10 +1817,7 @@ pub(crate) mod tests {
         }
 
         fn os(ty: ValType) -> Slot {
-            Slot {
-                ty: Some(ty),
-                written: true,
-            }
+            Slot { ty: Some(ty) }
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
