@@ -17,8 +17,6 @@ fn setup() -> Result<()> {
         doc.audit();
     });
 
-    web_sys::console::log_1(&"successful audit".into());
-
     Ok(())
 }
 

@@ -13,9 +13,10 @@ use crate::utils::FmtError;
 use anyhow::{Context, Result, bail};
 use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
 use std::cell::{Ref, RefCell};
+use thousands::{Separable, SeparatorPolicy};
 use wasm_bindgen::{JsCast, prelude::*};
 
-const MAX_STEP_COUNT: usize = 1_000;
+const MAX_STEP_COUNT: usize = 1_000_000;
 
 // Debug state stored in Wasm memory
 thread_local! {
@@ -52,7 +53,18 @@ impl From<f64> for WasmValue {
     }
 }
 
-#[derive(Debug, Default)]
+impl Separable for WasmValue {
+    fn separate_by_policy(&self, policy: SeparatorPolicy) -> String {
+        match self {
+            WasmValue::I32(x) => x.separate_by_policy(policy),
+            WasmValue::I64(x) => x.separate_by_policy(policy),
+            WasmValue::F32(x) => x.separate_by_policy(policy),
+            WasmValue::F64(x) => x.separate_by_policy(policy),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub enum TerminationType {
     #[default]
     Running,
@@ -84,6 +96,53 @@ pub struct ExecutionStep {
     pub slot_assignments: Vec<(u32, WasmValue)>, // slot idx, value
                                                  // XXX todo: memory
                                                  // XXX todo: canvas operations
+                                                 // XXX todo: clear any func/frame on entry
+                                                 // XXX todo: save any func on call/call_indirect, restore after
+}
+
+#[derive(Default, Debug)]
+pub struct ExecutionState {
+    pub step: usize,
+    pub slots: Vec<Option<WasmValue>>,
+    pub status: Option<(usize, TerminationType)>,
+}
+
+impl ExecutionState {
+    pub fn reset(&mut self, slot_count: usize) {
+        self.step = 0;
+        self.status = None;
+        self.slots.resize(slot_count, None);
+        for slot in self.slots.iter_mut() {
+            *slot = None;
+        }
+    }
+
+    pub fn goto_step(&mut self, target_step: usize) {
+        if self.step > target_step {
+            // XXX save checkpoints?
+            self.reset(self.slots.len());
+        }
+        with_debug_state(|state| {
+            if state.completed_steps.is_empty() {
+                return;
+            }
+            assert!(target_step < state.completed_steps.len());
+            for step in 0..=target_step {
+                for (slot_idx, value) in &state.completed_steps[step].slot_assignments {
+                    self.slots[*slot_idx as usize] = Some(*value);
+                }
+            }
+            self.step = target_step;
+            self.status = Some((
+                state.completed_steps[target_step].line_num as usize,
+                if target_step + 1 == state.completed_steps.len() {
+                    state.termination.clone()
+                } else {
+                    TerminationType::Running
+                },
+            ));
+        });
+    }
 }
 
 fn register_closure<F>(obj: &Object, name: &str, func: Closure<F>)
@@ -114,7 +173,13 @@ fn make_imports() -> Result<Object, JsValue> {
     let step_closure = Closure::wrap(Box::new(move |line_num: u32| -> bool {
         use TerminationType::*;
         STATE.with_borrow_mut(|state| {
-            state.current_step.line_num = line_num;
+            if state.termination == HitBadImport
+                && let Some(prev_step) = state.completed_steps.last()
+            {
+                state.current_step.line_num = prev_step.line_num;
+            } else {
+                state.current_step.line_num = line_num;
+            }
 
             state
                 .completed_steps
@@ -257,6 +322,12 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
                         let reason: String = r.message().into();
                         STATE.with_borrow_mut(|state| match state.termination {
                             TerminationType::Running => {
+                                if let Some(step) = state.completed_steps.last() {
+                                    state.current_step.line_num = step.line_num;
+                                    state
+                                        .completed_steps
+                                        .push(std::mem::take(&mut state.current_step));
+                                }
                                 state.termination = TerminationType::Error(reason)
                             }
                             TerminationType::HitInvalid

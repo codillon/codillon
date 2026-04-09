@@ -13,9 +13,9 @@ use std::{
 };
 use wasm_bindgen::{JsValue, closure::Closure};
 use web_sys::{
-    BeforeUnloadEvent, Element, HtmlBodyElement, HtmlElement, HtmlInputElement, InputEvent,
-    KeyboardEvent, MouseEvent, SvgAnimateElement, SvgAnimatedLength, SvgLineElement, SvgUseElement,
-    wasm_bindgen::JsCast,
+    BeforeUnloadEvent, Element, FontFaceSetLoadStatus, HtmlBodyElement, HtmlElement,
+    HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent, SvgAnimateElement, SvgAnimatedLength,
+    SvgLineElement, SvgTextElement, SvgUseElement, wasm_bindgen::JsCast,
 };
 
 // Traits that give "raw" access to an underlying node or element,
@@ -434,6 +434,24 @@ impl ElementHandle<SvgUseElement> {
     }
 }
 
+impl ElementHandle<SvgTextElement> {
+    pub fn compute_text_width(&self) -> Option<f32> {
+        if self.elem.is_connected()
+            && web_sys::window()
+                .unwrap()
+                .document()
+                .unwrap()
+                .fonts()
+                .status()
+                == FontFaceSetLoadStatus::Loaded
+        {
+            Some(self.elem.get_computed_text_length())
+        } else {
+            None
+        }
+    }
+}
+
 impl<T: AnyElement> Component for ElementHandle<T> {
     fn audit(&self) {
         for (key, value) in &self.attributes {
@@ -570,6 +588,10 @@ impl ElementFactory {
 
     pub fn svg_g(&self) -> ElementHandle<web_sys::SvggElement> {
         ElementHandle::new(self.create_svg_element("g"))
+    }
+
+    pub fn svg_text(&self) -> ElementHandle<web_sys::SvgTextElement> {
+        ElementHandle::new(self.create_svg_element("text"))
     }
 
     pub fn svg_circle(&self) -> ElementHandle<web_sys::SvgCircleElement> {

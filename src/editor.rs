@@ -3,7 +3,7 @@
 use crate::{
     action_history::{ActionHistory, Edit, Selection},
     autocomplete::Autocomplete,
-    debug::{run_binary, with_debug_state},
+    debug::{DebugState, ExecutionState, TerminationType, run_binary, with_debug_state},
     dom_canvas::DomCanvas,
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -21,8 +21,8 @@ use crate::{
         fix_syntax,
     },
     utils::{
-        FmtError, OperandConnections, OperatorType, RawModule, SlotInfo, SlotUse, TypedModule,
-        ValidModule, find_connections, indent_and_frame, str_to_binary,
+        AnnotatedOperatorType, FmtError, OperatorType, RawModule, SlotConnections, SlotInfo,
+        SlotUse, TypedModule, ValidModule, find_connections, indent_and_frame, str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -40,11 +40,11 @@ use web_sys::{BeforeUnloadEvent, HtmlDivElement, console::log_1};
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<
     (
-        DomImage,
+        ReactiveComponent<Slider>,
         (
-            ReactiveComponent<TextType>,
+            DomImage,
             (
-                ReactiveComponent<Slider>,
+                ReactiveComponent<TextType>,
                 (DomCanvas, (Autocomplete, (SaveStatus, ()))),
             ),
         ),
@@ -62,10 +62,13 @@ struct _Editor {
     factory: ElementFactory,
     action_history: ActionHistory,
     storage: Option<StorageHandle>,
-    pending_binary: Option<Vec<u8>>,
-    previous_binary_hash: u64,
+    pending_binary: Option<(Vec<u8>, usize)>,
+    previous_instrumented_binary_hash: u64,
     worker_running: bool,
     pending_save: Option<Closure<dyn Fn()>>,
+    version: usize,
+    slot_connections: SlotConnections,
+    execution_state: ExecutionState,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -75,11 +78,11 @@ impl Editor {
         let inner = _Editor {
             component: DomStruct::new(
                 (
-                    DomImage::new(factory.clone()),
+                    ReactiveComponent::new(Slider::new(factory.clone())),
                     (
-                        ReactiveComponent::new(DomVec::new(factory.div())),
+                        DomImage::new(factory.clone()),
                         (
-                            (ReactiveComponent::new(Slider::new(factory.clone()))),
+                            ReactiveComponent::new(DomVec::new(factory.div())),
                             (
                                 DomCanvas::new(factory.canvas()),
                                 (Autocomplete::new(&factory), (SaveStatus::new(&factory), ())),
@@ -93,9 +96,12 @@ impl Editor {
             action_history: ActionHistory::default(),
             storage: StorageHandle::new(),
             pending_binary: None,
-            previous_binary_hash: 0,
+            previous_instrumented_binary_hash: 0,
             worker_running: false,
             pending_save: None,
+            version: 0,
+            slot_connections: SlotConnections::default(),
+            execution_state: ExecutionState::default(),
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -139,11 +145,10 @@ impl Editor {
             let editor_ref = Rc::clone(&ret.0);
             ret.slider_mut().set_oninput(move |_| {
                 let editor = Editor(editor_ref.clone());
-                let _step = editor.slider().inner().value_as_number().round() as usize;
                 let step_count = with_debug_state(|state| state.completed_steps.len());
-                let current_step = editor.slider().inner().value_as_number() as usize;
-                editor.update_slider(step_count, current_step);
-                //                editor.build_program_state(step);
+                with_debug_state(|state| {
+                    editor.update_live_info(step_count, editor.current_step(), &state);
+                });
             });
 
             let editor = Editor(Rc::clone(&ret.0));
@@ -598,15 +603,15 @@ impl Editor {
 
     // Accessors
     fn textbox(&self) -> Ref<'_, ReactiveComponent<TextType>> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().1.0)
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
     }
 
     fn textbox_mut(&self) -> RefMut<'_, ReactiveComponent<TextType>> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
     }
 
     fn image_mut(&self) -> RefMut<'_, DomImage> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().0)
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
     }
 
     fn text(&self) -> Ref<'_, TextType> {
@@ -626,11 +631,11 @@ impl Editor {
     }
 
     fn slider(&self) -> Ref<'_, ReactiveComponent<Slider>> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
+        Ref::map(self.0.borrow(), |c| &c.component.get().0)
     }
 
     fn slider_mut(&self) -> RefMut<'_, ReactiveComponent<Slider>> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().0)
     }
 
     fn autocomplete(&self) -> Ref<'_, Autocomplete> {
@@ -651,6 +656,18 @@ impl Editor {
         RefMut::map(self.0.borrow_mut(), |c| {
             &mut c.component.get_mut().1.1.1.1.1.0
         })
+    }
+
+    fn slot_connections(&self) -> Ref<'_, SlotConnections> {
+        Ref::map(self.0.borrow(), |c| &c.slot_connections)
+    }
+
+    fn slot_connections_mut(&mut self) -> RefMut<'_, SlotConnections> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.slot_connections)
+    }
+
+    fn execution_state_mut(&self) -> RefMut<'_, ExecutionState> {
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.execution_state)
     }
 
     // get the user-entered text buffer (doesn't include synthetic Wasm)
@@ -675,7 +692,6 @@ impl Editor {
         fix_syntax(self);
 
         let wasm_bin = str_to_binary(self.active_as_text().join(" "))?;
-        let binary_hash = Self::hash_binary(&wasm_bin);
         let raw_module = RawModule::new(self, &wasm_bin)?;
         let validized = raw_module.fix_validity(self, &wasm_bin)?;
         let types = validized.to_types_table(&wasm_bin)?;
@@ -684,15 +700,26 @@ impl Editor {
         indent_and_frame(self, &validized, &types);
 
         // update visual types of params, locals, and operators
-        self.update_displayed_types(&validized, &types, find_connections(&validized, &types))?;
+        *self.slot_connections_mut() = find_connections(&validized, &types);
+        self.update_displayed_types(&validized, &types)?;
 
         // instrumentation
-        let binary_changed = self.0.borrow().previous_binary_hash != binary_hash;
-        self.execute(
-            &validized.build_instrumented_binary(&types)?,
-            binary_changed,
-        );
-        self.0.borrow_mut().previous_binary_hash = binary_hash;
+        let instrumented_binary = &validized.build_instrumented_binary(&types)?;
+        let instrumented_binary_hash = Self::hash_binary(instrumented_binary);
+        if self.0.borrow().previous_instrumented_binary_hash != instrumented_binary_hash {
+            self.0.borrow_mut().version += 1;
+            let version = self.0.borrow().version;
+            self.execute(instrumented_binary, version);
+            self.0.borrow_mut().previous_instrumented_binary_hash = instrumented_binary_hash;
+        } else {
+            with_debug_state(|state| {
+                let step_count = state.completed_steps.len();
+                if step_count > 0 {
+                    self.update_live_info(step_count, self.current_step(), &state);
+                }
+            });
+        }
+
         self.schedule_save(); // schedule save to local storage
 
         #[cfg(debug_assertions)]
@@ -705,7 +732,6 @@ impl Editor {
         &mut self,
         validized: &ValidModule<'a>,
         types: &TypedModule,
-        connections: OperandConnections,
     ) -> Result<()> {
         // set types
         let line_count = self.len();
@@ -721,11 +747,13 @@ impl Editor {
             self.image_mut().set_type(
                 global.line_idx,
                 0,
-                vec![],
-                vec![SlotInfo {
-                    slot: types.slots[global_type.0].clone(),
-                    used: true,
-                }],
+                AnnotatedOperatorType {
+                    inputs: vec![],
+                    outputs: vec![SlotInfo {
+                        slot: types.slots[global_type.0].clone(),
+                        used: true,
+                    }],
+                },
             );
             last_line_no = global.line_idx + 1;
         }
@@ -749,8 +777,14 @@ impl Editor {
                         })
                     })
                     .collect();
-                self.image_mut()
-                    .set_type(start_line, 0, param_types, vec![]);
+                self.image_mut().set_type(
+                    start_line,
+                    0,
+                    AnnotatedOperatorType {
+                        inputs: param_types,
+                        outputs: vec![],
+                    },
+                );
                 last_line_no = start_line + 1;
             }
 
@@ -777,14 +811,16 @@ impl Editor {
                             self.image_mut().set_type(
                                 line_idx,
                                 indent,
-                                vec![],
-                                local_slots
-                                    .iter()
-                                    .map(|x| SlotInfo {
-                                        slot: types.slots[*x].clone(),
-                                        used: true,
-                                    })
-                                    .collect(),
+                                AnnotatedOperatorType {
+                                    inputs: vec![],
+                                    outputs: local_slots
+                                        .iter()
+                                        .map(|x| SlotInfo {
+                                            slot: types.slots[*x].clone(),
+                                            used: true,
+                                        })
+                                        .collect(),
+                                },
                             );
 
                             local_line_idx = Some(local.line_idx);
@@ -805,14 +841,16 @@ impl Editor {
                     self.image_mut().set_type(
                         local_line_idx,
                         indent,
-                        vec![],
-                        local_slots
-                            .iter()
-                            .map(|x| SlotInfo {
-                                slot: types.slots[*x].clone(),
-                                used: true,
-                            })
-                            .collect(),
+                        AnnotatedOperatorType {
+                            inputs: vec![],
+                            outputs: local_slots
+                                .iter()
+                                .map(|x| SlotInfo {
+                                    slot: types.slots[*x].clone(),
+                                    used: true,
+                                })
+                                .collect(),
+                        },
                     );
                     last_line_no = local_line_idx + 1;
                 }
@@ -826,23 +864,23 @@ impl Editor {
                     self.image_mut().clear_type(last_line_no);
                     last_line_no += 1;
                 }
-                let in_tys: Vec<Option<SlotInfo>> = inputs
+                let inputs: Vec<Option<SlotInfo>> = inputs
                     .iter()
                     .map(|x| {
                         x.as_ref().map(|SlotUse(y)| SlotInfo {
                             slot: types.slots[*y].clone(),
-                            used: connections.written[*y].is_some(),
+                            used: self.slot_connections().written[*y].is_some(),
                         })
                     })
                     .collect();
                 let mut all_used = true;
-                let out_tys: Vec<SlotInfo> = outputs
+                let outputs: Vec<SlotInfo> = outputs
                     .iter()
                     .map(|SlotUse(x)| SlotInfo {
                         slot: types.slots[*x].clone(),
                         used: {
-                            let is_used =
-                                i + 1 == func.operators.len() || connections.read[*x].is_some();
+                            let is_used = i + 1 == func.operators.len()
+                                || self.slot_connections().read[*x].is_some();
                             all_used &= is_used;
                             is_used
                         },
@@ -861,8 +899,11 @@ impl Editor {
                         bail!("unexpected non-empty end op on same line as function start");
                     }
                 } else {
-                    self.image_mut()
-                        .set_type(op.line_idx, indent, in_tys, out_tys);
+                    self.image_mut().set_type(
+                        op.line_idx,
+                        indent,
+                        AnnotatedOperatorType { inputs, outputs },
+                    );
                 }
 
                 last_line_no = op.line_idx + 1;
@@ -872,7 +913,13 @@ impl Editor {
             self.image_mut().clear_type(i);
         }
 
-        self.image_mut().set_connections(connections);
+        let editor_ref = &mut *self.0.borrow_mut();
+        editor_ref
+            .component
+            .get_mut()
+            .1
+            .0
+            .set_connections(&editor_ref.slot_connections);
         Ok(())
     }
 
@@ -919,85 +966,49 @@ impl Editor {
         self.0.borrow_mut().pending_save = Some(closure);
     }
 
-    fn execute(&self, binary: &[u8], binary_changed: bool) {
+    fn execute(&self, binary: &[u8], version: usize) {
         let inner = Rc::clone(&self.0);
-        inner.borrow_mut().pending_binary = Some(binary.to_vec());
+        inner.borrow_mut().pending_binary = Some((binary.to_vec(), version));
         if inner.borrow().worker_running {
             return;
         }
         inner.borrow_mut().worker_running = true;
         wasm_bindgen_futures::spawn_local(async move {
             loop {
-                let Some(binary) = inner.borrow_mut().pending_binary.take() else {
+                let Some((binary, version)) = inner.borrow_mut().pending_binary.take() else {
                     break;
                 };
                 run_binary(&binary)
                     .await
                     .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
+
                 let editor_handle = Editor(Rc::clone(&inner));
-                // print out steps for debugging
-                // XXX: render in UI
+
+                if version != editor_handle.0.borrow().version {
+                    continue;
+                }
 
                 with_debug_state(|state| {
-                    use crate::debug::TerminationType::*;
-                    log_1(
-                        &format!(
-                            "terminated after {} steps with status {:?}",
-                            state.completed_steps.len(),
-                            state.termination
-                        )
-                        .into(),
-                    );
-
                     let step_count = state.completed_steps.len();
-                    if step_count > 1 {
-                        editor_handle.update_slider(step_count, step_count - 1);
-                        // Move slider to the end if binary changed
-                        if binary_changed {
-                            editor_handle
-                                .slider_mut()
-                                .inner_mut()
-                                .set_value_as_number(step_count as f64 - 1.0);
+                    let mut slider_step = editor_handle.current_step();
+                    // Move slider to the end if binary changed and it's in the middle
+                    if step_count == 0 {
+                        editor_handle.slider_mut().inner_mut().hide();
+                        return;
+                    }
+
+                    if editor_handle.slider().inner().is_visible() {
+                        if slider_step != 0 {
+                            slider_step = step_count - 1;
                         }
                     } else {
-                        editor_handle.update_slider(step_count, 0);
+                        slider_step = step_count - 1;
                     }
 
-                    match &state.termination {
-                        Running => log_1(
-                            &"abnormal exit (still running, maybe from an unhandled return value)"
-                                .into(),
-                        ),
-                        TooManySteps | Success => {}
-                        HitInvalid => log_1(
-                            &format!(
-                                "hit invalid @ line #{}",
-                                state.completed_steps.last().unwrap().line_num
-                            )
-                            .into(),
-                        ),
-                        HitBadImport => log_1(
-                            &format!(
-                                "hit bad import @ line #{}",
-                                state.completed_steps.iter().rev().nth(1).unwrap().line_num
-                            )
-                            .into(),
-                        ),
-                        Error(reason) => log_1(
-                            &format!(
-                                "hit error {} @ line #{}",
-                                reason,
-                                state.completed_steps.last().unwrap().line_num
-                            )
-                            .into(),
-                        ),
-                    }
-
-                    /*
-                            for (i, step) in state.completed_steps.iter().enumerate() {
-                                log_1(&format!("step #{i}: {:?}", step).into());
-                        }
-                    */
+                    let slot_count = editor_handle.slot_connections().written.len();
+                    editor_handle.execution_state_mut().reset(slot_count);
+                    editor_handle.update_live_info(step_count, slider_step, &state);
+                    editor_handle.move_slider(slider_step);
                 });
             }
             inner.borrow_mut().worker_running = false;
@@ -1011,14 +1022,95 @@ impl Editor {
         hasher.finish()
     }
 
-    fn update_slider(&self, step_count: usize, current_step: usize) {
+    fn current_step(&self) -> usize {
+        self.slider().inner().value_as_number().round() as usize
+    }
+
+    fn move_slider(&self, current_step: usize) {
+        self.slider_mut()
+            .inner_mut()
+            .set_value_as_number(current_step as f64);
+    }
+
+    fn update_live_info(&self, step_count: usize, current_step: usize, debug_state: &DebugState) {
+        assert!(step_count > 0);
         if step_count > 1 {
             self.slider_mut().inner_mut().show();
-            self.slider_mut()
-                .inner_mut()
-                .build_ticks(step_count - 1, current_step);
+            self.slider_mut().inner_mut().build_ticks(
+                step_count - 1,
+                current_step,
+                &debug_state.termination,
+            );
         } else {
             self.slider_mut().inner_mut().hide();
+        }
+
+        fn find_error(state: &ExecutionState) -> Option<(usize, &str)> {
+            Some(match &state.status {
+                Some((line_no, TerminationType::Error(msg))) => (*line_no, msg),
+                Some((line_no, TerminationType::HitBadImport)) => {
+                    (*line_no, "called unknown import")
+                }
+                _ => return None,
+            })
+        }
+
+        let editor_ref = &mut *self.0.borrow_mut();
+
+        // clear runtime error
+        if let Some((line_no, _)) = find_error(&editor_ref.execution_state) {
+            editor_ref
+                .component
+                .get_mut()
+                .1
+                .1
+                .0
+                .inner_mut()
+                .get_mut(line_no)
+                .unwrap()
+                .set_runtime_error(None);
+        };
+
+        // compute the state for the desired step
+        editor_ref.execution_state.goto_step(current_step);
+        Self::update_slots(editor_ref);
+
+        // display runtime error (and HitBadImport)
+        if let Some((line_no, msg)) = find_error(&editor_ref.execution_state) {
+            editor_ref
+                .component
+                .get_mut()
+                .1
+                .1
+                .0
+                .inner_mut()
+                .get_mut(line_no)
+                .unwrap()
+                .set_runtime_error(Some(msg.to_string()));
+        }
+    }
+
+    fn update_slots(editor_ref: &mut _Editor) {
+        for (slot_idx, value) in editor_ref.execution_state.slots.iter().enumerate() {
+            let where_written = &editor_ref.slot_connections.written[slot_idx];
+            if let Some(coord) = where_written {
+                editor_ref
+                    .component
+                    .get_mut()
+                    .1
+                    .0
+                    .set_slot_value(coord, false, value);
+            }
+
+            let where_read = &editor_ref.slot_connections.read[slot_idx];
+            if let Some(coord) = where_read {
+                editor_ref
+                    .component
+                    .get_mut()
+                    .1
+                    .0
+                    .set_slot_value(coord, true, value);
+            }
         }
     }
 
@@ -1195,6 +1287,10 @@ impl LineInfosMut for Editor {
 
     fn set_invalid(&mut self, index: usize, reason: Option<String>) {
         self.line_mut(index).set_invalid(reason)
+    }
+
+    fn set_runtime_error(&mut self, index: usize, msg: Option<String>) {
+        self.line_mut(index).set_runtime_error(msg)
     }
 }
 

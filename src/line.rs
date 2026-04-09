@@ -42,6 +42,7 @@ pub struct LineInfo {
     pub indent: Option<u16>,
     pub synthetic_before: SyntheticWasm,
     pub invalid: Option<String>,
+    pub runtime_error: Option<String>,
     pub symbols: LineSymbols,
 }
 
@@ -179,7 +180,11 @@ impl Component for CodeLine {
         assert_eq!(self.info.kind, parse_line(self.instr().get()));
         assert_eq!(self.contents.get_attribute("class").unwrap(), &self.class());
         let comment = self.contents.get().1.0.get_attribute("data-commentary");
-        if let LineKind::Malformed(reason) = &self.info.kind {
+        if let Some(msg) = &self.info.runtime_error
+            && !msg.is_empty()
+        {
+            assert_eq!(comment, Some(msg.as_str()));
+        } else if let LineKind::Malformed(reason) = &self.info.kind {
             assert_eq!(comment, Some(reason.as_str()));
         } else if let Activity::Inactive(reason) = &self.info.active
             && !reason.is_empty()
@@ -318,7 +323,9 @@ impl CodeLine {
     }
 
     fn class(&self) -> String {
-        let prefix = if !self.info.is_active() {
+        let prefix = if self.info.runtime_error.is_some() {
+            "line runtime-error-line"
+        } else if !self.info.is_active() {
             "line malformed-line"
         } else if self.info.invalid.is_some() {
             "line invalid-line"
@@ -408,7 +415,15 @@ impl CodeLine {
     // Make the element presentation (CSS class) match the status.
     // This needs to happen when the active status changes.
     fn conform(&mut self) {
-        if let LineKind::Malformed(reason) = &self.info.kind {
+        if let Some(msg) = &self.info.runtime_error
+            && !msg.is_empty()
+        {
+            self.contents
+                .get_mut()
+                .1
+                .0
+                .set_attribute("data-commentary", msg);
+        } else if let LineKind::Malformed(reason) = &self.info.kind {
             self.contents
                 .get_mut()
                 .1
@@ -625,6 +640,11 @@ impl CodeLine {
         } else {
             self.info.invalid = reason;
         }
+        self.conform();
+    }
+
+    pub fn set_runtime_error(&mut self, msg: Option<String>) {
+        self.info.runtime_error = msg;
         self.conform();
     }
 
