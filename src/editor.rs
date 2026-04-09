@@ -3,7 +3,7 @@
 use crate::{
     action_history::{ActionHistory, Edit, Selection},
     autocomplete::Autocomplete,
-    debug::{run_binary, with_debug_state},
+    debug::{TerminationType, run_binary, with_debug_state},
     dom_canvas::DomCanvas,
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -21,8 +21,8 @@ use crate::{
         fix_syntax,
     },
     utils::{
-        FmtError, OperandConnections, OperatorType, RawModule, SlotInfo, SlotUse, TypedModule,
-        ValidModule, find_connections, indent_and_frame, str_to_binary,
+        AnnotatedOperatorType, FmtError, OperandConnections, OperatorType, RawModule, SlotInfo,
+        SlotUse, TypedModule, ValidModule, find_connections, indent_and_frame, str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -40,11 +40,11 @@ use web_sys::{BeforeUnloadEvent, HtmlDivElement, console::log_1};
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<
     (
-        DomImage,
+        ReactiveComponent<Slider>,
         (
-            ReactiveComponent<TextType>,
+            DomImage,
             (
-                ReactiveComponent<Slider>,
+                ReactiveComponent<TextType>,
                 (DomCanvas, (Autocomplete, (SaveStatus, ()))),
             ),
         ),
@@ -75,11 +75,11 @@ impl Editor {
         let inner = _Editor {
             component: DomStruct::new(
                 (
-                    DomImage::new(factory.clone()),
+                    ReactiveComponent::new(Slider::new(factory.clone())),
                     (
-                        ReactiveComponent::new(DomVec::new(factory.div())),
+                        DomImage::new(factory.clone()),
                         (
-                            (ReactiveComponent::new(Slider::new(factory.clone()))),
+                            ReactiveComponent::new(DomVec::new(factory.div())),
                             (
                                 DomCanvas::new(factory.canvas()),
                                 (Autocomplete::new(&factory), (SaveStatus::new(&factory), ())),
@@ -142,7 +142,9 @@ impl Editor {
                 let _step = editor.slider().inner().value_as_number().round() as usize;
                 let step_count = with_debug_state(|state| state.completed_steps.len());
                 let current_step = editor.slider().inner().value_as_number() as usize;
-                editor.update_slider(step_count, current_step);
+                with_debug_state(|state| {
+                    editor.update_slider(step_count, current_step, &state.termination);
+                });
                 //                editor.build_program_state(step);
             });
 
@@ -598,15 +600,15 @@ impl Editor {
 
     // Accessors
     fn textbox(&self) -> Ref<'_, ReactiveComponent<TextType>> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().1.0)
+        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
     }
 
     fn textbox_mut(&self) -> RefMut<'_, ReactiveComponent<TextType>> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
     }
 
     fn image_mut(&self) -> RefMut<'_, DomImage> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().0)
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
     }
 
     fn text(&self) -> Ref<'_, TextType> {
@@ -626,11 +628,11 @@ impl Editor {
     }
 
     fn slider(&self) -> Ref<'_, ReactiveComponent<Slider>> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
+        Ref::map(self.0.borrow(), |c| &c.component.get().0)
     }
 
     fn slider_mut(&self) -> RefMut<'_, ReactiveComponent<Slider>> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
+        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().0)
     }
 
     fn autocomplete(&self) -> Ref<'_, Autocomplete> {
@@ -721,11 +723,13 @@ impl Editor {
             self.image_mut().set_type(
                 global.line_idx,
                 0,
-                vec![],
-                vec![SlotInfo {
-                    slot: types.slots[global_type.0].clone(),
-                    used: true,
-                }],
+                AnnotatedOperatorType {
+                    inputs: vec![],
+                    outputs: vec![SlotInfo {
+                        slot: types.slots[global_type.0].clone(),
+                        used: true,
+                    }],
+                },
             );
             last_line_no = global.line_idx + 1;
         }
@@ -749,8 +753,14 @@ impl Editor {
                         })
                     })
                     .collect();
-                self.image_mut()
-                    .set_type(start_line, 0, param_types, vec![]);
+                self.image_mut().set_type(
+                    start_line,
+                    0,
+                    AnnotatedOperatorType {
+                        inputs: param_types,
+                        outputs: vec![],
+                    },
+                );
                 last_line_no = start_line + 1;
             }
 
@@ -777,14 +787,16 @@ impl Editor {
                             self.image_mut().set_type(
                                 line_idx,
                                 indent,
-                                vec![],
-                                local_slots
-                                    .iter()
-                                    .map(|x| SlotInfo {
-                                        slot: types.slots[*x].clone(),
-                                        used: true,
-                                    })
-                                    .collect(),
+                                AnnotatedOperatorType {
+                                    inputs: vec![],
+                                    outputs: local_slots
+                                        .iter()
+                                        .map(|x| SlotInfo {
+                                            slot: types.slots[*x].clone(),
+                                            used: true,
+                                        })
+                                        .collect(),
+                                },
                             );
 
                             local_line_idx = Some(local.line_idx);
@@ -805,14 +817,16 @@ impl Editor {
                     self.image_mut().set_type(
                         local_line_idx,
                         indent,
-                        vec![],
-                        local_slots
-                            .iter()
-                            .map(|x| SlotInfo {
-                                slot: types.slots[*x].clone(),
-                                used: true,
-                            })
-                            .collect(),
+                        AnnotatedOperatorType {
+                            inputs: vec![],
+                            outputs: local_slots
+                                .iter()
+                                .map(|x| SlotInfo {
+                                    slot: types.slots[*x].clone(),
+                                    used: true,
+                                })
+                                .collect(),
+                        },
                     );
                     last_line_no = local_line_idx + 1;
                 }
@@ -826,7 +840,7 @@ impl Editor {
                     self.image_mut().clear_type(last_line_no);
                     last_line_no += 1;
                 }
-                let in_tys: Vec<Option<SlotInfo>> = inputs
+                let inputs: Vec<Option<SlotInfo>> = inputs
                     .iter()
                     .map(|x| {
                         x.as_ref().map(|SlotUse(y)| SlotInfo {
@@ -836,7 +850,7 @@ impl Editor {
                     })
                     .collect();
                 let mut all_used = true;
-                let out_tys: Vec<SlotInfo> = outputs
+                let outputs: Vec<SlotInfo> = outputs
                     .iter()
                     .map(|SlotUse(x)| SlotInfo {
                         slot: types.slots[*x].clone(),
@@ -861,8 +875,11 @@ impl Editor {
                         bail!("unexpected non-empty end op on same line as function start");
                     }
                 } else {
-                    self.image_mut()
-                        .set_type(op.line_idx, indent, in_tys, out_tys);
+                    self.image_mut().set_type(
+                        op.line_idx,
+                        indent,
+                        AnnotatedOperatorType { inputs, outputs },
+                    );
                 }
 
                 last_line_no = op.line_idx + 1;
@@ -935,8 +952,6 @@ impl Editor {
                     .await
                     .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
                 let editor_handle = Editor(Rc::clone(&inner));
-                // print out steps for debugging
-                // XXX: render in UI
 
                 with_debug_state(|state| {
                     use crate::debug::TerminationType::*;
@@ -948,20 +963,6 @@ impl Editor {
                         )
                         .into(),
                     );
-
-                    let step_count = state.completed_steps.len();
-                    if step_count > 1 {
-                        editor_handle.update_slider(step_count, step_count - 1);
-                        // Move slider to the end if binary changed
-                        if binary_changed {
-                            editor_handle
-                                .slider_mut()
-                                .inner_mut()
-                                .set_value_as_number(step_count as f64 - 1.0);
-                        }
-                    } else {
-                        editor_handle.update_slider(step_count, 0);
-                    }
 
                     match &state.termination {
                         Running => log_1(
@@ -993,6 +994,21 @@ impl Editor {
                         ),
                     }
 
+                    let step_count = state.completed_steps.len();
+                    if step_count > 1 {
+                        editor_handle.update_slider(step_count, step_count - 1, &state.termination);
+                        // Move slider to the end if binary changed and it's in the middle
+                        if binary_changed && editor_handle.slider().inner().value_as_number() != 0.0
+                        {
+                            editor_handle
+                                .slider_mut()
+                                .inner_mut()
+                                .set_value_as_number(step_count as f64 - 1.0);
+                        }
+                    } else {
+                        editor_handle.update_slider(step_count, 0, &state.termination);
+                    }
+
                     /*
                             for (i, step) in state.completed_steps.iter().enumerate() {
                                 log_1(&format!("step #{i}: {:?}", step).into());
@@ -1011,12 +1027,12 @@ impl Editor {
         hasher.finish()
     }
 
-    fn update_slider(&self, step_count: usize, current_step: usize) {
+    fn update_slider(&self, step_count: usize, current_step: usize, termination: &TerminationType) {
         if step_count > 1 {
             self.slider_mut().inner_mut().show();
             self.slider_mut()
                 .inner_mut()
-                .build_ticks(step_count - 1, current_step);
+                .build_ticks(step_count - 1, current_step, termination);
         } else {
             self.slider_mut().inner_mut().hide();
         }

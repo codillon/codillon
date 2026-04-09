@@ -3,12 +3,13 @@
 
 use crate::{
     dom_struct::DomStruct,
+    dom_text::DomText,
     dom_vec::DomVec,
     editor::LINE_SPACING,
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement, now_ms},
     line::INDENT_PX,
     syntax::{FrameInfo, InstrKind},
-    utils::{BLOCK_BOUNDARY_INDENT, OperandConnections, SlotInfo},
+    utils::{AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, OperandConnections, SlotInfo},
 };
 use anyhow::Result;
 use delegate::delegate;
@@ -17,8 +18,8 @@ use palette::{Mix, Srgb};
 use std::{collections::HashMap, str::FromStr};
 use wasmparser::ValType;
 use web_sys::{
-    SvgAnimateElement, SvgDefsElement, SvgElement, SvgLineElement, SvgPathElement, SvgUseElement,
-    SvggElement,
+    SvgAnimateElement, SvgDefsElement, SvgElement, SvgLineElement, SvgPathElement, SvgTextElement,
+    SvgUseElement, SvggElement,
 };
 
 const SYM_HW: f32 = 15.0;
@@ -900,13 +901,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    pub fn set_type(
-        &mut self,
-        line_no: usize,
-        indent: u16,
-        input_types: Vec<Option<SlotInfo>>,
-        output_types: Vec<SlotInfo>,
-    ) {
+    pub fn set_type(&mut self, line_no: usize, indent: u16, ty: AnnotatedOperatorType) {
         self.make_height_at_least(line_no + 2);
         self.make_width_at_least(indent as usize);
 
@@ -917,7 +912,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             .0
             .get_mut(line_no)
             .unwrap()
-            .draw(&self.factory, line_no, indent, input_types, output_types);
+            .draw(&self.factory, line_no, indent, ty.inputs, ty.outputs);
     }
 
     pub fn set_type_count(&mut self, count: usize) {
@@ -996,7 +991,16 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
     }
 }
 
-type FractionVec = DomVec<ElementHandle<SvgUseElement>, SvggElement>;
+type FractionVec = DomVec<
+    DomStruct<
+        (
+            ElementHandle<SvgUseElement>,
+            (DomStruct<(DomText, ()), SvgTextElement>, ()),
+        ),
+        SvggElement,
+    >,
+    SvggElement,
+>;
 type SymbolsType = DomStruct<(FractionVec, (FractionVec, ())), SvggElement>;
 
 struct FractionCache {
@@ -1074,18 +1078,31 @@ impl OperatorFraction {
             return;
         }
 
+        let make_symbol = || {
+            DomStruct::new(
+                (
+                    factory.svg_use(),
+                    (
+                        DomStruct::new((DomText::new(""), ()), factory.svg_text()),
+                        (),
+                    ),
+                ),
+                factory.svg_g(),
+            )
+        };
+
         let in_len = input_types.len() as i32;
         let out_len = output_types.len() as i32;
         self.inputs().truncate(input_types.len());
         while self.inputs().len() < input_types.len() {
-            self.inputs().push(factory.svg_use());
+            self.inputs().push(make_symbol());
         }
 
         let num_stranded: usize = output_types.iter().map(|ty| !ty.used as usize).sum();
 
         self.outputs().truncate(output_types.len() + num_stranded);
         while self.outputs().len() < output_types.len() + num_stranded {
-            self.outputs().push(factory.svg_use());
+            self.outputs().push(make_symbol());
         }
         self.input_locations_and_scales.clear();
         self.output_locations_and_types.clear();
@@ -1138,7 +1155,7 @@ impl OperatorFraction {
         }
 
         for (i, ty) in input_types.iter().enumerate() {
-            let sym = &mut self.inputs().get_mut(i).unwrap();
+            let sym = &mut self.inputs()[i].get_mut().0;
             let x = left_edge_in + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &render(ty.as_ref(), true));
@@ -1152,14 +1169,14 @@ impl OperatorFraction {
             .sum();
 
         for (i, ty) in output_types.iter().enumerate().take(num_stranded) {
-            let sym = &mut self.outputs().get_mut(i).unwrap();
+            let sym = &mut self.outputs()[i].get_mut().0;
             let x = left_edge_out + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &(render(Some(ty), false) + "_stranded"));
         }
 
         for (i, ty) in output_types.iter().enumerate() {
-            let sym = &mut self.outputs().get_mut(num_stranded + i).unwrap();
+            let sym = &mut self.outputs()[num_stranded + i].get_mut().0;
             let x = left_edge_out + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &render(Some(ty), false));

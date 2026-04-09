@@ -211,25 +211,27 @@ span.debug[data-debug]::after {
 
 .annotations {
     position: absolute;
+    overflow: visible;
 }
 
 .graph-canvas {
-    background-color: #fff;
     display: block; 
-    border: 1px solid darkred;
     margin-left: auto;
     margin-right: auto;
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
 }
 
 .step-slider {
     width: 100%;
     margin: 0;
-    accent-color: darkred;
+    accent-color: darkblue;
 }
 
 .slider-ticks {
     position: relative;
-    height: 20px;
+    height: 30px;
     margin: 0 8px;
 }
 
@@ -242,8 +244,32 @@ span.debug[data-debug]::after {
 .slider-tick {
     position: absolute;
     transform: translateX(-50%);
-    color: darkred;
-    font-size: 12pt;
+    color: darkblue;
+    font-size: 11pt;
+
+    background-color: #fffff0;
+}
+
+.bad-slider-tick {
+    color: white;
+    background-color: darkred;
+    border-radius: 10px;
+    padding-left: 5px;
+    padding-right: 5px;
+    font-size: 14pt;
+
+
+    line-height: normal;
+    vertical-align: middle;
+}
+
+.current-slider-tick {
+    color: white;
+    background-color: darkblue;
+    border-radius: 10px;
+    padding-left: 5px;
+    padding-right: 5px;
+    font-size: 14pt;
 }
 
 .slider-container {

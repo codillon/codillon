@@ -572,6 +572,10 @@ impl ElementFactory {
         ElementHandle::new(self.create_svg_element("g"))
     }
 
+    pub fn svg_text(&self) -> ElementHandle<web_sys::SvgTextElement> {
+        ElementHandle::new(self.create_svg_element("text"))
+    }
+
     pub fn svg_circle(&self) -> ElementHandle<web_sys::SvgCircleElement> {
         ElementHandle::new(self.create_svg_element("circle"))
     }

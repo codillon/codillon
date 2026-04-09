@@ -1406,6 +1406,12 @@ pub struct SlotInfo {
     pub used: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct AnnotatedOperatorType {
+    pub inputs: Vec<Option<SlotInfo>>,
+    pub outputs: Vec<SlotInfo>,
+}
+
 pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> OperandConnections {
     let mut cx = OperandConnections {
         written: vec![None; tys.slots.len()],

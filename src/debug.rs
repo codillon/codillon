@@ -84,6 +84,8 @@ pub struct ExecutionStep {
     pub slot_assignments: Vec<(u32, WasmValue)>, // slot idx, value
                                                  // XXX todo: memory
                                                  // XXX todo: canvas operations
+                                                 // XXX todo: clear any func/frame on entry
+                                                 // XXX todo: save any func on call/call_indirect, restore after
 }
 
 fn register_closure<F>(obj: &Object, name: &str, func: Closure<F>)
