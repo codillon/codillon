@@ -21,8 +21,8 @@ use crate::{
         fix_syntax,
     },
     utils::{
-        FmtError, OperatorType, RawModule, Slot, SlotUse, TypedModule, ValidModule,
-        find_connections, indent_and_frame, str_to_binary,
+        FmtError, OperandConnections, OperatorType, RawModule, SlotInfo, SlotUse, TypedModule,
+        ValidModule, find_connections, indent_and_frame, str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -684,11 +684,7 @@ impl Editor {
         indent_and_frame(self, &validized, &types);
 
         // update visual types of params, locals, and operators
-        self.update_displayed_types(&validized, &types)?;
-
-        // make connections
-        self.image_mut()
-            .set_connections(find_connections(&validized, &types));
+        self.update_displayed_types(&validized, &types, find_connections(&validized, &types))?;
 
         // instrumentation
         let binary_changed = self.0.borrow().previous_binary_hash != binary_hash;
@@ -709,11 +705,31 @@ impl Editor {
         &mut self,
         validized: &ValidModule<'a>,
         types: &TypedModule,
+        connections: OperandConnections,
     ) -> Result<()> {
         // set types
         let line_count = self.len();
         self.image_mut().set_type_count(line_count);
         let mut last_line_no = 0;
+        // set types of globals
+        for (global, global_type) in zip_eq(&validized.globals, &types.globals) {
+            while last_line_no < global.line_idx {
+                self.image_mut().clear_type(last_line_no);
+                last_line_no += 1;
+            }
+
+            self.image_mut().set_type(
+                global.line_idx,
+                0,
+                vec![],
+                vec![SlotInfo {
+                    slot: types.slots[global_type.0].clone(),
+                    used: true,
+                }],
+            );
+            last_line_no = global.line_idx + 1;
+        }
+
         for (func, func_types) in zip_eq(&validized.functions, &types.funcs) {
             // set types of params
             let start_line = func.lines.0;
@@ -723,10 +739,15 @@ impl Editor {
             }
 
             if !func_types.params.is_empty() {
-                let param_types: Vec<Option<Slot>> = func_types
+                let param_types: Vec<Option<SlotInfo>> = func_types
                     .params
                     .iter()
-                    .map(|SlotUse(x)| Some(types.slots[*x].clone()))
+                    .map(|SlotUse(x)| {
+                        Some(SlotInfo {
+                            slot: types.slots[*x].clone(),
+                            used: true,
+                        })
+                    })
                     .collect();
                 self.image_mut()
                     .set_type(start_line, 0, param_types, vec![]);
@@ -759,7 +780,10 @@ impl Editor {
                                 vec![],
                                 local_slots
                                     .iter()
-                                    .map(|x| types.slots[*x].clone())
+                                    .map(|x| SlotInfo {
+                                        slot: types.slots[*x].clone(),
+                                        used: true,
+                                    })
                                     .collect(),
                             );
 
@@ -784,7 +808,10 @@ impl Editor {
                         vec![],
                         local_slots
                             .iter()
-                            .map(|x| types.slots[*x].clone())
+                            .map(|x| SlotInfo {
+                                slot: types.slots[*x].clone(),
+                                used: true,
+                            })
                             .collect(),
                     );
                     last_line_no = local_line_idx + 1;
@@ -792,19 +819,39 @@ impl Editor {
             }
 
             // set types of ops
-            for (op, OperatorType { inputs, outputs }) in zip_eq(&func.operators, &func_types.ops) {
+            for (i, (op, OperatorType { inputs, outputs })) in
+                zip_eq(&func.operators, &func_types.ops).enumerate()
+            {
                 while last_line_no < op.line_idx {
                     self.image_mut().clear_type(last_line_no);
                     last_line_no += 1;
                 }
-                let in_tys: Vec<Option<Slot>> = inputs
+                let in_tys: Vec<Option<SlotInfo>> = inputs
                     .iter()
-                    .map(|x| x.as_ref().map(|SlotUse(y)| types.slots[*y].clone()))
+                    .map(|x| {
+                        x.as_ref().map(|SlotUse(y)| SlotInfo {
+                            slot: types.slots[*y].clone(),
+                            used: connections.written[*y].is_some(),
+                        })
+                    })
                     .collect();
-                let out_tys: Vec<Slot> = outputs
+                let mut all_used = true;
+                let out_tys: Vec<SlotInfo> = outputs
                     .iter()
-                    .map(|SlotUse(x)| types.slots[*x].clone())
+                    .map(|SlotUse(x)| SlotInfo {
+                        slot: types.slots[*x].clone(),
+                        used: {
+                            let is_used =
+                                i + 1 == func.operators.len() || connections.read[*x].is_some();
+                            all_used &= is_used;
+                            is_used
+                        },
+                    })
                     .collect();
+
+                if !all_used && self.info(op.line_idx).invalid.is_none() {
+                    self.line_mut(op.line_idx).set_invalid(Some(String::new()));
+                }
 
                 let indent = self.info(op.line_idx).indent.unwrap_or(0);
 
@@ -824,6 +871,8 @@ impl Editor {
         for i in last_line_no..line_count {
             self.image_mut().clear_type(i);
         }
+
+        self.image_mut().set_connections(connections);
         Ok(())
     }
 
