@@ -66,6 +66,7 @@ struct _Editor {
     previous_binary_hash: u64,
     worker_running: bool,
     pending_save: Option<Closure<dyn Fn()>>,
+    go_button_line: Option<usize>,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -96,6 +97,7 @@ impl Editor {
             previous_binary_hash: 0,
             worker_running: false,
             pending_save: None,
+            go_button_line: None,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -677,8 +679,11 @@ impl Editor {
         let wasm_bin = str_to_binary(self.active_as_text().join(" "))?;
         let binary_hash = Self::hash_binary(&wasm_bin);
         let raw_module = RawModule::new(self, &wasm_bin)?;
-        let validized = raw_module.fix_validity(self, &wasm_bin)?;
+        let (validized, go_button_line_idx) = raw_module.fix_validity(self, &wasm_bin)?;
         let types = validized.to_types_table(&wasm_bin)?;
+
+        // set run button for "go" handler function
+        self.update_go_button(go_button_line_idx);
 
         // indent operators and find frames
         indent_and_frame(self, &validized, &types);
@@ -874,6 +879,20 @@ impl Editor {
 
         self.image_mut().set_connections(connections);
         Ok(())
+    }
+
+    fn update_go_button(&mut self, new_button_line: Option<usize>) {
+        let prev_button_line = self.0.borrow().go_button_line;
+        if prev_button_line == new_button_line {
+            return;
+        }
+        if let Some(idx) = prev_button_line {
+            self.line_mut(idx).remove_run_button_closure();
+        }
+        if let Some(idx) = new_button_line {
+            self.line_mut(idx).set_run_button_closure();
+        }
+        self.0.borrow_mut().go_button_line = new_button_line;
     }
 
     fn schedule_save(&mut self) {

@@ -4,21 +4,28 @@
 // *and* active instruction), and its CSS presentation.
 
 use crate::{
+    audio::{is_audio_running, run_binary_audio, stop_audio},
     dom_struct::DomStruct,
     dom_text::DomText,
-    jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
+    jet::{
+        AccessToken, Component, ControlHandlers, ElementFactory, NodeRef, ReactiveComponent,
+        WithElement, set_selection_range,
+    },
     symbolic::{LineSymbols, parse_line_symbols},
     syntax::{InstrKind, LineKind, ModulePart, SyntheticWasm, parse_line},
     utils::find_comment,
 };
 use anyhow::{Result, bail};
 use std::cell::RefCell;
-use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
+use wasm_bindgen::JsCast;
+use web_sys::{HtmlBrElement, HtmlButtonElement, HtmlDivElement, HtmlSpanElement, MouseEvent};
 
 type DomBr = DomStruct<(), HtmlBrElement>;
 type TextSpan = DomStruct<(DomText, ()), HtmlSpanElement>;
 type EmptySpan = DomStruct<(), HtmlSpanElement>;
-type LinePara = DomStruct<(TextSpan, (TextSpan, (EmptySpan, (DomBr, ())))), HtmlDivElement>;
+type RunButton = ReactiveComponent<DomStruct<(), HtmlButtonElement>>;
+type LinePara =
+    DomStruct<(TextSpan, (TextSpan, (EmptySpan, (RunButton, (DomBr, ()))))), HtmlDivElement>;
 
 pub const INDENT_PX: usize = 25;
 
@@ -218,6 +225,10 @@ impl CodeLine {
         &mut self.contents.get_mut().1.0.get_mut().0
     }
 
+    fn run_button_mut(&mut self) -> &mut RunButton {
+        &mut self.contents.get_mut().1.1.1.0
+    }
+
     pub fn well_formed_str(&self, idx: usize) -> &str {
         self.info.well_formed_str(idx, self.instr().get())
     }
@@ -312,6 +323,11 @@ impl CodeLine {
                 0 => self.end_position(),
                 _ => bail!("unexpected debug span position {offset}"),
             });
+        } else if node.is_same_node(&self.contents.get().1.1.1.0) {
+            return Ok(match offset {
+                0 => self.end_position(),
+                _ => bail!("unexpected run button position {offset}"),
+            });
         }
 
         bail!("position in unknown node");
@@ -382,7 +398,10 @@ impl CodeLine {
                         TextSpan::new((DomText::default(), ()), factory.span()),
                         (
                             DomStruct::new((), factory.span()),
-                            (DomBr::new((), factory.br()), ()),
+                            (
+                                ReactiveComponent::new(DomStruct::new((), factory.button())),
+                                (DomBr::new((), factory.br()), ()),
+                            ),
                         ),
                     ),
                 ),
@@ -655,5 +674,33 @@ impl CodeLine {
         } else {
             self.contents.get_mut().0.remove_attribute("highlight");
         }
+    }
+
+    pub fn set_run_button_closure(&mut self) {
+        let run_button = self.run_button_mut();
+        run_button
+            .inner_mut()
+            .set_attribute("class", "run-button play");
+        stop_audio();
+        run_button.set_onmousedown(|ev: MouseEvent| {
+            let run_button = ev
+                .current_target()
+                .expect("expect click event")
+                .dyn_into::<HtmlButtonElement>()
+                .expect("expect run button");
+            if is_audio_running() {
+                stop_audio();
+                let _ = run_button.set_attribute("class", "run-button play");
+            } else {
+                wasm_bindgen_futures::spawn_local(run_binary_audio());
+                let _ = run_button.set_attribute("class", "run-button stop");
+            }
+        });
+    }
+
+    pub fn remove_run_button_closure(&mut self) {
+        let run_button = self.run_button_mut();
+        run_button.inner_mut().remove_attribute("class");
+        run_button.set_onmousedown(|_| {}); // Remove action
     }
 }
