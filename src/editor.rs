@@ -1028,14 +1028,7 @@ impl Editor {
     }
 
     fn update_slider(&self, step_count: usize, current_step: usize, termination: &TerminationType) {
-        if step_count > 1 {
-            self.slider_mut().inner_mut().show();
-            self.slider_mut()
-                .inner_mut()
-                .build_ticks(step_count - 1, current_step, termination);
-        } else {
-            self.slider_mut().inner_mut().hide();
-        }
+        self.slider_mut().inner_mut().hide();
     }
 
     fn apply_selection(
