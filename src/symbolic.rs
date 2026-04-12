@@ -27,23 +27,6 @@ enum IndexSpace {
     Undefined,
 }
 
-impl IndexSpace {
-    fn as_str(&self) -> &'static str {
-        match self {
-            IndexSpace::Type => "type",
-            IndexSpace::Global => "global",
-            IndexSpace::Mem => "memory",
-            IndexSpace::Table => "table",
-            IndexSpace::Func => "func",
-            IndexSpace::Data => "data",
-            IndexSpace::Elem => "elem",
-            IndexSpace::Local => "local",
-            IndexSpace::Label => "label",
-            IndexSpace::Undefined => "undefined",
-        }
-    }
-}
-
 impl From<ExportKind> for IndexSpace {
     fn from(kind: ExportKind) -> Self {
         match kind {
@@ -142,34 +125,29 @@ impl LineSymbols {
 pub fn collect_module_symbols(
     line_symbols: &LineSymbols,
     identifiers: &mut ModuleIdentifiers,
-) -> Result<(), String> {
+) -> Result<(), &'static str> {
     for symbol in &line_symbols.defines {
         if let Some(set) = identifiers.set_mut(&symbol.space)
             && !set.insert(symbol.name.clone())
         {
-            return Err(format!(
-                "duplicate {} symbol: ${}",
-                symbol.space.as_str(),
-                symbol.name
-            ));
+            return Err("duplicate symbol in same index space");
         }
     }
     Ok(())
 }
 
 // Collect function-scoped defined Local symbols, disgard non-local symbols without err
-// Returns an error if a symbol is a duplicate within the local
+// Returns an error if a symbol is a duplicate within that function scope
 pub fn collect_local_symbols(
     line_symbols: &LineSymbols,
     locals: &mut HashSet<String>,
-) -> Result<(), String> {
+) -> Result<(), &'static str> {
     for symbol in &line_symbols.defines {
-        if symbol.space == IndexSpace::Local && !locals.insert(symbol.name.clone()) {
-            return Err(format!(
-                "duplicate {} symbol: ${}",
-                symbol.space.as_str(),
-                symbol.name
-            ));
+        if symbol.space != IndexSpace::Local {
+            continue;
+        }
+        if !locals.insert(symbol.name.clone()) {
+            return Err("duplicate local symbol");
         }
     }
     Ok(())
