@@ -120,40 +120,58 @@ impl LineSymbols {
     }
 }
 
-// Collect module-level defined symbols, disgard non-module-level symbols without err
-// Returns an error if a symbol is a duplicate within its index space
+// Collect module-level defined symbols; no action for non-module-level symbols.
+// Returns an error and revert the collection if any line symbol is a duplicate within
+// its index space.
 pub fn collect_module_symbols(
     line_symbols: &LineSymbols,
     identifiers: &mut ModuleIdentifiers,
 ) -> Result<(), &'static str> {
+    let mut inserted: Vec<(&IndexSpace, &str)> = Vec::new();
+
     for symbol in &line_symbols.defines {
-        if let Some(set) = identifiers.set_mut(&symbol.space)
-            && !set.insert(symbol.name.clone())
-        {
-            return Err("duplicate symbol in same index space");
+        if let Some(set) = identifiers.set_mut(&symbol.space) {
+            if !set.insert(symbol.name.clone()) {
+                // Revert collections and return with err
+                for (space, name) in inserted {
+                    identifiers.set_mut(space).unwrap().remove(name);
+                }
+                return Err("duplicate symbol in same index space");
+            }
+            inserted.push((&symbol.space, &symbol.name));
         }
     }
+
     Ok(())
 }
 
-// Collect function-scoped defined Local symbols, disgard non-local symbols without err
-// Returns an error if a symbol is a duplicate within that function scope
+// Collect function-scoped defined Local symbols; no action for non-local symbols.
+// Returns an error and revert the collection if any line symbol is a duplicate within
+// that function scope.
 pub fn collect_local_symbols(
     line_symbols: &LineSymbols,
     locals: &mut HashSet<String>,
 ) -> Result<(), &'static str> {
+    let mut inserted: Vec<&str> = Vec::new();
+
     for symbol in &line_symbols.defines {
         if symbol.space != IndexSpace::Local {
             continue;
         }
         if !locals.insert(symbol.name.clone()) {
+            // Revert collections and return with err
+            for name in inserted {
+                locals.remove(name);
+            }
             return Err("duplicate local symbol");
         }
+        inserted.push(&symbol.name);
     }
+
     Ok(())
 }
 
-// Return the label defined in the line, if there's any, ignoring non-label symbols
+// Return the label defined in the line, if there's any, ignoring non-label symbols.
 pub fn collect_label_symbol(line_symbols: &LineSymbols) -> Option<String> {
     assert!(line_symbols.defines.len() <= 1);
 
