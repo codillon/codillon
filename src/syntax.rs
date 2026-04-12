@@ -795,15 +795,17 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         // Collect defined local symbolic references if there's any.
         // This collection should be after the state transition, because both of them can
-        // inactivate a line and need to revert the state and/or remove collected symbols after 
+        // inactivate a line and need to revert the state and/or remove collected symbols after
         // the inactivation. Reverting state is much simpler than removing symbols.
-        let collect_result =
-            collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
-        if let Err(reason) = collect_result {
-            // Inactivate line and revert state
-            lines.set_active_status(line_no, Inactive(reason));
-            state = orig_state;
-            continue;
+        if lines.info(line_no).is_active() {
+            let collect_result =
+                collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
+            if let Err(reason) = collect_result {
+                // Inactivate line and revert state
+                lines.set_active_status(line_no, Inactive(reason));
+                state = orig_state;
+                continue;
+            }
         }
     }
 
