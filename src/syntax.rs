@@ -670,9 +670,8 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     for line_no in 0..lines.len() {
         let line_kind = lines.info(line_no).kind.stripped_clone();
 
-        // Handle symbolic reference (check consumption & collect local symbols)
+        // Enforce correct symbolic reference consumption
         if lines.info(line_no).is_active() {
-            // Enforce correct symbolic reference consumption
             // end/else must match the label of the frame being closed, not any enclosing frame
             let label_symbol_defs: Vec<String> = match line_kind {
                 LineKind::Instr(InstrKind::End) | LineKind::Instr(InstrKind::Else) => frame_stack
@@ -693,19 +692,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             ) {
                 lines.set_active_status(line_no, Inactive("undefined symbolic reference"));
                 continue;
-            }
-
-            // Try to collect local symbols if the line "just in" the function header
-            if matches!(
-                state,
-                SyntaxState::Initial | SyntaxState::AfterFuncHeader(_)
-            ) {
-                let collect_result =
-                    collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
-                if let Err(reason) = collect_result {
-                    lines.set_active_status(line_no, Inactive(reason));
-                    continue;
-                }
             }
         }
 
@@ -743,10 +729,8 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         }
 
         // Process the line and transition the syntax state
-        // Every invalidations for module parts should go before the state transition,
-        // since those line shouldn't trigger the state transition
+        let orig_state = state;
         {
-            let orig_state = state;
             let res = state.transit_state(&lines.info(line_no), |_| {});
             match res {
                 Ok(()) => {
@@ -807,6 +791,19 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 ),
                 InstrKind::Other => (),
             }
+        }
+
+        // Collect defined local symbolic references if there's any.
+        // This collection should be after the state transition, because both of them can
+        // inactivate a line and need to revert the state and/or remove collected symbols after 
+        // the inactivation. Reverting state is much simpler than removing symbols.
+        let collect_result =
+            collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
+        if let Err(reason) = collect_result {
+            // Inactivate line and revert state
+            lines.set_active_status(line_no, Inactive(reason));
+            state = orig_state;
+            continue;
         }
     }
 
