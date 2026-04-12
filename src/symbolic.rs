@@ -27,6 +27,23 @@ enum IndexSpace {
     Undefined,
 }
 
+impl IndexSpace {
+    fn as_str(&self) -> &'static str {
+        match self {
+            IndexSpace::Type => "type",
+            IndexSpace::Global => "global",
+            IndexSpace::Mem => "memory",
+            IndexSpace::Table => "table",
+            IndexSpace::Func => "func",
+            IndexSpace::Data => "data",
+            IndexSpace::Elem => "elem",
+            IndexSpace::Local => "local",
+            IndexSpace::Label => "label",
+            IndexSpace::Undefined => "undefined",
+        }
+    }
+}
+
 impl From<ExportKind> for IndexSpace {
     fn from(kind: ExportKind) -> Self {
         match kind {
@@ -120,25 +137,45 @@ impl LineSymbols {
     }
 }
 
-/// Collect module-level defined symbols
-pub fn collect_module_symbols(line_symbols: &LineSymbols, identifiers: &mut ModuleIdentifiers) {
+// Collect module-level defined symbols, disgard non-module-level symbols without err
+// Returns an error if a symbol is a duplicate within its index space
+pub fn collect_module_symbols(
+    line_symbols: &LineSymbols,
+    identifiers: &mut ModuleIdentifiers,
+) -> Result<(), String> {
     for symbol in &line_symbols.defines {
-        if let Some(set) = identifiers.set_mut(&symbol.space) {
-            set.insert(symbol.name.clone());
+        if let Some(set) = identifiers.set_mut(&symbol.space)
+            && !set.insert(symbol.name.clone())
+        {
+            return Err(format!(
+                "duplicate {} symbol: ${}",
+                symbol.space.as_str(),
+                symbol.name
+            ));
         }
     }
+    Ok(())
 }
 
-// Collect function-scoped defined Local symbols
-pub fn collect_local_symbols(line_symbols: &LineSymbols, locals: &mut HashSet<String>) {
+// Collect function-scoped defined Local symbols, disgard non-local symbols without err
+// Returns an error if a symbol is a duplicate within the local
+pub fn collect_local_symbols(
+    line_symbols: &LineSymbols,
+    locals: &mut HashSet<String>,
+) -> Result<(), String> {
     for symbol in &line_symbols.defines {
-        if symbol.space == IndexSpace::Local {
-            locals.insert(symbol.name.clone());
+        if symbol.space == IndexSpace::Local && !locals.insert(symbol.name.clone()) {
+            return Err(format!(
+                "duplicate {} symbol: ${}",
+                symbol.space.as_str(),
+                symbol.name
+            ));
         }
     }
+    Ok(())
 }
 
-// Return the label defined in the line, if there's any
+// Return the label defined in the line, if there's any, ignoring non-label symbols
 pub fn collect_label_symbol(line_symbols: &LineSymbols) -> Option<String> {
     assert!(line_symbols.defines.len() <= 1);
 

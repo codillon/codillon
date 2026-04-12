@@ -656,7 +656,13 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 before_imports = false;
             }
 
-            collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
+            // Collect module-level symbols
+            let collect_result =
+                collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
+            if let Err(reason) = collect_result {
+                lines.set_active_status(line_no, Inactive(reason.leak()));
+                continue;
+            }
         }
     }
 
@@ -789,7 +795,12 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         // Collect defined local symbolic references if there's any
         if lines.info(line_no).is_active() {
-            collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
+            let collect_result =
+                collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
+            if let Err(reason) = collect_result {
+                lines.set_active_status(line_no, Inactive(reason.leak()));
+                continue;
+            }
         }
     }
 
