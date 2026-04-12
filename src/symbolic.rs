@@ -136,7 +136,7 @@ pub fn collect_module_symbols(
                 for (space, name) in inserted {
                     identifiers.set_mut(space).unwrap().remove(name);
                 }
-                return Err("duplicate symbol in same index space");
+                return Err("duplicate symbolic reference in same index space");
             }
             inserted.push((&symbol.space, &symbol.name));
         }
@@ -163,7 +163,7 @@ pub fn collect_local_symbols(
             for name in inserted {
                 locals.remove(name);
             }
-            return Err("duplicate local symbol");
+            return Err("duplicate local symbolic reference");
         }
         inserted.push(&symbol.name);
     }
