@@ -448,12 +448,18 @@ impl Component for FrameLine {
     }
 }
 
+type Arrow = ElementHandle<SvgUseElement>;
 type SVGDefs = DomVec<ElementHandle<SvgPathElement>, SvgDefsElement>; // definitions in SVG header
 type CodillonBlocks = DomVec<FrameLine, SvggElement>; // the lines themselves
 type Fractions = DomVec<OperatorFraction, SvggElement>;
 type Connections = DomVec<ElementHandle<SvgPathElement>, SvggElement>;
-type CodillonSVG =
-    DomStruct<(SVGDefs, (Connections, (Fractions, (CodillonBlocks, ())))), SvgElement>;
+type CodillonSVG = DomStruct<
+    (
+        SVGDefs,
+        (Connections, (Fractions, (CodillonBlocks, (Arrow, ())))),
+    ),
+    SvgElement,
+>;
 
 pub struct DomImage {
     contents: CodillonSVG,
@@ -535,6 +541,10 @@ impl DomImage {
         &mut self.contents.get_mut().0
     }
 
+    fn arrow_mut(&mut self) -> &mut Arrow {
+        &mut self.contents.get_mut().1.1.1.1.0
+    }
+
     fn make_icon(
         factory: &ElementFactory,
         id: &str,
@@ -550,6 +560,7 @@ impl DomImage {
         ret.set_attribute("fill", fill);
         ret.set_attribute("stroke", stroke);
         ret.set_attribute("stroke-width", stroke_width);
+        ret.set_attribute("paint-order", "stroke");
         ret
     }
 
@@ -580,7 +591,10 @@ impl DomImage {
                         Connections::new(factory.svg_g()),
                         (
                             DomVec::new(factory.svg_g()),
-                            (CodillonBlocks::new(factory.svg_g()), ()),
+                            (
+                                CodillonBlocks::new(factory.svg_g()),
+                                (factory.svg_use(), ()),
+                            ),
                         ),
                     ),
                 ),
@@ -604,6 +618,15 @@ impl DomImage {
             "darkred",
             "2",
         ));
+
+        ret.defs_mut().push(Self::make_icon(
+	    &factory,
+	    "arrow",
+	    "m -95.773,0.938 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.813,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -1.406,0 v -1.875 L -110,-7.5 h 12.656 l 4.383,5.563 H -6.344 V -5.453 L -0.001,0 -6.344,5.453 V 1.938 H -92.96 l -4.383,5.562 h -12.656 z  m 9.844,-1.875 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.813,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z",
+	    "#000080",
+	    "#fffff0",
+	    "1",
+	    ));
 
         ret.defs_mut().push(Self::make_icon(
             &factory,
@@ -1005,6 +1028,21 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
         } else {
             slot.get_mut().1.0.clear();
         }
+    }
+
+    pub fn set_arrow_location(&mut self, loc: Option<(usize, usize)>) {
+        let Some((line_idx, indent)) = loc else {
+            self.arrow_mut().remove_attribute("href");
+            return;
+        };
+
+        self.arrow_mut().set_attribute("href", "#arrow");
+        self.arrow_mut().set_attr_num(
+            "y",
+            line_idx * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX,
+        );
+        self.arrow_mut()
+            .set_attr_num("x", X_OFFSET_PX + indent * INDENT_PX - 4);
     }
 
     delegate! {
