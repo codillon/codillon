@@ -716,6 +716,8 @@ impl Editor {
                 let step_count = state.completed_steps.len();
                 if step_count > 0 {
                     self.update_live_info(step_count, self.current_step(), &state);
+                } else {
+                    self.image_mut().set_arrow_location(None);
                 }
             });
         }
@@ -994,6 +996,7 @@ impl Editor {
                     // Move slider to the end if binary changed and it's in the middle
                     if step_count == 0 {
                         editor_handle.slider_mut().inner_mut().hide();
+                        editor_handle.image_mut().set_arrow_location(None);
                         return;
                     }
 
@@ -1074,7 +1077,8 @@ impl Editor {
         // compute the state for the desired step
         editor_ref.execution_state.goto_step(current_step);
         Self::update_slots(editor_ref);
-        if let Some((line_no, _)) = &editor_ref.execution_state.status
+        if step_count > 1
+            && let Some((line_no, _)) = &editor_ref.execution_state.status
             && let Some(indent) = &editor_ref.component.get().1.1.0.inner()[*line_no]
                 .info()
                 .indent
