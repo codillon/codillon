@@ -658,7 +658,13 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 before_imports = false;
             }
 
-            collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
+            // Collect module-level symbols
+            let collect_result =
+                collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
+            if let Err(reason) = collect_result {
+                lines.set_active_status(line_no, Inactive(reason));
+                continue;
+            }
         }
     }
 
@@ -725,8 +731,8 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         }
 
         // Process the line and transition the syntax state
+        let orig_state = state;
         {
-            let orig_state = state;
             let res = state.transit_state(&lines.info(line_no), |_| {});
             match res {
                 Ok(()) => {
@@ -789,9 +795,19 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             }
         }
 
-        // Collect defined local symbolic references if there's any
+        // Collect defined local symbolic references if there's any.
+        // This collection should be after the state transition, because both of them can
+        // inactivate a line and need to revert the state and/or remove collected symbols after
+        // the inactivation. Reverting state is much simpler than removing symbols.
         if lines.info(line_no).is_active() {
-            collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
+            let collect_result =
+                collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
+            if let Err(reason) = collect_result {
+                // Inactivate line and revert state
+                lines.set_active_status(line_no, Inactive(reason));
+                state = orig_state;
+                continue;
+            }
         }
     }
 
