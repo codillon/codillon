@@ -3046,6 +3046,25 @@ pub(crate) mod tests {
         }
 
         {
+            // issue #220
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory $x 1)");
+            editor.push_line("(memory $x 2)");
+            editor.push_line("(global $x i32 (i32.const 0))");
+            editor.push_line("(global $x i64 (i32.const 0))");
+            editor.push_line("(func");
+            editor.push_line("(param $x i32) (param $x i32)");
+            editor.push_line("(param $x i32)");
+            editor.push_line("(local $x f32)");
+            editor.push_line(")");
+            editor.push_line("(func (param $x i32) (param $x i32)");
+            editor.push_line("(");
+            editor.push_line("func (param $x i32) (param $x i32)");
+            editor.push_line("func)");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
             editor.push_line("call $f");
