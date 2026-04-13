@@ -18,6 +18,15 @@ body {
     background-color: #fffff0;
 }
 
+.slot-value {
+    font-family: 'MLMSansDemiCond10-Regular';
+    font-size: 8pt;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    transform-origin: center;
+    transform-box: fill-box;
+}
+
 div.textentry {
     position: relative;
     top: 0;
@@ -55,6 +64,11 @@ div.textentry:focus {
     counter-increment: codelines;
 }
 
+.runtime-error-line {
+    color: darkred;
+    counter-increment: codelines;
+}
+
 .line::before {
     font-size: 20pt;
     color: darkred;
@@ -70,6 +84,10 @@ div.textentry:focus {
 
 .invalid-line::before {
     content: "\2717        ";
+}
+
+.runtime-error-line::before {
+    content: "\1f4a3        ";
 }
 
 .numbered-line::before {
@@ -211,25 +229,28 @@ span.debug[data-debug]::after {
 
 .annotations {
     position: absolute;
+    overflow: visible;
 }
 
 .graph-canvas {
-    background-color: #fff;
     display: block; 
-    border: 1px solid darkred;
+    border: 0.25px solid black;
     margin-left: auto;
     margin-right: auto;
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
 }
 
 .step-slider {
     width: 100%;
     margin: 0;
-    accent-color: darkred;
+    accent-color: darkblue;
 }
 
 .slider-ticks {
     position: relative;
-    height: 20px;
+    height: 30px;
     margin: 0 8px;
 }
 
@@ -242,8 +263,27 @@ span.debug[data-debug]::after {
 .slider-tick {
     position: absolute;
     transform: translateX(-50%);
-    color: darkred;
-    font-size: 12pt;
+    color: darkblue;
+    font-size: 11pt;
+
+    background-color: #fffff0;
+}
+
+.bad-slider-tick {
+    color: white;
+    background-color: darkred;
+    border-radius: 10px;
+    padding-left: 5px;
+    padding-right: 5px;
+    padding-bottom: 5px;
+}
+
+.current-slider-tick {
+    color: white;
+    background-color: darkblue;
+    border-radius: 10px;
+    padding-left: 5px;
+    padding-right: 5px;
 }
 
 .slider-container {

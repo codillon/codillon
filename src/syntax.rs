@@ -138,6 +138,7 @@ pub trait LineInfosMut: LineInfos {
     fn set_active_status(&mut self, index: usize, new_val: crate::line::Activity);
     fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm);
     fn set_invalid(&mut self, index: usize, reason: Option<String>);
+    fn set_runtime_error(&mut self, index: usize, msg: Option<String>);
     fn push(&mut self);
 }
 
@@ -629,6 +630,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         lines.set_synthetic_before(line_no, SyntheticWasm::default());
         lines.set_active_status(line_no, Active);
         lines.set_invalid(line_no, None);
+        lines.set_runtime_error(line_no, None);
 
         let line_kind = lines.info(line_no).kind.stripped_clone();
 
@@ -955,6 +957,8 @@ mod tests {
         fn set_invalid(&mut self, index: usize, reason: Option<String>) {
             self.lines[index].invalid = reason;
         }
+
+        fn set_runtime_error(&mut self, _index: usize, _msg: Option<String>) {}
     }
 
     fn malf(s: &str) -> LineKind {

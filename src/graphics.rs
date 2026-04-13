@@ -3,22 +3,24 @@
 
 use crate::{
     dom_struct::DomStruct,
+    dom_text::DomText,
     dom_vec::DomVec,
     editor::LINE_SPACING,
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement, now_ms},
     line::INDENT_PX,
     syntax::{FrameInfo, InstrKind},
-    utils::{BLOCK_BOUNDARY_INDENT, OperandConnections, SlotInfo},
+    utils::{AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, Coordinate, SlotConnections, SlotInfo},
 };
 use anyhow::Result;
 use delegate::delegate;
 use itertools::zip_eq;
 use palette::{Mix, Srgb};
 use std::{collections::HashMap, str::FromStr};
+use thousands::Separable;
 use wasmparser::ValType;
 use web_sys::{
-    SvgAnimateElement, SvgDefsElement, SvgElement, SvgLineElement, SvgPathElement, SvgUseElement,
-    SvggElement,
+    SvgAnimateElement, SvgDefsElement, SvgElement, SvgLineElement, SvgPathElement, SvgTextElement,
+    SvgUseElement, SvggElement, console::log_1,
 };
 
 const SYM_HW: f32 = 15.0;
@@ -497,6 +499,17 @@ fn ty_to_muted(ty: &Option<&ValType>) -> String {
     format!("#{final_color:x}")
 }
 
+fn icon_height(ty: Option<ValType>) -> f32 {
+    use ValType::*;
+    match ty {
+        Some(I32) => 11.0,
+        Some(I64) => 19.0,
+        Some(F32) => 11.0,
+        Some(F64) => 19.0,
+        _ => 10.0,
+    }
+}
+
 impl DomImage {
     fn blocks(&self) -> &CodillonBlocks {
         &self.contents.get().1.1.1.0
@@ -900,13 +913,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    pub fn set_type(
-        &mut self,
-        line_no: usize,
-        indent: u16,
-        input_types: Vec<Option<SlotInfo>>,
-        output_types: Vec<SlotInfo>,
-    ) {
+    pub fn set_type(&mut self, line_no: usize, indent: u16, ty: AnnotatedOperatorType) {
         self.make_height_at_least(line_no + 2);
         self.make_width_at_least(indent as usize);
 
@@ -917,7 +924,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             .0
             .get_mut(line_no)
             .unwrap()
-            .draw(&self.factory, line_no, indent, input_types, output_types);
+            .draw(&self.factory, line_no, indent, ty.inputs, ty.outputs);
     }
 
     pub fn set_type_count(&mut self, count: usize) {
@@ -932,28 +939,21 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    pub fn set_connections(&mut self, connections: OperandConnections) {
-        use ValType::*;
+    pub fn set_connections(&mut self, connections: &SlotConnections) {
         let mut connection_idx = 0;
         self.connections_mut().truncate(0);
-        for (src, dst) in zip_eq(connections.written, connections.read) {
+        for (src, dst) in zip_eq(&connections.written, &connections.read) {
             let (Some(src), Some(dst)) = (src, dst) else {
                 continue;
             };
             let write_base = self.fractions().get(src.line_idx).unwrap().target.unwrap();
             let read_base = self.fractions().get(dst.line_idx).unwrap().target.unwrap();
-            let (x, ty) = self
+            let (x, write_scale, ty) = self
                 .fractions()
                 .get(src.line_idx)
                 .unwrap()
-                .output_locations_and_types[src.operand_num];
-            let reader_offset = match ty {
-                Some(I32) => 11,
-                Some(I64) => 19,
-                Some(F32) => 11,
-                Some(F64) => 19,
-                _ => 10,
-            };
+                .output_locations_scales_and_types[src.operand_num];
+            let reader_offset = icon_height(ty);
             let write_x = write_base.0 + x;
             let (relative_x, read_scale) = self
                 .fractions()
@@ -961,8 +961,8 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
                 .unwrap()
                 .input_locations_and_scales[dst.operand_num];
             let read_x = read_base.0 + relative_x;
-            let write_y = write_base.1 + 10.0;
-            let read_y = read_base.1 - reader_offset as f32;
+            let write_y = write_base.1 + 10.0 * write_scale;
+            let read_y = read_base.1 - reader_offset * read_scale;
             // let y_distance = read_y - write_y;
             let first_control_height = write_y + 1.0;
             let second_control_height = write_y;
@@ -984,7 +984,27 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
             );
             connection_idx += 1;
         }
-        //        self.connections_mut().truncate(connection_idx);
+    }
+
+    pub fn set_slot_value(
+        &mut self,
+        location: &Coordinate,
+        is_input: bool,
+        value: &Option<impl Separable>,
+    ) {
+        let fraction = &mut self.fractions_mut()[location.line_idx];
+        let slot = if is_input {
+            &mut fraction.inputs()[location.operand_num]
+        } else {
+            let num_outputs = fraction.output_locations_scales_and_types.len();
+            let num_stranded = fraction.outputs().len() - num_outputs;
+            &mut fraction.outputs()[num_stranded + location.operand_num]
+        };
+        if let Some(value) = value {
+            slot.get_mut().1.0.set_val(value);
+        } else {
+            slot.get_mut().1.0.clear();
+        }
     }
 
     delegate! {
@@ -996,7 +1016,13 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
     }
 }
 
-type FractionVec = DomVec<ElementHandle<SvgUseElement>, SvggElement>;
+struct AutoSizedNumber {
+    elem: DomStruct<(DomText, ()), SvgTextElement>,
+    expected_width: f32,
+}
+
+type Slot = DomStruct<(ElementHandle<SvgUseElement>, (AutoSizedNumber, ())), SvggElement>;
+type FractionVec = DomVec<Slot, SvggElement>;
 type SymbolsType = DomStruct<(FractionVec, (FractionVec, ())), SvggElement>;
 
 struct FractionCache {
@@ -1009,7 +1035,92 @@ struct OperatorFraction {
     cache: Option<FractionCache>,
     target: Option<(f32, f32)>,
     input_locations_and_scales: Vec<(f32, f32)>,
-    output_locations_and_types: Vec<(f32, Option<ValType>)>,
+    output_locations_scales_and_types: Vec<(f32, f32, Option<ValType>)>,
+}
+
+impl AutoSizedNumber {
+    fn new(factory: &ElementFactory) -> Self {
+        let mut ret = Self {
+            elem: DomStruct::new((DomText::new(""), ()), factory.svg_text()),
+            expected_width: 0.0,
+        };
+        ret.elem.set_attribute("class", "slot-value");
+        ret
+    }
+
+    pub fn clear(&mut self) {
+        self.expected_width = 0.0;
+        self.elem.get_mut().0.set_data("");
+    }
+
+    pub fn set_val(&mut self, val: &impl Separable) {
+        let s = val.separate_with_commas();
+        // Firefox and Chrome seem to differ slightly in computation of widths
+        // for MLMSansDemiCond10-Regular @ 8 pt, so need some slop in the eventual comparison.
+        self.expected_width = s
+            .chars()
+            .map(|ch| match ch {
+                '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => 5.06667,
+                '.' | ',' => 2.8,
+                '-' => 3.377777,
+                _ => panic!("unhandled character \"{ch}\" in number"),
+            })
+            .sum();
+        if self.expected_width > 20.0 {
+            let scale_factor = 20.0 / self.expected_width;
+            self.elem.set_attribute(
+                "transform",
+                &format!("scale({scale_factor},{scale_factor})"),
+            );
+        } else {
+            self.elem.remove_attribute("transform");
+        }
+        self.elem.get_mut().0.set_data(&s);
+    }
+
+    pub fn set_pos(&mut self, x: f32, y: f32) {
+        self.elem.set_attr_num("x", x);
+        self.elem.set_attr_num("y", y);
+    }
+
+    pub fn set_fill(&mut self, color: &str) {
+        self.elem.set_attribute("fill", color);
+    }
+}
+
+impl WithElement for AutoSizedNumber {
+    type Element = SvgTextElement;
+    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
+        self.elem.with_element(f, g)
+    }
+}
+
+impl Component for AutoSizedNumber {
+    fn audit(&self) {
+        self.elem.audit();
+        if let Some(computed_width) = self.elem.elem().compute_text_width()
+            && (self.expected_width - computed_width).abs() > 0.5
+        {
+            log_1(
+                &format!(
+                    "for string \"{}\", expected width {} but browser computed {computed_width}",
+                    self.elem.get().0.get(),
+                    self.expected_width,
+                )
+                .into(),
+            );
+            panic!("text width mismatch");
+        }
+    }
+}
+
+impl Slot {
+    fn new_empty(factory: &ElementFactory) -> Self {
+        DomStruct::new(
+            (factory.svg_use(), (AutoSizedNumber::new(factory), ())),
+            factory.svg_g(),
+        )
+    }
 }
 
 impl OperatorFraction {
@@ -1025,7 +1136,7 @@ impl OperatorFraction {
             cache: None,
             target: None,
             input_locations_and_scales: vec![],
-            output_locations_and_types: vec![],
+            output_locations_scales_and_types: vec![],
         };
         ret.symbols.set_attribute("class", "fraction");
 
@@ -1046,7 +1157,7 @@ impl OperatorFraction {
         self.cache = None;
         self.target = None;
         self.input_locations_and_scales.clear();
-        self.output_locations_and_types.clear();
+        self.output_locations_scales_and_types.clear();
     }
 
     fn draw(
@@ -1078,17 +1189,18 @@ impl OperatorFraction {
         let out_len = output_types.len() as i32;
         self.inputs().truncate(input_types.len());
         while self.inputs().len() < input_types.len() {
-            self.inputs().push(factory.svg_use());
+            self.inputs().push(Slot::new_empty(factory));
         }
 
         let num_stranded: usize = output_types.iter().map(|ty| !ty.used as usize).sum();
 
         self.outputs().truncate(output_types.len() + num_stranded);
         while self.outputs().len() < output_types.len() + num_stranded {
-            self.outputs().push(factory.svg_use());
+            self.outputs().push(Slot::new_empty(factory));
         }
+
         self.input_locations_and_scales.clear();
-        self.output_locations_and_types.clear();
+        self.output_locations_scales_and_types.clear();
 
         fn scale(len: i32) -> f32 {
             let max_width = (BLOCK_BOUNDARY_INDENT * INDENT_PX - 2 * MARGIN + 1) as f32;
@@ -1104,13 +1216,13 @@ impl OperatorFraction {
 
         if in_scale != 1.0 {
             self.inputs()
-                .set_attribute("transform", &format!("scale({in_scale} 1)"));
+                .set_attribute("transform", &format!("scale({in_scale} {in_scale})"));
         } else {
             self.inputs().remove_attribute("transform");
         }
         if out_scale != 1.0 {
             self.outputs()
-                .set_attribute("transform", &format!("scale({out_scale} 1)"));
+                .set_attribute("transform", &format!("scale({out_scale} {out_scale})"));
         } else {
             self.outputs().remove_attribute("transform");
         }
@@ -1138,12 +1250,19 @@ impl OperatorFraction {
         }
 
         for (i, ty) in input_types.iter().enumerate() {
-            let sym = &mut self.inputs().get_mut(i).unwrap();
+            let sym = &mut self.inputs()[i].get_mut().0;
             let x = left_edge_in + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &render(ty.as_ref(), true));
             self.input_locations_and_scales
                 .push((in_scale * x, in_scale));
+
+            let height = icon_height(ty.as_ref().and_then(|x| x.slot.ty)) - 1.25;
+            let text = &mut self.inputs()[i].get_mut().1.0;
+
+            text.set_pos(x, -height / 2.0);
+            text.set_fill("black");
+            text.clear();
         }
 
         let num_stranded = output_types
@@ -1152,20 +1271,35 @@ impl OperatorFraction {
             .sum();
 
         for (i, ty) in output_types.iter().enumerate().take(num_stranded) {
-            let sym = &mut self.outputs().get_mut(i).unwrap();
+            let sym = &mut self.outputs()[i].get_mut().0;
             let x = left_edge_out + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &(render(Some(ty), false) + "_stranded"));
+
+            let text = &mut self.outputs()[i].get_mut().1.0;
+            text.clear();
         }
 
         for (i, ty) in output_types.iter().enumerate() {
-            let sym = &mut self.outputs().get_mut(num_stranded + i).unwrap();
+            let idx = num_stranded + i;
+            let sym = &mut self.outputs()[idx].get_mut().0;
             let x = left_edge_out + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &render(Some(ty), false));
 
-            self.output_locations_and_types
-                .push((out_scale * x, ty.slot.ty));
+            self.output_locations_scales_and_types
+                .push((out_scale * x, out_scale, ty.slot.ty));
+
+            let height = icon_height(ty.slot.ty)
+                + match ty.slot.ty {
+                    Some(ValType::F32) => 6.5,
+                    _ => 3.5,
+                };
+            let text = &mut self.outputs()[idx].get_mut().1.0;
+
+            text.set_pos(x, height / 2.0);
+            text.set_fill("white");
+            text.clear();
         }
 
         self.cache = Some(FractionCache {

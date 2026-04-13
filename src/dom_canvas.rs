@@ -2,8 +2,8 @@ use crate::jet::{AccessToken, Component, ElementHandle, RenderWithToken, WithEle
 use wasm_bindgen::JsCast;
 use web_sys::HtmlCanvasElement;
 
-const WIDTH: f64 = 500.0;
-const HEIGHT: f64 = 500.0;
+const WIDTH: f64 = 256.0;
+const HEIGHT: f64 = 256.0;
 
 pub enum Action {
     Extent(f64, f64, f64, f64),

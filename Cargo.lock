@@ -262,11 +262,11 @@ dependencies = [
  "indexmap 2.13.0",
  "itertools",
  "js-sys",
- "num-format",
  "palette",
  "pretty_assertions",
  "regex",
  "str_indices",
+ "thousands",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-encoder 0.245.1",
@@ -915,16 +915,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-format"
-version = "0.4.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a652d9771a63711fd3c3deb670acfbe5c30a4072e664d7a3bf5a9e1056ac72c3"
-dependencies = [
- "arrayvec",
- "itoa",
-]
-
-[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1487,6 +1477,12 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "thousands"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bf63baf9f5039dadc247375c29eb13706706cfde997d0330d05aa63a77d8820"
 
 [[package]]
 name = "tinystr"

@@ -1247,6 +1247,15 @@ impl<'a> ValidModule<'a> {
 
         // XXX on function entry, should "enter frame" of the params and locals
 
+        // Record values of globals (XXX not really necessary at start of every function, but, we don't have
+        // our own "_start" function to do this in)
+        for (global_idx, global) in types.globals.iter().enumerate() {
+            new_function.instruction(&GlobalGet(
+                global_idx.try_into().expect("global idx -> u32"),
+            ));
+            primitive_record(&mut new_function, global)?;
+        }
+
         // Record values of params and locals
         for (param_idx, param) in typed_function.params.iter().enumerate() {
             new_function.instruction(&LocalGet(param_idx.try_into().expect("param idx -> u32")));
@@ -1395,7 +1404,8 @@ pub struct Coordinate {
     pub operand_num: usize,
 }
 
-pub struct OperandConnections {
+#[derive(Default)]
+pub struct SlotConnections {
     pub written: Vec<Option<Coordinate>>, // same index space as Slot #
     pub read: Vec<Option<Coordinate>>,
 }
@@ -1406,13 +1416,51 @@ pub struct SlotInfo {
     pub used: bool,
 }
 
-pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> OperandConnections {
-    let mut cx = OperandConnections {
+#[derive(Debug, PartialEq, Eq)]
+pub struct AnnotatedOperatorType {
+    pub inputs: Vec<Option<SlotInfo>>,
+    pub outputs: Vec<SlotInfo>,
+}
+
+pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnections {
+    let mut cx = SlotConnections {
         written: vec![None; tys.slots.len()],
         read: vec![None; tys.slots.len()],
     };
 
+    // locate globals
+    for (Aligned { line_idx, .. }, SlotUse(slot_idx)) in zip_eq(&module.globals, &tys.globals) {
+        cx.written[*slot_idx] = Some(Coordinate {
+            line_idx: *line_idx,
+            operand_num: 0,
+        });
+    }
+
     for (func, func_tys) in zip_eq(&module.functions, &tys.funcs) {
+        // locate params
+        for (operand_num, SlotUse(slot_idx)) in func_tys.params.iter().enumerate() {
+            cx.read[*slot_idx] = Some(Coordinate {
+                line_idx: func.lines.0,
+                operand_num,
+            });
+        }
+
+        // locate locals
+        let mut local_counter = (None, 0);
+        for (Aligned { line_idx, .. }, SlotUse(slot_idx)) in zip_eq(&func.locals, &func_tys.locals)
+        {
+            if local_counter.0 == Some(*line_idx) {
+                local_counter.1 += 1;
+            } else {
+                local_counter.0 = Some(*line_idx);
+                local_counter.1 = 0;
+            }
+            cx.written[*slot_idx] = Some(Coordinate {
+                line_idx: *line_idx,
+                operand_num: local_counter.1,
+            });
+        }
+
         for (Aligned { line_idx, .. }, OperatorType { inputs, outputs }) in
             zip_eq(&func.operators, &func_tys.ops)
         {
@@ -2311,6 +2359,8 @@ pub(crate) mod tests {
         fn set_invalid(&mut self, index: usize, reason: Option<String>) {
             self.lines[index].info.invalid = reason
         }
+
+        fn set_runtime_error(&mut self, _index: usize, _msg: Option<String>) {}
     }
 
     impl FrameInfosMut for FakeTextBuffer {
