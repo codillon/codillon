@@ -12,7 +12,8 @@
 use crate::utils::FmtError;
 use anyhow::{Context, Result, bail};
 use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
-use std::cell::{Ref, RefCell};
+use regex::Regex;
+use std::cell::Cell;
 use thousands::{Separable, SeparatorPolicy};
 use wasm_bindgen::{JsCast, prelude::*};
 
@@ -20,8 +21,79 @@ const MAX_STEP_COUNT: usize = 1_000_000;
 
 // Debug state stored in Wasm memory
 thread_local! {
-    static STATE: RefCell<DebugState> = RefCell::new(DebugState::default());
+    static TERMINATION: Cell<TerminationType> = Cell::new(Default::default());
+    static ERROR_STR: CodillonCell<String> = CodillonCell::new(Default::default());
+    static STEP_COUNT: Cell<usize> = const { Cell::new(0) };
+    static STEPS: Box<[CodillonCell<ExecutionStep>]> = (0..MAX_STEP_COUNT)
+                .map(|_| CodillonCell::new(ExecutionStep::default()))
+                .collect();
     static INSTRUMENTATION_IMPORTS: Object = make_imports().expect("instrumentation");
+}
+
+// When a user Wasm module gets close to stack exhaustion, the browser can trap at any point
+// in our code (without unwinding the stack), leaving a RefCell borrow flag set.
+// Instead, we use our own RefCell approximation (still in safe Rust) that merely logs the issue.
+// The worst-case consequence of a trap in an inconvenient place would be that the current (in-progress)
+// step gets blanked to the default value.
+// This is all pretty gross, but it seems difficult to gracefully handle a trap in the middle of
+// "our" code (as called by the Wasm module).
+struct CodillonCell<T: Default> {
+    inner: Cell<T>,
+    #[cfg(debug_assertions)]
+    borrowed: Cell<bool>,
+}
+
+impl<T: Default> CodillonCell<T> {
+    fn new(inner: T) -> Self {
+        Self {
+            inner: Cell::new(inner),
+            #[cfg(debug_assertions)]
+            borrowed: Cell::new(false),
+        }
+    }
+
+    fn set(&self, inner: T) {
+        self.inner.set(inner)
+    }
+
+    fn borrow(&self) {
+        #[cfg(debug_assertions)]
+        {
+            if self.borrowed.get() {
+                web_sys::console::log_1(&"warning: CodillonCell multiply borrowed".into());
+            }
+            self.borrowed.set(true);
+        }
+    }
+
+    fn unborrow(&self) {
+        #[cfg(debug_assertions)]
+        self.borrowed.set(false);
+    }
+
+    fn with<U, F>(&self, func: F) -> U
+    where
+        F: FnOnce(&T) -> U,
+    {
+        self.borrow();
+        let cur = self.inner.take();
+        let ret = func(&cur);
+        self.set(cur);
+        self.unborrow();
+        ret
+    }
+
+    fn with_mut<U, F>(&self, func: F) -> U
+    where
+        F: FnOnce(&mut T) -> U,
+    {
+        self.borrow();
+        let mut cur = self.inner.take();
+        let ret = func(&mut cur);
+        self.set(cur);
+        self.unborrow();
+        ret
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -64,47 +136,84 @@ impl Separable for WasmValue {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Copy, Clone, Default, PartialEq)]
 pub enum TerminationType {
     #[default]
     Running,
     TooManySteps,
     HitInvalid,
     HitBadImport,
-    Error(String),
+    Error,
     Success,
 }
 
-#[derive(Default)]
-pub struct DebugState {
-    pub current_step: ExecutionStep,
-    pub completed_steps: Vec<ExecutionStep>,
-    pub termination: TerminationType,
+fn reset_debug_state() {
+    TERMINATION.set(Default::default());
+    ERROR_STR.with(|e| e.set(String::new()));
+    STEP_COUNT.set(0);
+    with_current_step_mut(|step| step.reset());
 }
 
-impl DebugState {
-    fn reset(&mut self) {
-        self.current_step = Default::default();
-        self.completed_steps.clear();
-        self.termination = Default::default();
+fn commit_step() {
+    assert!(STEP_COUNT.get() < MAX_STEP_COUNT);
+    STEP_COUNT.set(STEP_COUNT.get() + 1);
+    with_current_step_mut(|step| step.reset());
+}
+
+pub fn termination_type() -> TerminationType {
+    TERMINATION.get()
+}
+
+pub fn step_count() -> usize {
+    STEP_COUNT.get()
+}
+
+fn with_completed_step<T, F>(idx: usize, func: F) -> T
+where
+    F: FnOnce(&ExecutionStep) -> T,
+{
+    assert!(idx < MAX_STEP_COUNT);
+    assert!(idx < step_count());
+    STEPS.with(|step_cell| step_cell[idx].with(|step| func(step)))
+}
+
+fn with_current_step_mut<T, F>(func: F) -> T
+where
+    F: FnOnce(&mut ExecutionStep) -> T,
+{
+    STEPS.with(|step_cell| step_cell[step_count()].with_mut(|step| func(step)))
+}
+
+fn error_string() -> Option<String> {
+    if termination_type() == TerminationType::Error {
+        ERROR_STR.with(|e| e.with(|err| Some(err.clone())))
+    } else {
+        None
     }
 }
 
-#[derive(Default, Debug)]
-pub struct ExecutionStep {
-    pub line_num: u32,
-    pub slot_assignments: Vec<(u32, WasmValue)>, // slot idx, value
-                                                 // XXX todo: memory
-                                                 // XXX todo: canvas operations
-                                                 // XXX todo: clear any func/frame on entry
-                                                 // XXX todo: save any func on call/call_indirect, restore after
+#[derive(Default, Debug, Clone)]
+struct ExecutionStep {
+    line_num: u32,
+    slot_assignments: Vec<(u32, WasmValue)>, // slot idx, value
+                                             // XXX todo: memory
+                                             // XXX todo: canvas operations
+                                             // XXX todo: clear any func/frame on entry
+                                             // XXX todo: save any func on call/call_indirect, restore after
+}
+
+impl ExecutionStep {
+    fn reset(&mut self) {
+        self.line_num = 0;
+        self.slot_assignments.clear();
+    }
 }
 
 #[derive(Default, Debug)]
 pub struct ExecutionState {
     pub step: usize,
     pub slots: Vec<Option<WasmValue>>,
-    pub status: Option<(usize, TerminationType)>,
+    pub status: Option<(usize, TerminationType, Option<String>)>,
 }
 
 impl ExecutionState {
@@ -122,26 +231,27 @@ impl ExecutionState {
             // XXX save checkpoints?
             self.reset(self.slots.len());
         }
-        with_debug_state(|state| {
-            if state.completed_steps.is_empty() {
-                return;
-            }
-            assert!(target_step < state.completed_steps.len());
-            for step in 0..=target_step {
-                for (slot_idx, value) in &state.completed_steps[step].slot_assignments {
+        if step_count() == 0 {
+            return;
+        }
+        assert!(target_step < step_count());
+        for step in 0..=target_step {
+            with_completed_step(step, |s| {
+                for (slot_idx, value) in &s.slot_assignments {
                     self.slots[*slot_idx as usize] = Some(*value);
                 }
-            }
-            self.step = target_step;
-            self.status = Some((
-                state.completed_steps[target_step].line_num as usize,
-                if target_step + 1 == state.completed_steps.len() {
-                    state.termination.clone()
-                } else {
-                    TerminationType::Running
-                },
-            ));
-        });
+            });
+        }
+        self.step = target_step;
+        self.status = Some((
+            with_completed_step(target_step, |s| s.line_num as usize),
+            if target_step + 1 == step_count() {
+                termination_type()
+            } else {
+                TerminationType::Running
+            },
+            error_string(),
+        ));
     }
 }
 
@@ -153,17 +263,6 @@ where
     func.forget();
 }
 
-pub fn reset_debug_state() {
-    STATE.with(|cur_state| cur_state.borrow_mut().reset())
-}
-
-pub fn with_debug_state<T, F>(func: F) -> T
-where
-    F: FnOnce(Ref<'_, DebugState>) -> T,
-{
-    STATE.with(|state| func(state.borrow()))
-}
-
 // Constructs the instrumentation functions for import
 fn make_imports() -> Result<Object, JsValue> {
     let imports = Object::new();
@@ -172,46 +271,46 @@ fn make_imports() -> Result<Object, JsValue> {
     // Updating the debug state at every step. Returns whether execution should continue.
     let step_closure = Closure::wrap(Box::new(move |line_num: u32| -> bool {
         use TerminationType::*;
-        STATE.with_borrow_mut(|state| {
-            if state.termination == HitBadImport
-                && let Some(prev_step) = state.completed_steps.last()
-            {
-                state.current_step.line_num = prev_step.line_num;
-            } else {
-                state.current_step.line_num = line_num;
-            }
+        if termination_type() == HitBadImport && step_count() > 0 {
+            with_completed_step(step_count() - 1, |completed| {
+                with_current_step_mut(|current| {
+                    current.line_num = completed.line_num;
+                })
+            });
+        } else {
+            with_current_step_mut(|step| step.line_num = line_num);
+        }
 
-            state
-                .completed_steps
-                .push(std::mem::take(&mut state.current_step));
+        commit_step();
 
-            match state.termination {
-                Running => (),
-                TooManySteps => panic!("execution unexpectedly continued after TooManySteps"),
-                HitInvalid | HitBadImport => return false,
-                Error(_) => panic!("execution unexpectedly continued after Error"),
-                Success => panic!("execution unexpectedly continued after Success"),
-            }
+        match termination_type() {
+            Running => (),
+            TooManySteps => panic!("execution unexpectedly continued after TooManySteps"),
+            HitInvalid | HitBadImport => return false,
+            Error => panic!("execution unexpectedly continued after Error"),
+            Success => panic!("execution unexpectedly continued after Success"),
+        }
 
-            // Signal halt
-            if state.completed_steps.len() > MAX_STEP_COUNT {
-                state.termination = TerminationType::TooManySteps;
-                return false;
-            }
+        // Signal halt
+        if step_count() >= MAX_STEP_COUNT - 1 {
+            TERMINATION.set(TerminationType::TooManySteps);
+            return false;
+        }
 
-            true
-        })
+        true
     }) as Box<dyn Fn(u32) -> bool>);
     register_closure(&debug_numbers, "record_step", step_closure);
 
-    let record_invalid = Closure::wrap(Box::new(move || {
-        STATE.with_borrow_mut(|state| state.termination = TerminationType::HitInvalid)
-    }) as Box<dyn Fn()>);
+    let record_invalid =
+        Closure::wrap(
+            Box::new(move || TERMINATION.set(TerminationType::HitInvalid)) as Box<dyn Fn()>,
+        );
     register_closure(&debug_numbers, "record_invalid", record_invalid);
 
-    let func_placeholder = Closure::wrap(Box::new(move || {
-        STATE.with_borrow_mut(|state| state.termination = TerminationType::HitBadImport)
-    }) as Box<dyn Fn()>);
+    let func_placeholder =
+        Closure::wrap(
+            Box::new(move || TERMINATION.set(TerminationType::HitBadImport)) as Box<dyn Fn()>,
+        );
     register_closure(&debug_numbers, "func_placeholder", func_placeholder);
 
     create_closure_record_operations(&debug_numbers);
@@ -256,13 +355,7 @@ fn create_closure_helpers(import: &Object) {
 
 fn create_closure_record_operations(obj: &Object) {
     let record = |value: WasmValue, slot: u32| {
-        STATE.with(|state| {
-            state
-                .borrow_mut()
-                .current_step
-                .slot_assignments
-                .push((slot, value))
-        });
+        with_current_step_mut(|step| step.slot_assignments.push((slot, value)))
     };
     let record_i32 = Closure::wrap(
         Box::new(move |value: i32, slot: u32| record(value.into(), slot)) as Box<dyn Fn(i32, u32)>,
@@ -302,47 +395,55 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
                 .context("main is not an exported function")?;
             match main.apply(&JsValue::null(), &js_sys::Array::new()) {
                 Ok(val) if val.is_undefined() => {
-                    STATE.with_borrow_mut(|state| match state.termination {
-                        TerminationType::Running => state.termination = TerminationType::Success,
+                    match termination_type() {
+                        TerminationType::Running => TERMINATION.set(TerminationType::Success),
                         TerminationType::TooManySteps
                         | TerminationType::HitInvalid
                         | TerminationType::HitBadImport
                         | TerminationType::Success
-                        | TerminationType::Error(..) => {
+                        | TerminationType::Error => {
                             unreachable!("success after other result");
                         }
-                    });
+                    }
                     Ok(())
                 }
                 Ok(val) => {
                     bail!("unhandled return value from function: {:?}", val)
                 }
-                Err(e) => match e.dyn_ref::<RuntimeError>() {
-                    Some(r) => {
-                        let reason: String = r.message().into();
-                        STATE.with_borrow_mut(|state| match state.termination {
-                            TerminationType::Running => {
-                                if let Some(step) = state.completed_steps.last() {
-                                    state.current_step.line_num = step.line_num;
-                                    state
-                                        .completed_steps
-                                        .push(std::mem::take(&mut state.current_step));
-                                }
-                                state.termination = TerminationType::Error(reason)
+                Err(e) => {
+                    let reason: String = if let Some(r) = e.dyn_ref::<RuntimeError>() {
+                        r.message().into()
+                    } else {
+                        let re = Regex::new(r"\((.*)")?;
+                        let debug_string = format!("{e:?}");
+                        if let Some(captures) = re.captures(&debug_string) {
+                            captures[1].to_string()
+                        } else {
+                            "unknown error".to_string()
+                        }
+                    };
+                    match termination_type() {
+                        TerminationType::Running => {
+                            if step_count() > 0 {
+                                with_completed_step(step_count() - 1, |completed| {
+                                    with_current_step_mut(|current| {
+                                        current.line_num = completed.line_num;
+                                    })
+                                });
                             }
-                            TerminationType::HitInvalid
-                            | TerminationType::HitBadImport
-                            | TerminationType::TooManySteps => {} // error is expected
-                            TerminationType::Success | TerminationType::Error(..) => {
-                                unreachable!("error after other result");
-                            }
-                        });
-                        Ok(())
+                            commit_step();
+                            TERMINATION.set(TerminationType::Error);
+                            ERROR_STR.with(|e| e.set(reason));
+                        }
+                        TerminationType::HitInvalid
+                        | TerminationType::HitBadImport
+                        | TerminationType::TooManySteps => {} // error is expected
+                        TerminationType::Success | TerminationType::Error => {
+                            unreachable!("error after other result");
+                        }
                     }
-                    None => {
-                        bail!("other failure: {:?}", e);
-                    }
-                },
+                    Ok(())
+                }
             }
         }
         Err(e) => bail!("reflection failure: {:?}", e),

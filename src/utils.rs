@@ -1267,6 +1267,8 @@ impl<'a> ValidModule<'a> {
             primitive_record(&mut new_function, local)?;
         }
 
+        step_debug(&mut new_function, orig_function.lines.0);
+
         // Record all operators, translating func idxes as necessary
         for (i, codillon_operator) in orig_function.operators.iter().enumerate() {
             step_debug(&mut new_function, codillon_operator.line_idx);
@@ -1299,12 +1301,24 @@ impl<'a> ValidModule<'a> {
                 }
             }
 
+            if i + 1 == orig_function.operators.len() {
+                debug_assert!(matches!(op, End));
+                debug_assert!(codillon_operator.inner.info == OpInfo::FuncEnd);
+
+                // special handling for the function end (we can't put instrumentation after it,
+                // but we know the type of end operator is identity on its inputs)
+                transparent_record_results(&mut new_function, &op_type.outputs);
+
+                new_function.instruction(&op);
+                continue; // function is over
+            }
+
             // the operator itself
             new_function.instruction(&op);
 
-            if i + 1 == orig_function.operators.len() {
-                debug_assert!(matches!(op, End));
-                continue; // function is over
+            if matches!(op, Call(_) | CallIndirect { .. }) {
+                // special handling: step this twice so pointer can return to the callsite after complete
+                step_debug(&mut new_function, codillon_operator.line_idx);
             }
 
             // record result operands
@@ -2458,6 +2472,8 @@ pub(crate) mod tests {
                 + r#"  (func (type 0)
     i32.const 0
     call 7
+    i32.const 0
+    call 7
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2473,6 +2489,8 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 7
     i32.const 1
     call 7
   )
@@ -2492,6 +2510,8 @@ pub(crate) mod tests {
                 + r#"  (func (type 0)
     i32.const 1
     call 7
+    i32.const 1
+    call 7
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2507,6 +2527,8 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 7
     i32.const 1
     call 7
   )
@@ -2526,6 +2548,8 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 7
     i32.const 0
     call 7
     i64.const 17
@@ -2550,7 +2574,9 @@ pub(crate) mod tests {
         }
 
         // well-formed block
-        const JUST_BLOCK_END: &str = r#"    i32.const 1
+        const JUST_BLOCK_END: &str = r#"    i32.const 0
+    call 7
+    i32.const 1
     call 7
     block ;; label = @1
       i32.const 2
@@ -2609,6 +2635,8 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 7
     i32.const 1
     call 7
     i32.const 137
@@ -2659,6 +2687,8 @@ pub(crate) mod tests {
   (func (type 0)
     i32.const 6
     call 8
+    i32.const 6
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2702,6 +2732,8 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 7
     i32.const 1
     call 7
     block ;; label = @1
@@ -2733,6 +2765,8 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 7
     i32.const 1
     call 7
     i32.const 1
@@ -2761,6 +2795,8 @@ pub(crate) mod tests {
                 + "  (memory 0)\n"
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 1
+    call 7
     i32.const 2
     call 7
     i32.const 2
@@ -2794,6 +2830,8 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 7
     i32.const 0
     call 7
     loop ;; label = @1
@@ -2836,6 +2874,8 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 7
     i32.const 1
     call 7
     i32.const 4
@@ -2891,9 +2931,13 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f64" (func (type 8)))
   (export "main" (func 6))
   (func (type 0)
+    i32.const 0
+    call 8
     i32.const 1
     call 8
     call 7
+    i32.const 1
+    call 8
     i32.const 0
     i32.const 1
     call 9
@@ -2909,6 +2953,8 @@ pub(crate) mod tests {
     unreachable
   )
   (func (type 1) (result i32 i32)
+    i32.const 4
+    call 8
     i32.const 5
     call 8
     i32.const 9
@@ -2921,6 +2967,9 @@ pub(crate) mod tests {
     call 10
     i32.const 7
     call 8
+    i32.const 5
+    i32.const 6
+    call 9
   )
   (func (type 9) (param i32)
     local.get 0
@@ -2977,6 +3026,8 @@ pub(crate) mod tests {
     local.get 3
     i32.const 3
     call 5
+    i32.const 0
+    call 7
     i32.const 4
     call 7
   )
@@ -3013,6 +3064,8 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f64" (func (type 8)))
   (export "main" (func 6))
   (func (type 0)
+    i32.const 0
+    call 7
     i32.const 1
     call 7
     i32.const 1
@@ -3062,9 +3115,13 @@ pub(crate) mod tests {
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
   (export "main" (func 7))
   (func (type 0)
+    i32.const 1
+    call 8
     i32.const 2
     call 8
     call 6
+    i32.const 2
+    call 8
     i32.const 3
     call 8
   )

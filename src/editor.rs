@@ -3,7 +3,7 @@
 use crate::{
     action_history::{ActionHistory, Edit, Selection},
     autocomplete::Autocomplete,
-    debug::{DebugState, ExecutionState, TerminationType, run_binary, with_debug_state},
+    debug::{ExecutionState, TerminationType, run_binary, step_count, termination_type},
     dom_canvas::DomCanvas,
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -145,10 +145,7 @@ impl Editor {
             let editor_ref = Rc::clone(&ret.0);
             ret.slider_mut().set_oninput(move |_| {
                 let editor = Editor(editor_ref.clone());
-                let step_count = with_debug_state(|state| state.completed_steps.len());
-                with_debug_state(|state| {
-                    editor.update_live_info(step_count, editor.current_step(), &state);
-                });
+                editor.update_live_info(step_count(), editor.current_step());
             });
 
             let editor = Editor(Rc::clone(&ret.0));
@@ -712,14 +709,11 @@ impl Editor {
             self.execute(instrumented_binary, version);
             self.0.borrow_mut().previous_instrumented_binary_hash = instrumented_binary_hash;
         } else {
-            with_debug_state(|state| {
-                let step_count = state.completed_steps.len();
-                if step_count > 0 {
-                    self.update_live_info(step_count, self.current_step(), &state);
-                } else {
-                    self.image_mut().set_arrow_location(None);
-                }
-            });
+            if step_count() > 0 {
+                self.update_live_info(step_count(), self.current_step());
+            } else {
+                self.image_mut().set_arrow_location(None);
+            }
         }
 
         self.schedule_save(); // schedule save to local storage
@@ -990,29 +984,26 @@ impl Editor {
                     continue;
                 }
 
-                with_debug_state(|state| {
-                    let step_count = state.completed_steps.len();
-                    let mut slider_step = editor_handle.current_step();
-                    // Move slider to the end if binary changed and it's in the middle
-                    if step_count == 0 {
-                        editor_handle.slider_mut().inner_mut().hide();
-                        editor_handle.image_mut().set_arrow_location(None);
-                        return;
-                    }
+                let mut slider_step = editor_handle.current_step();
+                // Move slider to the end if binary changed and it's in the middle
+                if step_count() == 0 {
+                    editor_handle.slider_mut().inner_mut().hide();
+                    editor_handle.image_mut().set_arrow_location(None);
+                    return;
+                }
 
-                    if editor_handle.slider().inner().is_visible() {
-                        if slider_step != 0 {
-                            slider_step = step_count - 1;
-                        }
-                    } else {
-                        slider_step = step_count - 1;
+                if editor_handle.slider().inner().is_visible() {
+                    if slider_step != 0 {
+                        slider_step = step_count() - 1;
                     }
+                } else {
+                    slider_step = step_count() - 1;
+                }
 
-                    let slot_count = editor_handle.slot_connections().written.len();
-                    editor_handle.execution_state_mut().reset(slot_count);
-                    editor_handle.update_live_info(step_count, slider_step, &state);
-                    editor_handle.move_slider(slider_step);
-                });
+                let slot_count = editor_handle.slot_connections().written.len();
+                editor_handle.execution_state_mut().reset(slot_count);
+                editor_handle.update_live_info(step_count(), slider_step);
+                editor_handle.move_slider(slider_step);
             }
             inner.borrow_mut().worker_running = false;
         });
@@ -1035,23 +1026,23 @@ impl Editor {
             .set_value_as_number(current_step as f64);
     }
 
-    fn update_live_info(&self, step_count: usize, current_step: usize, debug_state: &DebugState) {
+    fn update_live_info(&self, step_count: usize, current_step: usize) {
         assert!(step_count > 0);
         if step_count > 1 {
             self.slider_mut().inner_mut().show();
             self.slider_mut().inner_mut().build_ticks(
                 step_count - 1,
                 current_step,
-                &debug_state.termination,
-            );
+                &termination_type(),
+            )
         } else {
             self.slider_mut().inner_mut().hide();
         }
 
         fn find_error(state: &ExecutionState) -> Option<(usize, &str)> {
             Some(match &state.status {
-                Some((line_no, TerminationType::Error(msg))) => (*line_no, msg),
-                Some((line_no, TerminationType::HitBadImport)) => {
+                Some((line_no, TerminationType::Error, Some(msg))) => (*line_no, msg),
+                Some((line_no, TerminationType::HitBadImport, _)) => {
                     (*line_no, "called unknown import")
                 }
                 _ => return None,
@@ -1078,7 +1069,7 @@ impl Editor {
         editor_ref.execution_state.goto_step(current_step);
         Self::update_slots(editor_ref);
         if step_count > 1
-            && let Some((line_no, _)) = &editor_ref.execution_state.status
+            && let Some((line_no, _, _)) = &editor_ref.execution_state.status
             && let Some(indent) = &editor_ref.component.get().1.1.0.inner()[*line_no]
                 .info()
                 .indent

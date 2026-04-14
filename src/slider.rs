@@ -74,8 +74,8 @@ impl Slider {
         // use 1x, 2x, or 5x multiples of 10 for intervals
         match quarter {
             0 => interval,
-            1 => interval * 2,
-            2 => interval * 5,
+            //            1 => interval * 2,
+            1 | 2 => interval * 5,
             _ => interval * 10,
         }
     }
