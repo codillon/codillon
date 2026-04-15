@@ -74,7 +74,7 @@ struct _Editor {
 pub struct Editor(Rc<RefCell<_Editor>>);
 
 impl Editor {
-    pub fn new(factory: ElementFactory) -> Self {
+    pub fn new(factory: ElementFactory) -> Result<Self> {
         let inner = _Editor {
             component: DomStruct::new(
                 (
@@ -84,7 +84,7 @@ impl Editor {
                         (
                             ReactiveComponent::new(DomVec::new(factory.div())),
                             (
-                                DomCanvas::new(factory.canvas()),
+                                DomCanvas::new(factory.canvas())?,
                                 (Autocomplete::new(&factory), (SaveStatus::new(&factory), ())),
                             ),
                         ),
@@ -180,7 +180,7 @@ impl Editor {
         let height = LINE_SPACING * ret.text().len();
         ret.image_mut().set_attribute("height", &height.to_string());
 
-        ret
+        Ok(ret)
     }
 
     fn push_line(&mut self, string: &str) {
@@ -1064,7 +1064,9 @@ impl Editor {
         };
 
         // compute the state for the desired step
-        editor_ref.execution_state.goto_step(current_step);
+        editor_ref
+            .execution_state
+            .goto_step(current_step, &mut editor_ref.component.get_mut().1.1.1.0);
         Self::update_slots(editor_ref);
         if step_count > 1
             && let Some((line_no, _, _)) = &editor_ref.execution_state.status

@@ -5,7 +5,7 @@
 // cannot directly access the children or parents of a DOM node.
 
 use crate::utils::FmtError;
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use delegate::delegate;
 use std::{
     collections::HashMap,
@@ -13,9 +13,9 @@ use std::{
 };
 use wasm_bindgen::{JsValue, closure::Closure};
 use web_sys::{
-    BeforeUnloadEvent, Element, FontFaceSetLoadStatus, HtmlBodyElement, HtmlElement,
-    HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent, SvgAnimateElement, SvgAnimatedLength,
-    SvgLineElement, SvgTextElement, SvgUseElement, wasm_bindgen::JsCast,
+    BeforeUnloadEvent, Element, FontFaceSetLoadStatus, HtmlBodyElement, HtmlCanvasElement,
+    HtmlElement, HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent, SvgAnimateElement,
+    SvgAnimatedLength, SvgLineElement, SvgTextElement, SvgUseElement, wasm_bindgen::JsCast,
 };
 
 // Traits that give "raw" access to an underlying node or element,
@@ -40,14 +40,6 @@ impl<T: AsRef<Element> + AsRef<web_sys::Node>> AnyElement for T {}
 pub trait WithElement {
     type Element: AnyElement;
     fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken);
-}
-
-pub trait RenderWithToken {
-    fn render(&mut self, token: AccessToken, actions: &[crate::dom_canvas::Action]);
-}
-
-pub fn render_canvas<R: RenderWithToken>(r: &mut R, actions: &[crate::dom_canvas::Action]) {
-    r.render(TOKEN, actions);
 }
 
 impl<T: WithElement> WithNode for T {
@@ -449,6 +441,17 @@ impl ElementHandle<SvgTextElement> {
         } else {
             None
         }
+    }
+}
+
+impl ElementHandle<HtmlCanvasElement> {
+    pub fn get_context(&self) -> Result<web_sys::CanvasRenderingContext2d> {
+        self.elem
+            .get_context("2d")
+            .fmt_err()?
+            .context("2d context")?
+            .dyn_into::<web_sys::CanvasRenderingContext2d>()
+            .fmt_err()
     }
 }
 
