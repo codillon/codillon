@@ -1101,7 +1101,10 @@ impl AutoSizedNumber {
                 '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8' | '9' => 5.06667,
                 '.' | ',' => 2.8,
                 '-' => 3.377777,
-                _ => panic!("unhandled character \"{ch}\" in number"),
+                _ => {
+                    log_1(&format!("unhandled character \"{ch}\" in number").into());
+                    4.0 // XXX need to handle inf and NaN
+                }
             })
             .sum();
         if self.expected_width > 20.0 {
@@ -1147,7 +1150,7 @@ impl Component for AutoSizedNumber {
                 )
                 .into(),
             );
-            panic!("text width mismatch");
+            //            panic!("text width mismatch");
         }
     }
 }
