@@ -987,7 +987,7 @@ impl Editor {
                 if step_count() == 0 {
                     editor_handle.slider_mut().inner_mut().hide();
                     editor_handle.image_mut().set_arrow_location(None);
-                    return;
+                    break;
                 }
 
                 if editor_handle.slider().inner().is_visible() {
