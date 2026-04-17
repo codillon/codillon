@@ -9,7 +9,10 @@
 // - all SIMD/vector operations
 // - all reference types operations
 
-use crate::utils::FmtError;
+use crate::{
+    dom_canvas::{Action, DomCanvas},
+    utils::FmtError,
+};
 use anyhow::{Context, Result, bail};
 use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
 use regex::Regex;
@@ -17,7 +20,7 @@ use std::cell::Cell;
 use thousands::{Separable, SeparatorPolicy};
 use wasm_bindgen::{JsCast, prelude::*};
 
-const MAX_STEP_COUNT: usize = 1_000_000;
+const MAX_STEP_COUNT: usize = 100_000;
 
 // Debug state stored in Wasm memory
 thread_local! {
@@ -130,8 +133,14 @@ impl Separable for WasmValue {
         match self {
             WasmValue::I32(x) => x.separate_by_policy(policy),
             WasmValue::I64(x) => x.separate_by_policy(policy),
-            WasmValue::F32(x) => x.separate_by_policy(policy),
-            WasmValue::F64(x) => x.separate_by_policy(policy),
+            WasmValue::F32(x) => format!("{:.3}", x)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string(),
+            WasmValue::F64(x) => format!("{:.3}", x)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string(),
         }
     }
 }
@@ -192,12 +201,11 @@ fn error_string() -> Option<String> {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug)]
 struct ExecutionStep {
     line_num: u32,
     slot_assignments: Vec<(u32, WasmValue)>, // slot idx, value
-                                             // XXX todo: memory
-                                             // XXX todo: canvas operations
+    graphics_ops: Vec<Action>,               // XXX todo: memory
                                              // XXX todo: clear any func/frame on entry
                                              // XXX todo: save any func on call/call_indirect, restore after
 }
@@ -206,6 +214,7 @@ impl ExecutionStep {
     fn reset(&mut self) {
         self.line_num = 0;
         self.slot_assignments.clear();
+        self.graphics_ops.clear();
     }
 }
 
@@ -226,20 +235,23 @@ impl ExecutionState {
         }
     }
 
-    pub fn goto_step(&mut self, target_step: usize) {
-        if self.step > target_step {
+    pub fn goto_step(&mut self, target_step: usize, canvas: &mut DomCanvas) {
+        if self.step > target_step || self.step == 0 {
             // XXX save checkpoints?
             self.reset(self.slots.len());
+            canvas.reset();
+            self.step = 0;
         }
         if step_count() == 0 {
             return;
         }
         assert!(target_step < step_count());
-        for step in 0..=target_step {
+        for step in self.step..=target_step {
             with_completed_step(step, |s| {
                 for (slot_idx, value) in &s.slot_assignments {
                     self.slots[*slot_idx as usize] = Some(*value);
                 }
+                canvas.render(&s.graphics_ops);
             });
         }
         self.step = target_step;
@@ -316,42 +328,41 @@ fn make_imports() -> Result<Object, JsValue> {
     create_closure_record_operations(&debug_numbers);
 
     Reflect::set(&imports, &"codillon_debug".into(), &debug_numbers)?;
+
+    {
+        let draw = Object::new();
+        create_graphics_helpers(&draw);
+        Reflect::set(&imports, &"draw".into(), &draw)?;
+    }
+
     Ok(imports)
 }
 
-/* XXX: restore graphics features
-fn create_closure_helpers(import: &Object) {
-    let helpers = Object::new();
-    let add_change = |change: SparseChange| {
-        STATE.with(|cur_state| {
-            let mut state = cur_state.borrow_mut();
-            let step_idx = state.changes.len();
-            state.sparse_changes.push((step_idx, change));
-        });
-    };
+fn create_graphics_helpers(draw: &Object) {
     let draw_point = Closure::wrap(Box::new(move |x: f64, y: f64| {
-        add_change(SparseChange::Point(x, y));
+        with_current_step_mut(|step| step.graphics_ops.push(Action::Point(x, y)))
     }) as Box<dyn Fn(f64, f64)>);
-    register_closure(&helpers, "draw_point", draw_point);
+    register_closure(draw, "point", draw_point);
     let clear_canvas = Closure::wrap(Box::new(move || {
-        add_change(SparseChange::Clear());
+        with_current_step_mut(|step| step.graphics_ops.push(Action::Clear))
     }) as Box<dyn Fn()>);
-    register_closure(&helpers, "clear_canvas", clear_canvas);
+    register_closure(draw, "clear", clear_canvas);
     let set_color = Closure::wrap(Box::new(move |r: i32, g: i32, b: i32| {
-        add_change(SparseChange::Color(r, g, b));
+        with_current_step_mut(|step| step.graphics_ops.push(Action::Color(r, g, b)))
     }) as Box<dyn Fn(i32, i32, i32)>);
-    register_closure(&helpers, "set_color", set_color);
+    register_closure(draw, "set_color", set_color);
     let set_extent = Closure::wrap(Box::new(move |xmin: f64, xmax: f64, ymin: f64, ymax: f64| {
-        add_change(SparseChange::Extent(xmin, xmax, ymin, ymax));
+        with_current_step_mut(|step| {
+            step.graphics_ops
+                .push(Action::Extent(xmin, xmax, ymin, ymax))
+        })
     }) as Box<dyn Fn(f64, f64, f64, f64)>);
-    register_closure(&helpers, "set_extent", set_extent);
+    register_closure(draw, "set_extent", set_extent);
     let set_radius = Closure::wrap(Box::new(move |radius: f64| {
-        add_change(SparseChange::Radius(radius));
+        with_current_step_mut(|step| step.graphics_ops.push(Action::Radius(radius)))
     }) as Box<dyn Fn(f64)>);
-    register_closure(&helpers, "set_radius", set_radius);
-    Reflect::set(import, &JsValue::from_str("helpers"), &helpers).ok();
+    register_closure(draw, "set_radius", set_radius);
 }
-*/
 
 fn create_closure_record_operations(obj: &Object) {
     let record = |value: WasmValue, slot: u32| {

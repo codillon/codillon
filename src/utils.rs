@@ -75,71 +75,78 @@ struct HelperImport<'a> {
     kind: HelperImportKind<'a>,
     reason: &'static str,
 }
-const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[(
-    "helpers",
-    &[
-        HelperImport {
-            name: "draw_point",
-            kind: HelperImportKind::Func {
-                params: &[ValType::F64, ValType::F64],
-                results: &[],
+const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
+    (
+        "draw",
+        &[
+            HelperImport {
+                name: "point",
+                kind: HelperImportKind::Func {
+                    params: &[ValType::F64, ValType::F64],
+                    results: &[],
+                },
+                reason: "expected type (param f64 f64)",
             },
-            reason: "expected type (f64, f64) -> ()",
-        },
-        HelperImport {
-            name: "clear_canvas",
-            kind: HelperImportKind::Func {
-                params: &[],
-                results: &[],
+            HelperImport {
+                name: "clear",
+                kind: HelperImportKind::Func {
+                    params: &[],
+                    results: &[],
+                },
+                reason: "expected empty type",
             },
-            reason: "expected type () -> ()",
-        },
-        HelperImport {
-            name: "set_color",
-            kind: HelperImportKind::Func {
-                params: &[ValType::I32, ValType::I32, ValType::I32],
-                results: &[],
+            HelperImport {
+                name: "set_color",
+                kind: HelperImportKind::Func {
+                    params: &[ValType::I32, ValType::I32, ValType::I32],
+                    results: &[],
+                },
+                reason: "expected type (param i32 i32 i32)",
             },
-            reason: "expected type (i32, i32, i32) -> ()",
-        },
-        HelperImport {
-            name: "set_extent",
-            kind: HelperImportKind::Func {
-                params: &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
-                results: &[],
+            HelperImport {
+                name: "set_extent",
+                kind: HelperImportKind::Func {
+                    params: &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
+                    results: &[],
+                },
+                reason: "expected type (param f64 f64 f64 f64)",
             },
-            reason: "expected type (f64, f64, f64, f64) -> ()",
-        },
-        HelperImport {
-            name: "set_radius",
-            kind: HelperImportKind::Func {
-                params: &[ValType::F64],
-                results: &[],
+            HelperImport {
+                name: "set_radius",
+                kind: HelperImportKind::Func {
+                    params: &[ValType::F64],
+                    results: &[],
+                },
+                reason: "expected type (param f64)",
             },
-            reason: "expected type (f64) -> ()",
-        },
-        HelperImport {
-            name: "num_samples",
-            kind: HelperImportKind::Global(wasmparser::GlobalType {
-                content_type: ValType::I32,
-                mutable: false,
-                shared: false,
-            }),
-            reason: "expected (global i32)",
-        },
-        HelperImport {
-            name: "listen_memory",
-            kind: HelperImportKind::Memory(wasmparser::MemoryType {
-                memory64: false,
-                shared: false,
-                initial: 1,
-                maximum: None,
-                page_size_log2: None,
-            }),
-            reason: "expected (memory 1)",
-        },
-    ],
-)];
+        ],
+    ),
+    (
+        "listen",
+        &[
+            HelperImport {
+                name: "num_samples",
+                kind: HelperImportKind::Global(wasmparser::GlobalType {
+                    content_type: ValType::I32,
+                    mutable: false,
+                    shared: false,
+                }),
+                reason: "expected (global i32)",
+            },
+            HelperImport {
+                name: "listen_memory",
+                kind: HelperImportKind::Memory(wasmparser::MemoryType {
+                    memory64: false,
+                    shared: false,
+                    initial: 1,
+                    maximum: None,
+                    page_size_log2: None,
+                }),
+                reason: "expected (memory 1)",
+            },
+        ],
+    ),
+];
 
 #[derive(Debug, PartialEq)]
 pub enum OpInfo {
@@ -3257,7 +3264,7 @@ pub(crate) mod tests {
         // Test case 1: module name not found
         {
             let mut editor = FakeTextBuffer::default();
-            editor.push_line("(import \"not_helpers\" \"draw_point\" (func (param f64 f64)))");
+            editor.push_line("(import \"not_draw\" \"point\" (func (param f64 f64)))");
             let _ = test_editor_flow(&mut editor)?;
             assert_eq!(
                 editor.lines[0]
@@ -3265,14 +3272,14 @@ pub(crate) mod tests {
                     .invalid
                     .as_ref()
                     .expect("nonexistent module name should be invalid"),
-                "module ‘not_helpers’ not found"
+                "module ‘not_draw’ not found"
             );
         }
 
         // Test case 2: component name not found
         {
             let mut editor = FakeTextBuffer::default();
-            editor.push_line("(import \"helpers\" \"not_draw_point\" (func (param f64 f64)))");
+            editor.push_line("(import \"draw\" \"not_point\" (func (param f64 f64)))");
             let _ = test_editor_flow(&mut editor)?;
             assert_eq!(
                 editor.lines[0]
@@ -3280,14 +3287,14 @@ pub(crate) mod tests {
                     .invalid
                     .as_ref()
                     .expect("nonexistent component name should be invalid"),
-                "function ‘not_draw_point’ not found in module helpers"
+                "function ‘not_point’ not found in module draw"
             );
         }
 
         // Test case 3: wrong function type
         {
             let mut editor = FakeTextBuffer::default();
-            editor.push_line("(import \"helpers\" \"draw_point\" (func (param i32)))");
+            editor.push_line("(import \"draw\" \"point\" (func (param i32)))");
             let _ = test_editor_flow(&mut editor)?;
             assert_eq!(
                 editor.lines[0]
@@ -3295,18 +3302,18 @@ pub(crate) mod tests {
                     .invalid
                     .as_ref()
                     .expect("wrong function type should be invalid"),
-                "expected type (f64, f64) -> ()"
+                "expected type (param f64 f64)"
             );
         }
 
         // Test case 4: correct import
         {
             let mut editor = FakeTextBuffer::default();
-            editor.push_line("(import \"helpers\" \"draw_point\" (func (param f64, f64)))");
+            editor.push_line("(import \"draw\" \"point\" (func (param f64, f64)))");
             let _ = test_editor_flow(&mut editor)?;
             assert!(
                 editor.lines[0].info.invalid.is_none(),
-                "draw_point should be correctly imported"
+                "draw/point should be correctly imported"
             );
         }
 
@@ -3314,11 +3321,9 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"a\" \"b\" (func $fake_func1))");
-            editor.push_line("(import \"helpers\" \"clear_canvas\" (func $clear_canvas))");
+            editor.push_line("(import \"draw\" \"clear\" (func $clear_canvas))");
             editor.push_line("(import \"c\" \"d\" (func $fake_func2))");
-            editor.push_line(
-                "(import \"helpers\" \"draw_point\" (func $draw_point (param f64 f64)))",
-            );
+            editor.push_line("(import \"draw\" \"point\" (func $draw_point (param f64 f64)))");
             editor.push_line("(import \"e\" \"f\" (func $fake_func3))");
             editor.push_line("(func");
             editor.push_line("call $fake_func1");
@@ -3392,8 +3397,8 @@ pub(crate) mod tests {
         // Test case 6: valid global and memory imports
         {
             let mut editor = FakeTextBuffer::default();
-            editor.push_line("(import \"helpers\" \"num_samples\" (global i32))");
-            editor.push_line("(import \"helpers\" \"listen_memory\" (memory 1))");
+            editor.push_line("(import \"listen\" \"num_samples\" (global i32))");
+            editor.push_line("(import \"listen\" \"listen_memory\" (memory 1))");
             let _ = test_editor_flow(&mut editor)?;
             assert!(
                 editor.lines[0].info.invalid.is_none(),
@@ -3408,8 +3413,8 @@ pub(crate) mod tests {
         // Test case 7: wrong types for global and memory imports
         {
             let mut editor = FakeTextBuffer::default();
-            editor.push_line("(import \"helpers\" \"num_samples\" (global (mut i32)))");
-            editor.push_line("(import \"helpers\" \"listen_memory\" (memory 2))");
+            editor.push_line("(import \"listen\" \"num_samples\" (global (mut i32)))");
+            editor.push_line("(import \"listen\" \"listen_memory\" (memory 2))");
             let _ = test_editor_flow(&mut editor)?;
             assert_eq!(
                 editor.lines[0].info.invalid.as_deref(),
