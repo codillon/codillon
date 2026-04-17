@@ -348,3 +348,8 @@ span.debug[data-debug]::after {
     color: darkred;
     visibility: visible;
 }
+
+.arrow-target {
+    scroll-margin-top: 100px;
+    scroll-margin-bottom: 100px;
+}

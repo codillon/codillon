@@ -69,6 +69,7 @@ struct _Editor {
     version: usize,
     slot_connections: SlotConnections,
     execution_state: ExecutionState,
+    scroll_on_next_input: bool,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -102,6 +103,7 @@ impl Editor {
             version: 0,
             slot_connections: SlotConnections::default(),
             execution_state: ExecutionState::default(),
+            scroll_on_next_input: false,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -148,6 +150,11 @@ impl Editor {
                 editor.update_live_info(step_count(), editor.current_step());
             });
 
+            let editor_ref = Rc::clone(&ret.0);
+            ret.slider_mut().set_onkeydown(move |_| {
+                Editor(editor_ref.clone()).set_scroll_on_next_input();
+            });
+
             let editor = Editor(Rc::clone(&ret.0));
             let beforeunload = Closure::new(move |ev: BeforeUnloadEvent| {
                 if editor.save_status().is_dirty() {
@@ -181,6 +188,10 @@ impl Editor {
         ret.image_mut().set_attribute("height", &height.to_string());
 
         Ok(ret)
+    }
+
+    fn set_scroll_on_next_input(&mut self) {
+        self.0.borrow_mut().scroll_on_next_input = true;
     }
 
     fn push_line(&mut self, string: &str) {
@@ -695,6 +706,7 @@ impl Editor {
         indent_and_frame(self, &validized, &types);
 
         // update visual types of params, locals, and operators
+        self.0.borrow_mut().scroll_on_next_input = false; // edit to text buffer -> don't scroll to arrow
         *self.slot_connections_mut() = find_connections(&validized, &types);
         self.update_displayed_types(&validized, &types)?;
 
@@ -710,7 +722,7 @@ impl Editor {
             if step_count() > 0 {
                 self.update_live_info(step_count(), self.current_step());
             } else {
-                self.image_mut().set_arrow_location(None);
+                self.image_mut().set_arrow_location(false, None);
             }
         }
 
@@ -986,7 +998,7 @@ impl Editor {
                 // Move slider to the end if binary changed and it's in the middle
                 if step_count() == 0 {
                     editor_handle.slider_mut().inner_mut().hide();
-                    editor_handle.image_mut().set_arrow_location(None);
+                    editor_handle.image_mut().set_arrow_location(false, None);
                     break;
                 }
 
@@ -1075,14 +1087,21 @@ impl Editor {
                 .indent
                 .clone()
         {
+            editor_ref.component.get_mut().1.0.set_arrow_location(
+                editor_ref.scroll_on_next_input,
+                Some((*line_no, *indent as usize)),
+            );
+            if editor_ref.scroll_on_next_input {
+                editor_ref.component.get_mut().1.0.scroll_to_arrow();
+                editor_ref.scroll_on_next_input = false;
+            }
+        } else {
             editor_ref
                 .component
                 .get_mut()
                 .1
                 .0
-                .set_arrow_location(Some((*line_no, *indent as usize)));
-        } else {
-            editor_ref.component.get_mut().1.0.set_arrow_location(None);
+                .set_arrow_location(false, None);
         }
 
         // display runtime error (and HitBadImport)

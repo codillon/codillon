@@ -448,7 +448,95 @@ impl Component for FrameLine {
     }
 }
 
-type Arrow = ElementHandle<SvgUseElement>;
+type Arrow = DomStruct<
+    (
+        ElementHandle<SvgUseElement>,
+        (
+            DomStruct<
+                (
+                    ElementHandle<SvgAnimateElement>,
+                    (ElementHandle<SvgAnimateElement>, ()),
+                ),
+                SvgUseElement,
+            >,
+            (),
+        ),
+    ),
+    SvggElement,
+>;
+
+impl Arrow {
+    fn anim_x(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
+        &mut self.get_mut().1.0.get_mut().0
+    }
+
+    fn anim_y(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
+        &mut self.get_mut().1.0.get_mut().1.0
+    }
+
+    fn new_arrow(factory: &ElementFactory) -> Self {
+        let mut ret = DomStruct::new(
+            (
+                factory.svg_use(),
+                (
+                    DomStruct::new(
+                        (factory.svg_animate(), (factory.svg_animate(), ())),
+                        factory.svg_use(),
+                    ),
+                    (),
+                ),
+            ),
+            factory.svg_g(),
+        );
+        setup_anim(ret.anim_x(), "x");
+        setup_anim(ret.anim_y(), "y");
+        ret
+    }
+
+    fn snapshot_xy(&mut self) {
+        let x = self
+            .get()
+            .1
+            .0
+            .elem()
+            .x()
+            .anim_val()
+            .value()
+            .unwrap()
+            .to_string();
+        let y = self
+            .get()
+            .1
+            .0
+            .elem()
+            .y()
+            .anim_val()
+            .value()
+            .unwrap()
+            .to_string();
+        self.anim_x().set_attribute("from", &x);
+        self.anim_y().set_attribute("from", &y);
+    }
+
+    fn goto(&mut self, smooth: bool, x: usize, y: usize) {
+        if smooth {
+            self.snapshot_xy();
+            self.anim_x().set_attribute("to", &x.to_string());
+            self.anim_y().set_attribute("to", &y.to_string());
+            let _ = self.anim_x().begin_element();
+            let _ = self.anim_y().begin_element();
+        } else {
+            self.anim_x().remove_attribute("to");
+            self.anim_y().remove_attribute("to");
+        }
+
+        self.get_mut().1.0.set_attribute("x", &x.to_string());
+        self.get_mut().1.0.set_attribute("y", &y.to_string());
+        self.get_mut().0.set_attribute("x", &x.to_string());
+        self.get_mut().0.set_attribute("y", &y.to_string());
+    }
+}
+
 type SVGDefs = DomVec<ElementHandle<SvgPathElement>, SvgDefsElement>; // definitions in SVG header
 type CodillonBlocks = DomVec<FrameLine, SvggElement>; // the lines themselves
 type Fractions = DomVec<OperatorFraction, SvggElement>;
@@ -560,7 +648,6 @@ impl DomImage {
         ret.set_attribute("fill", fill);
         ret.set_attribute("stroke", stroke);
         ret.set_attribute("stroke-width", stroke_width);
-        ret.set_attribute("paint-order", "stroke");
         ret
     }
 
@@ -593,7 +680,7 @@ impl DomImage {
                             DomVec::new(factory.svg_g()),
                             (
                                 CodillonBlocks::new(factory.svg_g()),
-                                (factory.svg_use(), ()),
+                                (Arrow::new_arrow(&factory), ()),
                             ),
                         ),
                     ),
@@ -607,6 +694,11 @@ impl DomImage {
             pending_delete: Default::default(),
         };
 
+        ret.arrow_mut()
+            .get_mut()
+            .0
+            .set_attribute("class", "arrow-target");
+
         // The "unclosed" symbol looks like a ⊘ (Circled Division Slash)
         // character, or like an "End of All Prohibitions"
         // European road sign.
@@ -619,14 +711,19 @@ impl DomImage {
             "2",
         ));
 
-        ret.defs_mut().push(Self::make_icon(
-	    &factory,
-	    "arrow",
-	    "m -95.773,0.938 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.813,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -1.406,0 v -1.875 L -110,-7.5 h 12.656 l 4.383,5.563 H -6.344 V -5.453 L -0.001,0 -6.344,5.453 V 1.938 H -92.96 l -4.383,5.562 h -12.656 z  m 9.844,-1.875 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.813,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z",
-	    "#000080",
-	    "#fffff0",
-	    "1",
-	    ));
+        {
+            let mut arrow_icon = Self::make_icon(
+                &factory,
+                "arrow",
+                "m -95.773,0.938 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.813,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -1.406,0 v -1.875 L -110,-7.5 h 12.656 l 4.383,5.563 H -6.344 V -5.453 L -0.001,0 -6.344,5.453 V 1.938 H -92.96 l -4.383,5.562 h -12.656 z  m 9.844,-1.875 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.813,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z",
+                "#000080",
+                "#fffff0",
+                "1",
+            );
+            arrow_icon.set_attribute("paint-order", "stroke");
+
+            ret.defs_mut().push(arrow_icon);
+        }
 
         ret.defs_mut().push(Self::make_icon(
             &factory,
@@ -1030,19 +1127,26 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
         }
     }
 
-    pub fn set_arrow_location(&mut self, loc: Option<(usize, usize)>) {
+    pub fn set_arrow_location(&mut self, smooth: bool, loc: Option<(usize, usize)>) {
         let Some((line_idx, indent)) = loc else {
-            self.arrow_mut().remove_attribute("href");
+            self.arrow_mut().get_mut().1.0.remove_attribute("href");
             return;
         };
 
-        self.arrow_mut().set_attribute("href", "#arrow");
-        self.arrow_mut().set_attr_num(
-            "y",
+        self.arrow_mut()
+            .get_mut()
+            .1
+            .0
+            .set_attribute("href", "#arrow");
+        self.arrow_mut().goto(
+            smooth,
+            X_OFFSET_PX + indent * INDENT_PX - 4,
             line_idx * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX,
         );
-        self.arrow_mut()
-            .set_attr_num("x", X_OFFSET_PX + indent * INDENT_PX - 4);
+    }
+
+    pub fn scroll_to_arrow(&mut self) {
+        self.arrow_mut().get().0.scroll_into_view();
     }
 
     delegate! {
