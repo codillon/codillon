@@ -32,6 +32,7 @@ for_each_operator!(define_supported_op_visitors);
 // to match the operator name.
 fn all_operator_names() -> &'static [String] {
     static NAMES: OnceLock<Vec<String>> = OnceLock::new();
+    const EXCLUDED_NAMES: [&str; 2] = ["f32.sqrt", "f64.sqrt"];
     NAMES
         .get_or_init(|| {
             VISITOR_NAMES
@@ -54,6 +55,13 @@ fn all_operator_names() -> &'static [String] {
                         }
                     }
                     Some(name.to_string())
+                })
+                .filter_map(|name| {
+                    if EXCLUDED_NAMES.contains(&name.as_str()) {
+                        None
+                    } else {
+                        Some(name)
+                    }
                 })
                 .collect()
         })

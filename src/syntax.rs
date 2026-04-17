@@ -357,7 +357,11 @@ impl<'a> Parse<'a> for LineKind {
         } else if parser.is_empty() {
             Ok(LineKind::Empty)
         } else {
-            Ok(LineKind::Instr(parser.parse::<Instruction>()?.into()))
+            let instr = parser.parse::<Instruction>()?;
+            if matches!(instr, Instruction::F32Sqrt | Instruction::F64Sqrt) {
+                return Err(parser.error("sqrt instructions not available in CS 10N"));
+            }
+            Ok(LineKind::Instr(instr.into()))
         }
     }
 }
