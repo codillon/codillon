@@ -240,6 +240,7 @@ span.debug[data-debug]::after {
     position: fixed;
     bottom: 20px;
     right: 20px;
+    pointer-events: none;
 }
 
 .step-slider {
