@@ -505,14 +505,12 @@ impl Editor {
                 }
             }
 
-            "z" | "Z" => {
-                if ev.ctrl_key() || ev.meta_key() {
-                    ev.prevent_default();
-                    if ev.shift_key() {
-                        self.redo()?;
-                    } else {
-                        self.undo()?;
-                    }
+            "z" | "Z" if ev.ctrl_key() || ev.meta_key() => {
+                ev.prevent_default();
+                if ev.shift_key() {
+                    self.redo()?;
+                } else {
+                    self.undo()?;
                 }
             }
 
