@@ -288,9 +288,16 @@ span.debug[data-debug]::after {
 }
 
 .slider-container {
-    margin: 10px 20px;
+    padding-top: 10px;
+    margin: -10px 20px 0px 20px;
     display: flex;
     flex-direction: column;
+
+    position: -webkit-sticky;
+    position: sticky;
+    top: 0;
+    z-index: 1000;
+    background-color: #fffff0;
 }
 
 .slider-hidden {
