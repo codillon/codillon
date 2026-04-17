@@ -69,6 +69,7 @@ struct _Editor {
     version: usize,
     slot_connections: SlotConnections,
     execution_state: ExecutionState,
+    scroll_on_next_input: bool,
 }
 
 pub struct Editor(Rc<RefCell<_Editor>>);
@@ -102,6 +103,7 @@ impl Editor {
             version: 0,
             slot_connections: SlotConnections::default(),
             execution_state: ExecutionState::default(),
+            scroll_on_next_input: false,
         };
 
         let mut ret = Editor(Rc::new(RefCell::new(inner)));
@@ -148,6 +150,11 @@ impl Editor {
                 editor.update_live_info(step_count(), editor.current_step());
             });
 
+            let editor_ref = Rc::clone(&ret.0);
+            ret.slider_mut().set_onkeydown(move |_| {
+                Editor(editor_ref.clone()).set_scroll_on_next_input();
+            });
+
             let editor = Editor(Rc::clone(&ret.0));
             let beforeunload = Closure::new(move |ev: BeforeUnloadEvent| {
                 if editor.save_status().is_dirty() {
@@ -181,6 +188,10 @@ impl Editor {
         ret.image_mut().set_attribute("height", &height.to_string());
 
         Ok(ret)
+    }
+
+    fn set_scroll_on_next_input(&mut self) {
+        self.0.borrow_mut().scroll_on_next_input = true;
     }
 
     fn push_line(&mut self, string: &str) {
@@ -1081,6 +1092,10 @@ impl Editor {
                 .1
                 .0
                 .set_arrow_location(Some((*line_no, *indent as usize)));
+            if editor_ref.scroll_on_next_input {
+                editor_ref.component.get_mut().1.0.scroll_to_arrow();
+                editor_ref.scroll_on_next_input = false;
+            }
         } else {
             editor_ref.component.get_mut().1.0.set_arrow_location(None);
         }
