@@ -1,6 +1,6 @@
 use crate::syntax::{
     FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, ModulePart,
-    find_function_ranges, find_import_lines,
+    find_export_lines, find_function_ranges, find_import_lines,
 };
 use EncoderInstruction::*;
 use anyhow::{Result, bail};
@@ -61,7 +61,7 @@ impl InstrImports {
 }
 
 #[derive(PartialEq, Eq)]
-enum HelperImportKind<'a> {
+enum HelperBindingKind<'a> {
     Func {
         params: &'a [ValType],
         results: &'a [ValType],
@@ -70,50 +70,50 @@ enum HelperImportKind<'a> {
     Memory(wasmparser::MemoryType),
 }
 
-struct HelperImport<'a> {
+struct HelperBinding<'a> {
     name: &'static str,
-    kind: HelperImportKind<'a>,
+    kind: HelperBindingKind<'a>,
     reason: &'static str,
 }
-const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
+const HELPER_IMPORTS: &[(&str, &[HelperBinding])] = &[
     (
         "draw",
         &[
-            HelperImport {
+            HelperBinding {
                 name: "point",
-                kind: HelperImportKind::Func {
+                kind: HelperBindingKind::Func {
                     params: &[ValType::F64, ValType::F64],
                     results: &[],
                 },
                 reason: "expected type (param f64 f64)",
             },
-            HelperImport {
+            HelperBinding {
                 name: "clear",
-                kind: HelperImportKind::Func {
+                kind: HelperBindingKind::Func {
                     params: &[],
                     results: &[],
                 },
                 reason: "expected empty type",
             },
-            HelperImport {
+            HelperBinding {
                 name: "set_color",
-                kind: HelperImportKind::Func {
+                kind: HelperBindingKind::Func {
                     params: &[ValType::I32, ValType::I32, ValType::I32],
                     results: &[],
                 },
                 reason: "expected type (param i32 i32 i32)",
             },
-            HelperImport {
+            HelperBinding {
                 name: "set_extent",
-                kind: HelperImportKind::Func {
+                kind: HelperBindingKind::Func {
                     params: &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
                     results: &[],
                 },
                 reason: "expected type (param f64 f64 f64 f64)",
             },
-            HelperImport {
+            HelperBinding {
                 name: "set_radius",
-                kind: HelperImportKind::Func {
+                kind: HelperBindingKind::Func {
                     params: &[ValType::F64],
                     results: &[],
                 },
@@ -124,18 +124,18 @@ const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
     (
         "listen",
         &[
-            HelperImport {
+            HelperBinding {
                 name: "num_samples",
-                kind: HelperImportKind::Global(wasmparser::GlobalType {
+                kind: HelperBindingKind::Global(wasmparser::GlobalType {
                     content_type: ValType::I32,
                     mutable: false,
                     shared: false,
                 }),
                 reason: "expected (global i32)",
             },
-            HelperImport {
+            HelperBinding {
                 name: "listen_memory",
-                kind: HelperImportKind::Memory(wasmparser::MemoryType {
+                kind: HelperBindingKind::Memory(wasmparser::MemoryType {
                     memory64: false,
                     shared: false,
                     initial: 1,
@@ -147,6 +147,15 @@ const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
         ],
     ),
 ];
+
+const HANDLER_EXPORTS: &[HelperBinding] = &[HelperBinding {
+    name: "go",
+    kind: HelperBindingKind::Func {
+        params: &[], // might need params later
+        results: &[],
+    },
+    reason: "expected type () -> ()",
+}];
 
 #[derive(Debug, PartialEq)]
 pub enum OpInfo {
@@ -191,6 +200,7 @@ pub struct RawModule<'a> {
     pub imports: Vec<wasmparser::Import<'a>>,
     pub memory: Vec<wasmparser::MemoryType>,
     pub globals: Vec<Aligned<wasmparser::Global<'a>>>,
+    pub exports: Vec<wasmparser::Export<'a>>,
     pub functions: Vec<RawFunction<'a>>,
 }
 
@@ -200,6 +210,7 @@ pub struct ValidModule<'a> {
     pub imports: Vec<wasmparser::Import<'a>>,
     pub memory: Vec<wasmparser::MemoryType>,
     pub globals: Vec<Aligned<wasmparser::Global<'a>>>,
+    pub exports: Vec<wasmparser::Export<'a>>,
     pub functions: Vec<ValidFunction<'a>>,
 }
 
@@ -241,6 +252,7 @@ impl<'a> RawModule<'a> {
         let mut imports: Vec<Import> = Vec::new();
         let mut memory: Vec<MemoryType> = Vec::new();
         let mut globals: Vec<Aligned<Global>> = Vec::new();
+        let mut exports: Vec<Export> = Vec::new();
         type FuncInfo<'a> = (Vec<Aligned<ValType>>, Vec<Aligned<Operator<'a>>>); // locals, ops
         let mut funcs: Vec<FuncInfo> = Vec::with_capacity(function_ranges.len());
 
@@ -272,6 +284,11 @@ impl<'a> RawModule<'a> {
                             line_idx: 0,
                             inner: global.1,
                         });
+                    }
+                }
+                Payload::ExportSection(reader) => {
+                    for export in reader.into_iter_with_offsets().flatten() {
+                        exports.push(export.1);
                     }
                 }
                 Payload::CodeSectionEntry(body) => {
@@ -393,6 +410,7 @@ impl<'a> RawModule<'a> {
             imports,
             memory,
             globals,
+            exports,
             functions,
         })
     }
@@ -406,6 +424,7 @@ impl<'a> RawModule<'a> {
         let import_lines = find_import_lines(editor);
         let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
+        let mut num_func_imports = 0;
 
         /* Disable unlinkable imports */
         let mut imports = Vec::new();
@@ -441,7 +460,7 @@ impl<'a> RawModule<'a> {
                 wasmparser::TypeRef::Func(type_idx) => {
                     let func_type = &self.types[type_idx as usize];
                     (
-                        &HelperImportKind::Func {
+                        &HelperBindingKind::Func {
                             params: func_type.params(),
                             results: func_type.results(),
                         },
@@ -449,17 +468,20 @@ impl<'a> RawModule<'a> {
                     )
                 }
                 wasmparser::TypeRef::Global(global_type) => (
-                    &HelperImportKind::Global(global_type),
+                    &HelperBindingKind::Global(global_type),
                     placeholder_global_import,
                 ),
                 wasmparser::TypeRef::Memory(memory_type) => (
-                    &HelperImportKind::Memory(memory_type),
+                    &HelperBindingKind::Memory(memory_type),
                     placeholder_memory_import,
                 ),
                 _ => unreachable!("unsupported import kind (forbidden syntactically)"),
             };
             match Self::check_import(module, name, kind) {
-                None => imports.push(import),
+                None => {
+                    imports.push(import);
+                    num_func_imports += 1;
+                }
                 Some(reason) => {
                     editor.set_invalid(import_lines[import_idx], Some(reason));
                     imports.push(placeholder);
@@ -467,11 +489,40 @@ impl<'a> RawModule<'a> {
             };
         }
 
+        /* Disable unacceptible exports */
+        let export_lines = find_export_lines(editor);
+        let mut exports = Vec::new();
+        for (export_idx, export @ wasmparser::Export { name, kind, index }) in
+            self.exports.into_iter().enumerate()
+        {
+            match kind {
+                wasmparser::ExternalKind::Func => {
+                    // Subtract the offset from import functions
+                    let func_idx = index as usize - num_func_imports;
+                    let func_type = &self.types[self.functions[func_idx].type_idx as usize];
+                    match Self::check_export(
+                        name,
+                        &HelperBindingKind::Func {
+                            params: func_type.params(),
+                            results: func_type.results(),
+                        },
+                    ) {
+                        None => exports.push(export),
+                        Some(reason) => {
+                            editor.set_invalid(export_lines[export_idx], Some(reason));
+                        }
+                    }
+                }
+                _ => exports.push(export),
+            }
+        }
+
         let mut ret = ValidModule {
             types: self.types,
             imports,
             memory: self.memory,
             globals: self.globals,
+            exports,
             functions: Vec::with_capacity(self.functions.len()),
         };
 
@@ -764,12 +815,12 @@ impl<'a> RawModule<'a> {
     fn check_import(
         import_module: &str,
         import_name: &str,
-        import_kind: &HelperImportKind,
+        import_kind: &HelperBindingKind,
     ) -> Option<String> {
         // Check if module name exists
         for (module, components) in HELPER_IMPORTS {
             if *module == import_module {
-                for HelperImport { name, kind, reason } in *components {
+                for HelperBinding { name, kind, reason } in *components {
                     // Check if component name exists
                     if *name == import_name {
                         // Check if function type matches
@@ -786,6 +837,21 @@ impl<'a> RawModule<'a> {
             }
         }
         Some(format!("module ‘{import_module}’ not found"))
+    }
+
+    fn check_export(export_name: &str, export_kind: &HelperBindingKind) -> Option<String> {
+        for HelperBinding { name, kind, reason } in HANDLER_EXPORTS {
+            // Check if component name exists
+            if *name == export_name {
+                // Check if function type matches
+                return if export_kind == kind {
+                    None
+                } else {
+                    Some(reason.to_string())
+                };
+            }
+        }
+        Some(format!("function ‘{export_name}’ not found"))
     }
 }
 
@@ -1382,6 +1448,97 @@ impl<'a> ValidModule<'a> {
         code_section.function(&f);
         Ok(())
     }
+
+    pub fn build_binary(&self) -> Result<Vec<u8>> {
+        use wasm_encoder::*;
+        let mut module = Module::default();
+
+        /* Type section */
+        {
+            let mut type_section = TypeSection::new();
+            for ty in &self.types {
+                type_section
+                    .ty()
+                    .func_type(&RoundtripReencoder.func_type(ty.clone())?);
+            }
+            module.section(&type_section);
+        }
+
+        /* Import section */
+        {
+            let mut import_section = ImportSection::new();
+            for import in &self.imports {
+                RoundtripReencoder.parse_import(&mut import_section, *import)?;
+            }
+            module.section(&import_section);
+        }
+
+        /* Function section */
+        {
+            let mut function_section = FunctionSection::new();
+            for func in &self.functions {
+                function_section.function(func.type_idx);
+            }
+            module.section(&function_section);
+        }
+
+        /* Memory section */
+        {
+            let mut memory_section = MemorySection::new();
+            for memory in &self.memory {
+                memory_section.memory(RoundtripReencoder.memory_type(*memory)?);
+            }
+            module.section(&memory_section);
+        }
+
+        /* Global section */
+        {
+            let mut global_section = GlobalSection::new();
+            for global in &self.globals {
+                RoundtripReencoder.parse_global(&mut global_section, global.inner.clone())?;
+            }
+            module.section(&global_section);
+        }
+
+        /* Export section */
+        {
+            let mut export_section = ExportSection::new();
+            for export in &self.exports {
+                RoundtripReencoder.parse_export(&mut export_section, *export)?;
+            }
+            module.section(&export_section);
+        }
+
+        /* Code section */
+        {
+            let mut code_section = CodeSection::new();
+            for orig_function in &self.functions {
+                let mut new_function = Function::new_with_locals_types(
+                    orig_function
+                        .locals
+                        .iter()
+                        .map(|ty| RoundtripReencoder.val_type(ty.inner).fmt_err())
+                        .collect::<Result<Vec<_>>>()?,
+                );
+                for codillon_operator in &orig_function.operators {
+                    if codillon_operator.inner.untyped
+                        || !codillon_operator.inner.prepended.is_empty()
+                    {
+                        // Bail if the binary contains invalidity
+                        bail!("module contains invalid operators");
+                    }
+                    new_function.instruction(
+                        &RoundtripReencoder.instruction(codillon_operator.inner.op.clone())?,
+                    );
+                }
+                code_section.function(&new_function);
+            }
+            module.section(&code_section);
+        }
+
+        let wasm = module.finish();
+        Ok(wasm)
+    }
 }
 
 // Slot represents anywhere that a value can go, e.g. a global, local, or stack operand.
@@ -1895,6 +2052,7 @@ pub(crate) mod tests {
                 imports: raw.imports,
                 memory: raw.memory,
                 globals: raw.globals,
+                exports: raw.exports,
                 functions: vec![],
             };
 
@@ -1942,6 +2100,7 @@ pub(crate) mod tests {
             imports: vec![],
             memory: vec![],
             globals: vec![],
+            exports: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
@@ -2013,6 +2172,7 @@ pub(crate) mod tests {
             imports: vec![],
             memory: vec![],
             globals: vec![],
+            exports: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
@@ -2089,6 +2249,7 @@ pub(crate) mod tests {
             imports: vec![],
             memory: vec![],
             globals: vec![],
+            exports: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
@@ -2170,6 +2331,7 @@ pub(crate) mod tests {
             imports: vec![],
             memory: vec![],
             globals: vec![],
+            exports: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
@@ -2246,6 +2408,7 @@ pub(crate) mod tests {
             imports: vec![],
             memory: vec![],
             globals: vec![],
+            exports: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
@@ -2291,6 +2454,7 @@ pub(crate) mod tests {
             imports: vec![],
             memory: vec![test_mem],
             globals: vec![],
+            exports: vec![],
             functions: vec![],
         };
         let wasm_bin = valid_module.build_instrumented_binary(&TypedModule {
@@ -2389,7 +2553,7 @@ pub(crate) mod tests {
         fn set_frames(&mut self, _frames: Vec<FrameInfo>) {}
     }
 
-    fn test_editor_flow(editor: &mut FakeTextBuffer) -> Result<String> {
+    fn test_editor_flow(editor: &mut FakeTextBuffer, instrumented: bool) -> Result<String> {
         use anyhow::Context;
 
         fix_syntax(editor);
@@ -2418,9 +2582,13 @@ pub(crate) mod tests {
 
         indent_and_frame(editor, &validized, &types);
 
-        let runnable = validized
-            .build_instrumented_binary(&types)
-            .context("build_executable_binary")?;
+        let runnable = if instrumented {
+            validized
+                .build_instrumented_binary(&types)
+                .context("build_executable_binary")?
+        } else {
+            validized.build_binary().context("build_binary")?
+        };
 
         let instrumented_text = wasmprinter::print_bytes(&runnable).context("print_bytes")?;
 
@@ -2484,7 +2652,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // syntax error (synthesizes closing paren)
@@ -2503,7 +2671,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // syntax error (synthesizes closing "func)" on line 1)
@@ -2522,7 +2690,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // syntax error (first operator is `else`)
@@ -2541,7 +2709,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // syntax error (missing (func) field but has instructions)
@@ -2577,7 +2745,7 @@ pub(crate) mod tests {
   )
 )
 "#;
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // well-formed block
@@ -2607,7 +2775,7 @@ pub(crate) mod tests {
                 + JUST_BLOCK_END
                 + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // syntax error (missing `end`) -- should be same as the well-formed block
@@ -2625,7 +2793,7 @@ pub(crate) mod tests {
                 + &JUST_BLOCK_END.replace("i32.const 3", "i32.const 2") // different line # for function end
                 + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // validation error (missing operand)
@@ -2673,7 +2841,7 @@ pub(crate) mod tests {
 )
 "#;
 
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // syntax error (func has inline import but also instructions -- will deactivate the instructions)
@@ -2699,7 +2867,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // syntax error (consumed symbolic reference not defined - module-level, local, label)
@@ -2721,7 +2889,7 @@ pub(crate) mod tests {
                 + EXPECTED_STEP
                 + ")\n";
             let expected = expected.replace("i32.const 3", "i32.const 6");
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // syntax error (label on "end"/"else" doesn't match that introduced by the frame)
@@ -2758,7 +2926,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // validation error (impossible branch -- will be disabled)
@@ -2785,7 +2953,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // validation error (bad memory reference -- will be disabled)
@@ -2821,7 +2989,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // branch instruction renders rest of frame unreachable and pops all accessible operands
@@ -2866,7 +3034,7 @@ pub(crate) mod tests {
 )
 "#;
 
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // validation error (operands not popped at end of block/function)
@@ -2903,7 +3071,7 @@ pub(crate) mod tests {
   )
 )
 "#;
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // additional function with multi-value result type
@@ -3004,7 +3172,7 @@ pub(crate) mod tests {
   )
 )
 "#;
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // local declaration mixed with other module parts
@@ -3040,7 +3208,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // invalid block
@@ -3106,7 +3274,7 @@ pub(crate) mod tests {
   )
 )
 "#;
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         // placeholder import is called
@@ -3134,7 +3302,7 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            assert_eq!(expected, test_editor_flow(&mut editor, true)?);
         }
 
         {
@@ -3146,7 +3314,7 @@ pub(crate) mod tests {
             editor.push_line("local.get $x");
             editor.push_line("drop");
             editor.push_line(")");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3156,7 +3324,7 @@ pub(crate) mod tests {
             editor.push_line("(func");
             editor.push_line("(local $x i32) (local $y i32)");
             editor.push_line(")");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3175,7 +3343,7 @@ pub(crate) mod tests {
             editor.push_line("(");
             editor.push_line("func (param $x i32) (param $x i32)");
             editor.push_line("func)");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3184,7 +3352,7 @@ pub(crate) mod tests {
             editor.push_line("call $f");
             editor.push_line(")");
             editor.push_line("(func $f (import \"x\" \"y\"))");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3194,7 +3362,7 @@ pub(crate) mod tests {
             editor.push_line("if (result i32)");
             editor.push_line("end");
             editor.push_line(")");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3205,7 +3373,7 @@ pub(crate) mod tests {
             editor.push_line("i32.const 4");
             editor.push_line("end");
             editor.push_line(")");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3216,7 +3384,7 @@ pub(crate) mod tests {
             editor.push_line("f32.const 4.0");
             editor.push_line("end");
             editor.push_line(")");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3225,7 +3393,7 @@ pub(crate) mod tests {
             editor.push_line("if (param f64) (result i64)");
             editor.push_line("end");
             editor.push_line(")");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3234,7 +3402,7 @@ pub(crate) mod tests {
             editor.push_line("i32.const 6");
             editor.push_line("if (param i64)");
             editor.push_line(")");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3243,7 +3411,7 @@ pub(crate) mod tests {
             editor.push_line("(func");
             editor.push_line("select");
             editor.push_line(")");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         {
@@ -3253,7 +3421,7 @@ pub(crate) mod tests {
             editor.push_line("unreachable");
             editor.push_line("select");
             editor.push_line(")");
-            test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor, true)?;
         }
 
         Ok(())
@@ -3265,7 +3433,7 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"not_draw\" \"point\" (func (param f64 f64)))");
-            let _ = test_editor_flow(&mut editor)?;
+            let _ = test_editor_flow(&mut editor, true)?;
             assert_eq!(
                 editor.lines[0]
                     .info
@@ -3280,7 +3448,7 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"draw\" \"not_point\" (func (param f64 f64)))");
-            let _ = test_editor_flow(&mut editor)?;
+            let _ = test_editor_flow(&mut editor, true)?;
             assert_eq!(
                 editor.lines[0]
                     .info
@@ -3295,7 +3463,7 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"draw\" \"point\" (func (param i32)))");
-            let _ = test_editor_flow(&mut editor)?;
+            let _ = test_editor_flow(&mut editor, true)?;
             assert_eq!(
                 editor.lines[0]
                     .info
@@ -3310,7 +3478,7 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"draw\" \"point\" (func (param f64, f64)))");
-            let _ = test_editor_flow(&mut editor)?;
+            let _ = test_editor_flow(&mut editor, true)?;
             assert!(
                 editor.lines[0].info.invalid.is_none(),
                 "draw/point should be correctly imported"
@@ -3336,7 +3504,7 @@ pub(crate) mod tests {
             editor.push_line("call $clear_canvas");
             editor.push_line("call $fake_func2");
             editor.push_line(")");
-            let _ = test_editor_flow(&mut editor)?;
+            let _ = test_editor_flow(&mut editor, true)?;
             assert_eq!(
                 editor.lines[0]
                     .info
@@ -3399,7 +3567,7 @@ pub(crate) mod tests {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"listen\" \"num_samples\" (global i32))");
             editor.push_line("(import \"listen\" \"listen_memory\" (memory 1))");
-            let _ = test_editor_flow(&mut editor)?;
+            let _ = test_editor_flow(&mut editor, true)?;
             assert!(
                 editor.lines[0].info.invalid.is_none(),
                 "num_samples global should be valid"
@@ -3415,7 +3583,7 @@ pub(crate) mod tests {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"listen\" \"num_samples\" (global (mut i32)))");
             editor.push_line("(import \"listen\" \"listen_memory\" (memory 2))");
-            let _ = test_editor_flow(&mut editor)?;
+            let _ = test_editor_flow(&mut editor, true)?;
             assert_eq!(
                 editor.lines[0].info.invalid.as_deref(),
                 Some("expected (global i32)"),
@@ -3425,6 +3593,58 @@ pub(crate) mod tests {
                 editor.lines[1].info.invalid.as_deref(),
                 Some("expected (memory 1)"),
                 "listen_memory with wrong size should be invalid"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_binary() -> Result<()> {
+        // Test case 1: straightforward re-encoding
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func (result i32)");
+            editor.push_line("i32.const 42");
+            editor.push_line(")");
+            let expected = r#"(module
+  (type (func (result i32)))
+  (func (type 0) (result i32)
+    i32.const 42
+  )
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor, false)?);
+        }
+
+        // Test case 2: re-encoding imports and exports
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(import \"draw\" \"clear\" (func))");
+            editor.push_line("(func $go)");
+            editor.push_line("(export \"go\" (func $go))");
+            editor.push_line(")");
+            let expected = r#"(module
+  (type (func))
+  (import "draw" "clear" (func (type 0)))
+  (export "go" (func 1))
+  (func (type 0))
+)
+"#;
+            assert_eq!(expected, test_editor_flow(&mut editor, false)?);
+        }
+
+        // Test case 3: invalid code should be rejected
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func (result i32)");
+            editor.push_line("f32.const 1.0");
+            editor.push_line(")");
+            let err = test_editor_flow(&mut editor, false)
+                .expect_err("build_binary should bail on invalid operators");
+            assert_eq!(
+                err.root_cause().to_string(),
+                "module contains invalid operators"
             );
         }
 
