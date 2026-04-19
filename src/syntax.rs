@@ -2,7 +2,7 @@
 
 use crate::line::LineInfo;
 use crate::symbolic::{
-    ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
+    IndexSpace, ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
     symbols_resolved,
 };
 use anyhow::Result;
@@ -608,7 +608,65 @@ impl SyntaxState {
     }
 }
 
-/// Fix frames (and missing function beginning and end) by deactivating
+// LineMutations stores the changes for a line in fix_syntax, enabling rollback.
+// In fix_syntax, global changes, including
+// - state transition
+// - symbolic reference collection
+// - frame_stack operations,
+// need to be reverted if the line is eventually inactivated.
+// Note: Line changes such as setting synthetic_before doesn't strictly need to be 
+//       reverted because they won't take effect for inactive lines.
+enum FrameChange {
+    None,
+    Pushed(InstrKind, Option<String>),
+    Popped(InstrKind, Option<String>),
+    ReplacedIfWithElse(Option<String>),
+}
+
+struct LineMutations {
+    old_state: SyntaxState,
+    module_symbols: Vec<(IndexSpace, String)>,
+    local_symbols: Vec<String>,
+    frame_change: FrameChange,
+}
+
+impl LineMutations {
+    // Revert line/global changes in fix_syntax.
+    // This function should be called when the line is inactivated.
+    fn revert(
+        self,
+        line_no: usize,
+        lines: &mut impl LineInfosMut,
+        state: &mut SyntaxState,
+        frame_stack: &mut Vec<(InstrKind, Option<String>)>,
+        local_symbol_defs: &mut HashSet<String>,
+        module_symbol_defs: &mut ModuleIdentifiers,
+    ) {
+        // Revert SyntaxState
+        *state = self.old_state;
+
+        // Revert symbol collections
+        for (space, name) in self.module_symbols { 
+            module_symbol_defs.remove(&space, &name);
+        }
+        for sym in self.local_symbols { 
+            local_symbol_defs.remove(&sym);
+        }
+
+        // Revert frame stack
+        match self.frame_change {
+            FrameChange::None => {}
+            FrameChange::Pushed(_, _) => { frame_stack.pop(); }
+            FrameChange::Popped(kind, label) => frame_stack.push((kind, label)),
+            FrameChange::ReplacedIfWithElse(label) => {
+                frame_stack.pop();
+                frame_stack.push((InstrKind::If, label));
+            }
+        }
+    }
+}
+
+/// Fix frames (and missing function beginning and end) by deactivating,
 /// unmatched ends, appending ends as necessary to close open
 /// frames, prepending "(" and "func" and appending ")" as necessary, etc.
 pub fn fix_syntax(lines: &mut impl LineInfosMut) {

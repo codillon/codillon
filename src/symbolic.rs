@@ -14,7 +14,7 @@ use wast::{
 use crate::syntax::{LineKind, ModulePart};
 
 #[derive(Clone, Debug, PartialEq)]
-enum IndexSpace {
+pub enum IndexSpace {
     Type,
     Global,
     Mem,
@@ -88,6 +88,12 @@ impl ModuleIdentifiers {
             IndexSpace::Data => Some(&mut self.datas),
             IndexSpace::Elem => Some(&mut self.elems),
             _ => None,
+        }
+    }
+
+    pub fn remove(&mut self, space: &IndexSpace, name: &str) {
+        if let Some(set) = self.set_mut(space) {
+            set.remove(name);
         }
     }
 }
