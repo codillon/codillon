@@ -127,38 +127,36 @@ impl LineSymbols {
 }
 
 // Collect module-level defined symbols; no action for non-module-level symbols.
-// Returns an error and revert the collection if any line symbol is a duplicate within
-// its index space.
+// Returns the inserted symbols on success, or an error (with collection reverted) on duplicate.
 pub fn collect_module_symbols(
     line_symbols: &LineSymbols,
     identifiers: &mut ModuleIdentifiers,
-) -> Result<(), &'static str> {
-    let mut inserted: Vec<(&IndexSpace, &str)> = Vec::new();
+) -> Result<Vec<(IndexSpace, String)>, &'static str> {
+    let mut inserted: Vec<(IndexSpace, String)> = Vec::new();
 
     for symbol in &line_symbols.defines {
         if let Some(set) = identifiers.set_mut(&symbol.space) {
             if !set.insert(symbol.name.clone()) {
                 // Revert collections and return with err
-                for (space, name) in inserted {
-                    identifiers.set_mut(space).unwrap().remove(name);
+                for (space, name) in &inserted {
+                    identifiers.set_mut(space).unwrap().remove(name.as_str());
                 }
                 return Err("duplicate symbolic reference in same index space");
             }
-            inserted.push((&symbol.space, &symbol.name));
+            inserted.push((symbol.space.clone(), symbol.name.clone()));
         }
     }
 
-    Ok(())
+    Ok(inserted)
 }
 
 // Collect function-scoped defined Local symbols; no action for non-local symbols.
-// Returns an error and revert the collection if any line symbol is a duplicate within
-// that function scope.
+// Returns the inserted symbols on success, or an error (with collection reverted) on duplicate.
 pub fn collect_local_symbols(
     line_symbols: &LineSymbols,
     locals: &mut HashSet<String>,
-) -> Result<(), &'static str> {
-    let mut inserted: Vec<&str> = Vec::new();
+) -> Result<Vec<String>, &'static str> {
+    let mut inserted: Vec<String> = Vec::new();
 
     for symbol in &line_symbols.defines {
         if symbol.space != IndexSpace::Local {
@@ -166,15 +164,15 @@ pub fn collect_local_symbols(
         }
         if !locals.insert(symbol.name.clone()) {
             // Revert collections and return with err
-            for name in inserted {
-                locals.remove(name);
+            for name in &inserted {
+                locals.remove(name.as_str());
             }
             return Err("duplicate local symbolic reference");
         }
-        inserted.push(&symbol.name);
+        inserted.push(symbol.name.clone());
     }
 
-    Ok(())
+    Ok(inserted)
 }
 
 // Return the label defined in the line, if there's any, ignoring non-label symbols.

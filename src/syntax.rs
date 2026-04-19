@@ -2,8 +2,8 @@
 
 use crate::line::LineInfo;
 use crate::symbolic::{
-    IndexSpace, ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
-    symbols_resolved,
+    IndexSpace, ModuleIdentifiers, collect_label_symbol, collect_local_symbols,
+    collect_module_symbols, symbols_resolved,
 };
 use anyhow::Result;
 use std::collections::HashSet;
@@ -611,10 +611,11 @@ impl SyntaxState {
 // LineMutations stores the changes for a line in fix_syntax, enabling rollback.
 // In fix_syntax, global changes, including
 // - state transition
+// - before_imports state
 // - symbolic reference collection
 // - frame_stack operations,
 // need to be reverted if the line is eventually inactivated.
-// Note: Line changes such as setting synthetic_before doesn't strictly need to be 
+// Note: Line changes such as setting synthetic_before doesn't strictly need to be
 //       reverted because they won't take effect for inactive lines.
 enum FrameChange {
     None,
@@ -625,6 +626,7 @@ enum FrameChange {
 
 struct LineMutations {
     old_state: SyntaxState,
+    old_before_imports: bool,
     module_symbols: Vec<(IndexSpace, String)>,
     local_symbols: Vec<String>,
     frame_change: FrameChange,
@@ -635,25 +637,22 @@ impl LineMutations {
     // This function should be called when the line is inactivated.
     fn revert(
         self,
-        line_no: usize,
-        lines: &mut impl LineInfosMut,
         state: &mut SyntaxState,
+        before_imports: &mut bool,
         frame_stack: &mut Vec<(InstrKind, Option<String>)>,
         local_symbol_defs: &mut HashSet<String>,
         module_symbol_defs: &mut ModuleIdentifiers,
     ) {
-        // Revert SyntaxState
         *state = self.old_state;
+        *before_imports = self.old_before_imports;
 
-        // Revert symbol collections
-        for (space, name) in self.module_symbols { 
+        for (space, name) in self.module_symbols {
             module_symbol_defs.remove(&space, &name);
         }
-        for sym in self.local_symbols { 
+        for sym in self.local_symbols {
             local_symbol_defs.remove(&sym);
         }
 
-        // Revert frame stack
         match self.frame_change {
             FrameChange::None => {}
             FrameChange::Pushed(_, _) => { frame_stack.pop(); }
@@ -664,6 +663,161 @@ impl LineMutations {
             }
         }
     }
+}
+
+// Attempt all syntax fixes for a single line, mutating global processing state.
+// Accumulate changes into mutations as it proceeds.
+// Return Err if the line should be inactivated; the caller is responsible for
+// calling mutations.revert() to undo any partial changes.
+fn try_fix_syntax(
+    line_no: usize,
+    lines: &mut impl LineInfosMut,
+    state: &mut SyntaxState,
+    frame_stack: &mut Vec<(InstrKind, Option<String>)>,
+    local_symbol_defs: &mut HashSet<String>,
+    module_symbol_defs: &mut ModuleIdentifiers,
+    before_imports: &mut bool,
+    mutations: &mut LineMutations,
+) -> Result<(), &'static str> {
+    use crate::line::Activity::*;
+    use SyntaxState::*;
+
+    mutations.old_state = *state;
+    mutations.old_before_imports = *before_imports;
+    mutations.module_symbols.clear();
+    mutations.local_symbols.clear();
+    mutations.frame_change = FrameChange::None;
+
+    let line_kind = lines.info(line_no).kind.stripped_clone();
+
+    // Enforce no imports after other module fields, and collect module-level symbols
+    if let LineKind::Other(parts) = &line_kind {
+        let has_import = parts
+            .iter()
+            .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport));
+        let module_field = parts.iter().any(|&p| {
+            matches!(
+                p,
+                ModulePart::Memory
+                    | ModulePart::Table
+                    | ModulePart::Global
+                    | ModulePart::Export
+            )
+        });
+
+        if has_import && !*before_imports {
+            return Err("imports must appear before other module fields");
+        } else if module_field || (parts.contains(&ModulePart::RParen) && !has_import) {
+            *before_imports = false;
+        }
+
+        let added = collect_module_symbols(&lines.info(line_no).symbols, module_symbol_defs)?;
+        mutations.module_symbols.extend(added);
+    }
+
+    // Enforce correct symbolic reference consumption
+    let label_symbol_defs: Vec<String> = match &line_kind {
+        LineKind::Instr(InstrKind::End) | LineKind::Instr(InstrKind::Else) => frame_stack
+            .last()
+            .and_then(|(_, label)| label.clone())
+            .into_iter()
+            .collect(),
+        _ => frame_stack
+            .iter()
+            .filter_map(|(_, label)| label.clone())
+            .collect(),
+    };
+    if !symbols_resolved(
+        &lines.info(line_no).symbols,
+        module_symbol_defs,
+        local_symbol_defs,
+        &label_symbol_defs,
+    ) {
+        return Err("undefined symbolic reference");
+    }
+
+    // Fixup instructions that appear where they don't belong
+    if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
+        match state {
+            // Fix #1: Disable an instruction that appears in an imported function
+            AfterFuncHeader(FuncHeader { is_import: true, .. }) => {
+                return Err("imported functions cannot have instructions");
+            }
+            // Fix #2: prepend "(func" if an instruction appears at module scope
+            Initial => lines.set_synthetic_before(
+                line_no,
+                SyntheticWasm {
+                    module_field_syntax: vec![ModulePart::LParen, ModulePart::FuncKeyword],
+                    ..Default::default()
+                },
+            ),
+            // Fix #3: prepend "func" if an instruction appears after just "("
+            AfterModuleFieldLParen => lines.set_synthetic_before(
+                line_no,
+                SyntheticWasm {
+                    module_field_syntax: vec![ModulePart::FuncKeyword],
+                    ..Default::default()
+                },
+            ),
+            _ => {}
+        }
+    }
+
+    // Process the line and transition the syntax state
+    state.transit_state(&lines.info(line_no), |_| {})?;
+
+    if *state == Initial {
+        // Fix #4: at end of function body, synthetically close all open frames
+        lines.set_synthetic_before(
+            line_no,
+            SyntheticWasm {
+                end_opcodes: frame_stack.len(),
+                ..Default::default()
+            },
+        );
+        frame_stack.clear();
+        local_symbol_defs.clear();
+        return Ok(());
+    }
+
+    // Enforce syntax requirements of structured instructions
+    if let LineKind::Instr(instr_kind) = line_kind {
+        match instr_kind {
+            // For a structured instruction that opens a frame, log this.
+            InstrKind::If | InstrKind::Loop | InstrKind::OtherStructured => {
+                let label = collect_label_symbol(&lines.info(line_no).symbols);
+                frame_stack.push((instr_kind, label.clone()));
+                mutations.frame_change = FrameChange::Pushed(instr_kind, label);
+            }
+
+            // Fix #5: if an `else` appears outside an `if` frame, disable it
+            InstrKind::Else => {
+                if let Some((InstrKind::If, _)) = frame_stack.last() {
+                    let (_, if_label) = frame_stack.pop().unwrap();
+                    frame_stack.push((InstrKind::Else, if_label.clone()));
+                    mutations.frame_change = FrameChange::ReplacedIfWithElse(if_label);
+                } else {
+                    return Err("'else' outside 'if'");
+                }
+            }
+
+            // Fix #6: if an `end` appears outside a frame, disable it
+            InstrKind::End => {
+                if let Some(popped) = frame_stack.pop() {
+                    mutations.frame_change = FrameChange::Popped(popped.0, popped.1);
+                } else {
+                    return Err("nothing to end");
+                }
+            }
+            InstrKind::Other => {}
+        }
+    }
+
+    // Collect defined local symbolic references
+    let added = collect_local_symbols(&lines.info(line_no).symbols, local_symbol_defs)?;
+    mutations.local_symbols.extend(added);
+
+    Ok(())
 }
 
 /// Fix frames (and missing function beginning and end) by deactivating,
