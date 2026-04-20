@@ -908,8 +908,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             local_symbol_defs: &mut local_symbol_defs,
             module_symbol_defs: &mut module_symbol_defs,
         };
-        let line_fix_result =
-            try_fix_line_syntax(line_no, lines, &mut ctx, mutations);
+        let line_fix_result = try_fix_line_syntax(line_no, lines, &mut ctx, mutations);
         match line_fix_result {
             Ok(_) => {
                 if mutations.clear_func {
