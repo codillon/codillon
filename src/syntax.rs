@@ -6,7 +6,7 @@ use crate::symbolic::{
     collect_module_symbols, symbols_resolved,
 };
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use wast::{
     Error,
@@ -747,21 +747,36 @@ fn try_fix_line_syntax(
                 return Err("imported functions cannot have instructions");
             }
             // Fix #2: prepend "(func" if an instruction appears at module scope
-            Initial => lines.set_synthetic_before(
-                line_no,
-                SyntheticWasm {
-                    module_field_syntax: vec![ModulePart::LParen, ModulePart::FuncKeyword],
-                    ..Default::default()
-                },
-            ),
+            Initial => {
+                lines.set_synthetic_before(
+                    line_no,
+                    SyntheticWasm {
+                        module_field_syntax: vec![ModulePart::LParen, ModulePart::FuncKeyword],
+                        ..Default::default()
+                    },
+                );
+                // Synthetic ends take effect even if the line is inactivated
+                // old_state should reflect the states *after* synthetic ends
+                mutations.old_state = AfterFuncHeader(FuncHeader {
+                    is_import: false,
+                    next_field: 1,
+                });
+            }
             // Fix #3: prepend "func" if an instruction appears after just "("
-            AfterModuleFieldLParen => lines.set_synthetic_before(
-                line_no,
-                SyntheticWasm {
-                    module_field_syntax: vec![ModulePart::FuncKeyword],
-                    ..Default::default()
-                },
-            ),
+            AfterModuleFieldLParen => {
+                lines.set_synthetic_before(
+                    line_no,
+                    SyntheticWasm {
+                        module_field_syntax: vec![ModulePart::FuncKeyword],
+                        ..Default::default()
+                    },
+                );
+                // Subsequent passes process this synthetic even for inactive lines.
+                mutations.old_state = AfterFuncHeader(FuncHeader {
+                    is_import: false,
+                    next_field: 1,
+                });
+            }
             _ => {}
         }
     }
@@ -779,6 +794,8 @@ fn try_fix_line_syntax(
             },
         );
         mutations.clear_func = true;
+        // old_state should reflect the states *after* synthetic ends
+        mutations.old_state = Initial;
     }
 
     // Enforce syntax requirements of structured instructions
@@ -837,6 +854,11 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     // Structures for symbolic references
     let mut module_symbol_defs = ModuleIdentifiers::default();
     let mut local_symbol_defs: HashSet<String> = HashSet::new();
+
+    // Map a module-level symbol to its users' line numbers
+    // When a *forward* module-level symbol's def line is inactivated, the backward
+    // users' lines need to be inactivated also due to undefined symbolic reference
+    let mut module_symbol_users: HashMap<(IndexSpace, String), Vec<usize>> = HashMap::new();
 
     assert!(lines.len() > 0);
 
@@ -899,6 +921,16 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     local_symbol_defs.clear();
                     frame_stack.clear();
                 }
+
+                // Record the line if it uses any module-level symbols
+                for sym_ref in &lines.info(line_no).symbols.consumes {
+                    if module_symbol_defs.contains(&sym_ref.space, &sym_ref.name) {
+                        module_symbol_users
+                            .entry((sym_ref.space.clone(), sym_ref.name.clone()))
+                            .or_default()
+                            .push(line_no);
+                    }
+                }
             }
             Err(reason) => {
                 lines.set_active_status(line_no, Inactive(reason));
@@ -909,6 +941,21 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     &mut local_symbol_defs,
                     &mut module_symbol_defs,
                 );
+
+                // Inactivate the dangling module-level symbol users
+                for sym in &lines_mutations[line_no].module_symbols {
+                    let Some(users) = module_symbol_users.get(&sym) else {
+                        continue;
+                    };
+                    for &user_lineno in users {
+                        if lines.info(user_lineno).is_active() {
+                            lines.set_active_status(
+                                user_lineno,
+                                Inactive("undefined symbolic reference"),
+                            );
+                        }
+                    }
+                }
             }
         }
     }

@@ -13,7 +13,7 @@ use wast::{
 
 use crate::syntax::{LineKind, ModulePart};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum IndexSpace {
     Type,
     Global,
@@ -91,6 +91,10 @@ impl ModuleIdentifiers {
         }
     }
 
+    pub fn contains(&self, space: &IndexSpace, name: &str) -> bool {
+        self.set(space).is_some_and(|s| s.contains(name))
+    }
+
     pub fn remove(&mut self, space: &IndexSpace, name: &str) {
         if let Some(set) = self.set_mut(space) {
             set.remove(name);
@@ -100,8 +104,8 @@ impl ModuleIdentifiers {
 
 #[derive(Clone, Debug)]
 pub struct SymbolRef {
-    name: String,
-    space: IndexSpace,
+    pub name: String,
+    pub space: IndexSpace,
 }
 
 impl SymbolRef {
@@ -115,8 +119,8 @@ impl SymbolRef {
 
 #[derive(Default, Debug, Clone)]
 pub struct LineSymbols {
-    defines: Vec<SymbolRef>,
-    consumes: Vec<SymbolRef>,
+    pub defines: Vec<SymbolRef>,
+    pub consumes: Vec<SymbolRef>,
 }
 
 impl LineSymbols {
