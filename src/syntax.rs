@@ -866,7 +866,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     // Pre-scan: settle "global" states that must be known before per-line fixes, including
     // - initialize per-line info;
     // - collect all module-level symbols for forward reference resolution.
-    for line_no in 0..lines.len() {
+    for (line_no, mutations) in (0..).zip(lines_mutations.iter_mut()) {
         // Initialize per-line info
         lines.set_synthetic_before(line_no, SyntheticWasm::default());
         lines.set_active_status(line_no, Active);
@@ -880,7 +880,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             Ok(added) => {
                 // Add the symbol collection to LineMutations. If the line is inactivated later,
                 // the inserted symbols will be removed.
-                lines_mutations[line_no].module_symbols.extend(added);
+                mutations.module_symbols.extend(added);
             }
             Err(reason) => {
                 // Symbols are not collected. There's no global change so reversion is not needed,
@@ -890,14 +890,14 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         }
     }
 
-    for line_no in 0..lines.len() {
+    for (line_no, mutations) in (0..).zip(lines_mutations.iter_mut()) {
         // Ignore the line if it's already inactivated during the pre-scan stage.
         if !lines.info(line_no).is_active() {
             continue;
         }
 
-        lines_mutations[line_no].old_state = state;
-        lines_mutations[line_no].old_before_imports = before_imports;
+        mutations.old_state = state;
+        mutations.old_before_imports = before_imports;
 
         // Try to fix per-line syntax.
         // Revert global changes and inactivate the line if syntax is invalid.
@@ -909,10 +909,10 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             module_symbol_defs: &mut module_symbol_defs,
         };
         let line_fix_result =
-            try_fix_line_syntax(line_no, lines, &mut ctx, &mut lines_mutations[line_no]);
+            try_fix_line_syntax(line_no, lines, &mut ctx, mutations);
         match line_fix_result {
             Ok(_) => {
-                if lines_mutations[line_no].clear_func {
+                if mutations.clear_func {
                     // Need to clear function-level stacks
                     ctx.local_symbol_defs.clear();
                     ctx.frame_stack.clear();
@@ -933,10 +933,10 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             }
             Err(reason) => {
                 lines.set_active_status(line_no, Inactive(reason));
-                lines_mutations[line_no].revert(&mut ctx);
+                mutations.revert(&mut ctx);
 
                 // Inactivate the dangling module-level symbol users
-                for sym in &lines_mutations[line_no].module_symbols {
+                for sym in &mutations.module_symbols {
                     let Some(users) = module_symbol_users.get(sym) else {
                         continue;
                     };
