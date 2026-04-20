@@ -619,7 +619,7 @@ impl SyntaxState {
 //       reverted because they won't take effect for inactive lines.
 enum FrameChange {
     None,
-    Pushed(InstrKind, Option<String>),
+    Pushed,
     Popped(InstrKind, Option<String>),
     ReplacedIfWithElse(Option<String>),
 }
@@ -629,14 +629,26 @@ struct LineMutations {
     old_before_imports: bool,
     module_symbols: Vec<(IndexSpace, String)>,
     local_symbols: Vec<String>,
-    frame_change: FrameChange,
+    frame_change: FrameChange, // frame_stack changes
+    clear_func: bool,          // clear func-scope states?
 }
 
 impl LineMutations {
+    fn new() -> Self {
+        Self {
+            old_state: SyntaxState::Initial,
+            old_before_imports: false,
+            module_symbols: Vec::new(),
+            local_symbols: Vec::new(),
+            frame_change: FrameChange::None,
+            clear_func: false,
+        }
+    }
+
     // Revert line/global changes in fix_syntax.
     // This function should be called when the line is inactivated.
     fn revert(
-        self,
+        &self,
         state: &mut SyntaxState,
         before_imports: &mut bool,
         frame_stack: &mut Vec<(InstrKind, Option<String>)>,
@@ -646,20 +658,22 @@ impl LineMutations {
         *state = self.old_state;
         *before_imports = self.old_before_imports;
 
-        for (space, name) in self.module_symbols {
+        for (space, name) in &self.module_symbols {
             module_symbol_defs.remove(&space, &name);
         }
-        for sym in self.local_symbols {
-            local_symbol_defs.remove(&sym);
+        for sym in &self.local_symbols {
+            local_symbol_defs.remove(sym);
         }
 
-        match self.frame_change {
+        match &self.frame_change {
             FrameChange::None => {}
-            FrameChange::Pushed(_, _) => { frame_stack.pop(); }
-            FrameChange::Popped(kind, label) => frame_stack.push((kind, label)),
+            FrameChange::Pushed => {
+                frame_stack.pop();
+            }
+            FrameChange::Popped(kind, label) => frame_stack.push((*kind, label.clone())),
             FrameChange::ReplacedIfWithElse(label) => {
                 frame_stack.pop();
-                frame_stack.push((InstrKind::If, label));
+                frame_stack.push((InstrKind::If, label.clone()));
             }
         }
     }
@@ -669,28 +683,21 @@ impl LineMutations {
 // Accumulate changes into mutations as it proceeds.
 // Return Err if the line should be inactivated; the caller is responsible for
 // calling mutations.revert() to undo any partial changes.
-fn try_fix_syntax(
+fn try_fix_line_syntax(
     line_no: usize,
     lines: &mut impl LineInfosMut,
     state: &mut SyntaxState,
+    before_imports: &mut bool,
     frame_stack: &mut Vec<(InstrKind, Option<String>)>,
     local_symbol_defs: &mut HashSet<String>,
     module_symbol_defs: &mut ModuleIdentifiers,
-    before_imports: &mut bool,
     mutations: &mut LineMutations,
 ) -> Result<(), &'static str> {
-    use crate::line::Activity::*;
     use SyntaxState::*;
-
-    mutations.old_state = *state;
-    mutations.old_before_imports = *before_imports;
-    mutations.module_symbols.clear();
-    mutations.local_symbols.clear();
-    mutations.frame_change = FrameChange::None;
 
     let line_kind = lines.info(line_no).kind.stripped_clone();
 
-    // Enforce no imports after other module fields, and collect module-level symbols
+    // Enforce no imports after other module fields
     if let LineKind::Other(parts) = &line_kind {
         let has_import = parts
             .iter()
@@ -698,10 +705,7 @@ fn try_fix_syntax(
         let module_field = parts.iter().any(|&p| {
             matches!(
                 p,
-                ModulePart::Memory
-                    | ModulePart::Table
-                    | ModulePart::Global
-                    | ModulePart::Export
+                ModulePart::Memory | ModulePart::Table | ModulePart::Global | ModulePart::Export
             )
         });
 
@@ -710,9 +714,6 @@ fn try_fix_syntax(
         } else if module_field || (parts.contains(&ModulePart::RParen) && !has_import) {
             *before_imports = false;
         }
-
-        let added = collect_module_symbols(&lines.info(line_no).symbols, module_symbol_defs)?;
-        mutations.module_symbols.extend(added);
     }
 
     // Enforce correct symbolic reference consumption
@@ -740,7 +741,9 @@ fn try_fix_syntax(
     if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
         match state {
             // Fix #1: Disable an instruction that appears in an imported function
-            AfterFuncHeader(FuncHeader { is_import: true, .. }) => {
+            AfterFuncHeader(FuncHeader {
+                is_import: true, ..
+            }) => {
                 return Err("imported functions cannot have instructions");
             }
             // Fix #2: prepend "(func" if an instruction appears at module scope
@@ -775,9 +778,7 @@ fn try_fix_syntax(
                 ..Default::default()
             },
         );
-        frame_stack.clear();
-        local_symbol_defs.clear();
-        return Ok(());
+        mutations.clear_func = true;
     }
 
     // Enforce syntax requirements of structured instructions
@@ -787,12 +788,13 @@ fn try_fix_syntax(
             InstrKind::If | InstrKind::Loop | InstrKind::OtherStructured => {
                 let label = collect_label_symbol(&lines.info(line_no).symbols);
                 frame_stack.push((instr_kind, label.clone()));
-                mutations.frame_change = FrameChange::Pushed(instr_kind, label);
+                mutations.frame_change = FrameChange::Pushed;
             }
 
             // Fix #5: if an `else` appears outside an `if` frame, disable it
             InstrKind::Else => {
                 if let Some((InstrKind::If, _)) = frame_stack.last() {
+                    // Carry over labels from If frame
                     let (_, if_label) = frame_stack.pop().unwrap();
                     frame_stack.push((InstrKind::Else, if_label.clone()));
                     mutations.frame_change = FrameChange::ReplacedIfWithElse(if_label);
@@ -838,195 +840,81 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
     assert!(lines.len() > 0);
 
-    // first pass: disable imports appearing after other module fields,
-    // and declare module-scope symbolic ids for any surviving lines.
+    // "Global" changes from each line
+    let mut lines_mutations: Vec<LineMutations> =
+        (0..lines.len()).map(|_| LineMutations::new()).collect();
 
-    // There are probably still cases that can produce a "bounce."
+    // Pre-scan: settle "global" states that must be known before per-line fixes, including
+    // - initialize per-line info;
+    // - collect all module-level symbols for forward reference resolution.
     for line_no in 0..lines.len() {
+        // Initialize per-line info
         lines.set_synthetic_before(line_no, SyntheticWasm::default());
         lines.set_active_status(line_no, Active);
         lines.set_invalid(line_no, None);
         lines.set_runtime_error(line_no, None);
 
-        let line_kind = lines.info(line_no).kind.stripped_clone();
-
-        // Enforce no imports after other module fields
-        if let LineKind::Other(parts) = &line_kind {
-            let has_import = parts
-                .iter()
-                .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport));
-            let module_field = parts.iter().any(|&p| {
-                matches!(
-                    p,
-                    ModulePart::Memory
-                        | ModulePart::Table
-                        | ModulePart::Global
-                        | ModulePart::Export
-                )
-            });
-            if has_import && !before_imports {
-                lines.set_active_status(
-                    line_no,
-                    Inactive("imports must appear before other module fields"),
-                );
-                continue;
-            } else if module_field || (parts.contains(&ModulePart::RParen) && !has_import) {
-                before_imports = false;
+        // Collect module-level symbols
+        let collect_result =
+            collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
+        match collect_result {
+            Ok(added) => {
+                // Add the symbol collection to LineMutations. If the line is inactivated later,
+                // the inserted symbols will be removed.
+                lines_mutations[line_no].module_symbols.extend(added);
             }
-
-            // Collect module-level symbols
-            let collect_result =
-                collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
-            if let Err(reason) = collect_result {
+            Err(reason) => {
+                // Symbols are not collected. There's no global change so reversion is not needed,
+                // Inactivate the line directly,
                 lines.set_active_status(line_no, Inactive(reason));
-                continue;
             }
         }
     }
 
-    // second pass: disable other lines that would make module malformed
     for line_no in 0..lines.len() {
-        let line_kind = lines.info(line_no).kind.stripped_clone();
-
-        // Enforce correct symbolic reference consumption
-        if lines.info(line_no).is_active() {
-            // end/else must match the label of the frame being closed, not any enclosing frame
-            let label_symbol_defs: Vec<String> = match line_kind {
-                LineKind::Instr(InstrKind::End) | LineKind::Instr(InstrKind::Else) => frame_stack
-                    .last()
-                    .and_then(|(_, label)| label.clone())
-                    .into_iter()
-                    .collect(),
-                _ => frame_stack
-                    .iter()
-                    .filter_map(|(_, label)| label.clone())
-                    .collect(),
-            };
-            if !symbols_resolved(
-                &lines.info(line_no).symbols,
-                &module_symbol_defs,
-                &local_symbol_defs,
-                &label_symbol_defs,
-            ) {
-                lines.set_active_status(line_no, Inactive("undefined symbolic reference"));
-                continue;
-            }
+        // Ignore the line if it's already inactivated during the pre-scan stage.
+        if !lines.info(line_no).is_active() {
+            continue;
         }
 
-        // Fixup instructions that appear where they don't belong
-        if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
-            match state {
-                // Fix #1: Disable an instruction that appears in an imported function, skipping to next line
-                AfterFuncHeader(FuncHeader {
-                    is_import: true, ..
-                }) => {
-                    lines.set_active_status(
-                        line_no,
-                        Inactive("imported functions cannot have instructions"),
-                    );
-                    continue;
-                }
-                // Fix #2: prepend "(func" if an instruction appears at module scope
-                Initial => lines.set_synthetic_before(
-                    line_no,
-                    SyntheticWasm {
-                        module_field_syntax: vec![ModulePart::LParen, ModulePart::FuncKeyword],
-                        ..Default::default()
-                    },
-                ),
-                // Fix #3: prepend "func" if an instruction appears after just "("
-                AfterModuleFieldLParen => lines.set_synthetic_before(
-                    line_no,
-                    SyntheticWasm {
-                        module_field_syntax: vec![ModulePart::FuncKeyword],
-                        ..Default::default()
-                    },
-                ),
-                _ => {}
-            }
-        }
+        lines_mutations[line_no].old_state = state;
+        lines_mutations[line_no].old_before_imports = before_imports;
 
-        // Process the line and transition the syntax state
-        let orig_state = state;
-        {
-            let res = state.transit_state(&lines.info(line_no), |_| {});
-            match res {
-                Ok(()) => {
-                    if state == Initial {
-                        // Fix #4: at end of function body, synthetically close all open frames
-                        lines.set_synthetic_before(
-                            line_no,
-                            SyntheticWasm {
-                                end_opcodes: frame_stack.len(),
-                                ..Default::default()
-                            },
-                        );
-                        frame_stack.clear();
-                        local_symbol_defs.clear();
-                    }
-                }
-                Err(e) => {
-                    // If state transition is unacceptable here, disable line, revert state, and skip to next line
-                    lines.set_active_status(line_no, Inactive(e));
-                    state = orig_state;
-                    continue;
+        // Try to fix per-line syntax.
+        // Revert global changes and inactivate the line if syntax is invalid.
+        let line_fix_result = try_fix_line_syntax(
+            line_no,
+            lines,
+            &mut state,
+            &mut before_imports,
+            &mut frame_stack,
+            &mut local_symbol_defs,
+            &mut module_symbol_defs,
+            &mut lines_mutations[line_no],
+        );
+        match line_fix_result {
+            Ok(_) => {
+                if lines_mutations[line_no].clear_func {
+                    // Need to clear function-level stacks
+                    local_symbol_defs.clear();
+                    frame_stack.clear();
                 }
             }
-        }
-
-        // Enforce syntax requirements of structured instructions
-        if let LineKind::Instr(instr_kind) = line_kind {
-            match instr_kind {
-                // For a structured instruction that opens a frame, log this.
-                InstrKind::If | InstrKind::Loop | InstrKind::OtherStructured => {
-                    lines.set_active_status(line_no, Active);
-                    frame_stack.push((
-                        instr_kind,
-                        collect_label_symbol(&lines.info(line_no).symbols),
-                    ));
-                }
-
-                // Fix #5: if an `else` appears outside an `if` frame, disable it
-                InstrKind::Else => {
-                    if let Some((InstrKind::If, _)) = frame_stack.last() {
-                        lines.set_active_status(line_no, Active);
-                        // Carry over labels from If frame
-                        let (_, if_label) = frame_stack.pop().unwrap();
-                        frame_stack.push((InstrKind::Else, if_label));
-                    } else {
-                        lines.set_active_status(line_no, Inactive("‘else’ outside ‘if’"));
-                    }
-                }
-
-                // Fix #6: if an `end` appears outside a frame, disable it
-                InstrKind::End => lines.set_active_status(
-                    line_no,
-                    if frame_stack.pop().is_some() {
-                        Active
-                    } else {
-                        Inactive("nothing to end")
-                    },
-                ),
-                InstrKind::Other => (),
-            }
-        }
-
-        // Collect defined local symbolic references if there's any.
-        // This collection should be after the state transition, because both of them can
-        // inactivate a line and need to revert the state and/or remove collected symbols after
-        // the inactivation. Reverting state is much simpler than removing symbols.
-        if lines.info(line_no).is_active() {
-            let collect_result =
-                collect_local_symbols(&lines.info(line_no).symbols, &mut local_symbol_defs);
-            if let Err(reason) = collect_result {
-                // Inactivate line and revert state
+            Err(reason) => {
                 lines.set_active_status(line_no, Inactive(reason));
-                state = orig_state;
-                continue;
+                lines_mutations[line_no].revert(
+                    &mut state,
+                    &mut before_imports,
+                    &mut frame_stack,
+                    &mut local_symbol_defs,
+                    &mut module_symbol_defs,
+                );
             }
         }
     }
 
+    // Global syntax fixes.
+    // WARNING: Below this point, don't inactivate lines any more!
     match state {
         // Fix #7: if ending with "(" state, close with "func)"
         AfterModuleFieldLParen => {
