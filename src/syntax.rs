@@ -633,6 +633,14 @@ struct LineMutations {
     clear_func: bool,          // clear func-scope states?
 }
 
+struct SyntaxFixContext<'a> {
+    state: &'a mut SyntaxState,
+    before_imports: &'a mut bool,
+    local_symbol_defs: &'a mut HashSet<String>,
+    module_symbol_defs: &'a mut ModuleIdentifiers,
+    frame_stack: &'a mut Vec<(InstrKind, Option<String>)>,
+}
+
 impl LineMutations {
     fn new() -> Self {
         Self {
@@ -645,35 +653,26 @@ impl LineMutations {
         }
     }
 
-    // Revert line/global changes in fix_syntax.
-    // This function should be called when the line is inactivated.
-    fn revert(
-        &self,
-        state: &mut SyntaxState,
-        before_imports: &mut bool,
-        frame_stack: &mut Vec<(InstrKind, Option<String>)>,
-        local_symbol_defs: &mut HashSet<String>,
-        module_symbol_defs: &mut ModuleIdentifiers,
-    ) {
-        *state = self.old_state;
-        *before_imports = self.old_before_imports;
+    fn revert(&self, ctx: &mut SyntaxFixContext<'_>) {
+        *ctx.state = self.old_state;
+        *ctx.before_imports = self.old_before_imports;
 
         for (space, name) in &self.module_symbols {
-            module_symbol_defs.remove(&space, &name);
+            ctx.module_symbol_defs.remove(space, name);
         }
         for sym in &self.local_symbols {
-            local_symbol_defs.remove(sym);
+            ctx.local_symbol_defs.remove(sym);
         }
 
         match &self.frame_change {
             FrameChange::None => {}
             FrameChange::Pushed => {
-                frame_stack.pop();
+                ctx.frame_stack.pop();
             }
-            FrameChange::Popped(kind, label) => frame_stack.push((*kind, label.clone())),
+            FrameChange::Popped(kind, label) => ctx.frame_stack.push((*kind, label.clone())),
             FrameChange::ReplacedIfWithElse(label) => {
-                frame_stack.pop();
-                frame_stack.push((InstrKind::If, label.clone()));
+                ctx.frame_stack.pop();
+                ctx.frame_stack.push((InstrKind::If, label.clone()));
             }
         }
     }
@@ -686,11 +685,7 @@ impl LineMutations {
 fn try_fix_line_syntax(
     line_no: usize,
     lines: &mut impl LineInfosMut,
-    state: &mut SyntaxState,
-    before_imports: &mut bool,
-    frame_stack: &mut Vec<(InstrKind, Option<String>)>,
-    local_symbol_defs: &mut HashSet<String>,
-    module_symbol_defs: &mut ModuleIdentifiers,
+    ctx: &mut SyntaxFixContext<'_>,
     mutations: &mut LineMutations,
 ) -> Result<(), &'static str> {
     use SyntaxState::*;
@@ -709,29 +704,31 @@ fn try_fix_line_syntax(
             )
         });
 
-        if has_import && !*before_imports {
+        if has_import && !*ctx.before_imports {
             return Err("imports must appear before other module fields");
         } else if module_field || (parts.contains(&ModulePart::RParen) && !has_import) {
-            *before_imports = false;
+            *ctx.before_imports = false;
         }
     }
 
     // Enforce correct symbolic reference consumption
     let label_symbol_defs: Vec<String> = match &line_kind {
-        LineKind::Instr(InstrKind::End) | LineKind::Instr(InstrKind::Else) => frame_stack
+        LineKind::Instr(InstrKind::End) | LineKind::Instr(InstrKind::Else) => ctx
+            .frame_stack
             .last()
             .and_then(|(_, label)| label.clone())
             .into_iter()
             .collect(),
-        _ => frame_stack
+        _ => ctx
+            .frame_stack
             .iter()
             .filter_map(|(_, label)| label.clone())
             .collect(),
     };
     if !symbols_resolved(
         &lines.info(line_no).symbols,
-        module_symbol_defs,
-        local_symbol_defs,
+        ctx.module_symbol_defs,
+        ctx.local_symbol_defs,
         &label_symbol_defs,
     ) {
         return Err("undefined symbolic reference");
@@ -739,7 +736,7 @@ fn try_fix_line_syntax(
 
     // Fixup instructions that appear where they don't belong
     if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
-        match state {
+        match ctx.state {
             // Fix #1: Disable an instruction that appears in an imported function
             AfterFuncHeader(FuncHeader {
                 is_import: true, ..
@@ -782,14 +779,14 @@ fn try_fix_line_syntax(
     }
 
     // Process the line and transition the syntax state
-    state.transit_state(&lines.info(line_no), |_| {})?;
+    ctx.state.transit_state(&lines.info(line_no), |_| {})?;
 
-    if *state == Initial {
+    if *ctx.state == Initial {
         // Fix #4: at end of function body, synthetically close all open frames
         lines.set_synthetic_before(
             line_no,
             SyntheticWasm {
-                end_opcodes: frame_stack.len(),
+                end_opcodes: ctx.frame_stack.len(),
                 ..Default::default()
             },
         );
@@ -804,16 +801,16 @@ fn try_fix_line_syntax(
             // For a structured instruction that opens a frame, log this.
             InstrKind::If | InstrKind::Loop | InstrKind::OtherStructured => {
                 let label = collect_label_symbol(&lines.info(line_no).symbols);
-                frame_stack.push((instr_kind, label.clone()));
+                ctx.frame_stack.push((instr_kind, label.clone()));
                 mutations.frame_change = FrameChange::Pushed;
             }
 
             // Fix #5: if an `else` appears outside an `if` frame, disable it
             InstrKind::Else => {
-                if let Some((InstrKind::If, _)) = frame_stack.last() {
+                if let Some((InstrKind::If, _)) = ctx.frame_stack.last() {
                     // Carry over labels from If frame
-                    let (_, if_label) = frame_stack.pop().unwrap();
-                    frame_stack.push((InstrKind::Else, if_label.clone()));
+                    let (_, if_label) = ctx.frame_stack.pop().unwrap();
+                    ctx.frame_stack.push((InstrKind::Else, if_label.clone()));
                     mutations.frame_change = FrameChange::ReplacedIfWithElse(if_label);
                 } else {
                     return Err("'else' outside 'if'");
@@ -822,7 +819,7 @@ fn try_fix_line_syntax(
 
             // Fix #6: if an `end` appears outside a frame, disable it
             InstrKind::End => {
-                if let Some(popped) = frame_stack.pop() {
+                if let Some(popped) = ctx.frame_stack.pop() {
                     mutations.frame_change = FrameChange::Popped(popped.0, popped.1);
                 } else {
                     return Err("nothing to end");
@@ -833,7 +830,7 @@ fn try_fix_line_syntax(
     }
 
     // Collect defined local symbolic references
-    let added = collect_local_symbols(&lines.info(line_no).symbols, local_symbol_defs)?;
+    let added = collect_local_symbols(&lines.info(line_no).symbols, ctx.local_symbol_defs)?;
     mutations.local_symbols.extend(added);
 
     Ok(())
@@ -904,27 +901,29 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         // Try to fix per-line syntax.
         // Revert global changes and inactivate the line if syntax is invalid.
-        let line_fix_result = try_fix_line_syntax(
-            line_no,
-            lines,
-            &mut state,
-            &mut before_imports,
-            &mut frame_stack,
-            &mut local_symbol_defs,
-            &mut module_symbol_defs,
-            &mut lines_mutations[line_no],
-        );
+        let mut ctx = SyntaxFixContext {
+            state: &mut state,
+            before_imports: &mut before_imports,
+            frame_stack: &mut frame_stack,
+            local_symbol_defs: &mut local_symbol_defs,
+            module_symbol_defs: &mut module_symbol_defs,
+        };
+        let line_fix_result =
+            try_fix_line_syntax(line_no, lines, &mut ctx, &mut lines_mutations[line_no]);
         match line_fix_result {
             Ok(_) => {
                 if lines_mutations[line_no].clear_func {
                     // Need to clear function-level stacks
-                    local_symbol_defs.clear();
-                    frame_stack.clear();
+                    ctx.local_symbol_defs.clear();
+                    ctx.frame_stack.clear();
                 }
 
                 // Record the line if it uses any module-level symbols
                 for sym_ref in &lines.info(line_no).symbols.consumes {
-                    if module_symbol_defs.contains(&sym_ref.space, &sym_ref.name) {
+                    if ctx
+                        .module_symbol_defs
+                        .contains(&sym_ref.space, &sym_ref.name)
+                    {
                         module_symbol_users
                             .entry((sym_ref.space.clone(), sym_ref.name.clone()))
                             .or_default()
@@ -934,17 +933,11 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             }
             Err(reason) => {
                 lines.set_active_status(line_no, Inactive(reason));
-                lines_mutations[line_no].revert(
-                    &mut state,
-                    &mut before_imports,
-                    &mut frame_stack,
-                    &mut local_symbol_defs,
-                    &mut module_symbol_defs,
-                );
+                lines_mutations[line_no].revert(&mut ctx);
 
                 // Inactivate the dangling module-level symbol users
                 for sym in &lines_mutations[line_no].module_symbols {
-                    let Some(users) = module_symbol_users.get(&sym) else {
+                    let Some(users) = module_symbol_users.get(sym) else {
                         continue;
                     };
                     for &user_lineno in users {
