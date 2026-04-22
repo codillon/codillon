@@ -13,8 +13,8 @@ use wast::{
 
 use crate::syntax::{LineKind, ModulePart};
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum IndexSpace {
+#[derive(Clone, Debug, PartialEq)]
+enum IndexSpace {
     Type,
     Global,
     Mem,
@@ -90,22 +90,12 @@ impl ModuleIdentifiers {
             _ => None,
         }
     }
-
-    pub fn contains(&self, space: &IndexSpace, name: &str) -> bool {
-        self.set(space).is_some_and(|s| s.contains(name))
-    }
-
-    pub fn remove(&mut self, space: &IndexSpace, name: &str) {
-        if let Some(set) = self.set_mut(space) {
-            set.remove(name);
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
 pub struct SymbolRef {
-    pub name: String,
-    pub space: IndexSpace,
+    name: String,
+    space: IndexSpace,
 }
 
 impl SymbolRef {
@@ -119,8 +109,8 @@ impl SymbolRef {
 
 #[derive(Default, Debug, Clone)]
 pub struct LineSymbols {
-    pub defines: Vec<SymbolRef>,
-    pub consumes: Vec<SymbolRef>,
+    defines: Vec<SymbolRef>,
+    consumes: Vec<SymbolRef>,
 }
 
 impl LineSymbols {
@@ -131,36 +121,38 @@ impl LineSymbols {
 }
 
 // Collect module-level defined symbols; no action for non-module-level symbols.
-// Returns the inserted symbols on success, or an error (with collection reverted) on duplicate.
+// Returns an error and revert the collection if any line symbol is a duplicate within
+// its index space.
 pub fn collect_module_symbols(
     line_symbols: &LineSymbols,
     identifiers: &mut ModuleIdentifiers,
-) -> Result<Vec<(IndexSpace, String)>, &'static str> {
-    let mut inserted: Vec<(IndexSpace, String)> = Vec::new();
+) -> Result<(), &'static str> {
+    let mut inserted: Vec<(&IndexSpace, &str)> = Vec::new();
 
     for symbol in &line_symbols.defines {
         if let Some(set) = identifiers.set_mut(&symbol.space) {
             if !set.insert(symbol.name.clone()) {
                 // Revert collections and return with err
-                for (space, name) in &inserted {
-                    identifiers.set_mut(space).unwrap().remove(name.as_str());
+                for (space, name) in inserted {
+                    identifiers.set_mut(space).unwrap().remove(name);
                 }
                 return Err("duplicate symbolic reference in same index space");
             }
-            inserted.push((symbol.space.clone(), symbol.name.clone()));
+            inserted.push((&symbol.space, &symbol.name));
         }
     }
 
-    Ok(inserted)
+    Ok(())
 }
 
 // Collect function-scoped defined Local symbols; no action for non-local symbols.
-// Returns the inserted symbols on success, or an error (with collection reverted) on duplicate.
+// Returns an error and revert the collection if any line symbol is a duplicate within
+// that function scope.
 pub fn collect_local_symbols(
     line_symbols: &LineSymbols,
     locals: &mut HashSet<String>,
-) -> Result<Vec<String>, &'static str> {
-    let mut inserted: Vec<String> = Vec::new();
+) -> Result<(), &'static str> {
+    let mut inserted: Vec<&str> = Vec::new();
 
     for symbol in &line_symbols.defines {
         if symbol.space != IndexSpace::Local {
@@ -168,15 +160,15 @@ pub fn collect_local_symbols(
         }
         if !locals.insert(symbol.name.clone()) {
             // Revert collections and return with err
-            for name in &inserted {
-                locals.remove(name.as_str());
+            for name in inserted {
+                locals.remove(name);
             }
             return Err("duplicate local symbolic reference");
         }
-        inserted.push(symbol.name.clone());
+        inserted.push(&symbol.name);
     }
 
-    Ok(inserted)
+    Ok(())
 }
 
 // Return the label defined in the line, if there's any, ignoring non-label symbols.
