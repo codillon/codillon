@@ -11,7 +11,7 @@ use std::{
     collections::HashMap,
 };
 use wasm_encoder::{
-    CodeSection, Instruction as EncoderInstruction, ValType as EncoderValType,
+    CodeSection, Instruction as EncoderInstruction, MemArg, ValType as EncoderValType,
     reencode::{Reencode, RoundtripReencoder},
 };
 use wasm_tools::parse_binary_wasm;
@@ -1007,11 +1007,24 @@ impl<'a> ValidModule<'a> {
             (import_section, num_func_imports)
         };
 
+        let shadow_memory_indices: Vec<usize> = self
+            .memory
+            .iter()
+            .enumerate()
+            .filter_map(|(i, mem)| (mem.page_size_log2 == Some(0)).then_some(i))
+            .collect();
+
         /* Build type and function section */
         // These are done together because we are auto-generating "transparent" instrumentation
         // functions (which collect the results of an arbitrary operator) and their types
         // at the same time.
-        let (type_section, function_section, result_types_to_func_idx, step_function_idx) = {
+        let (
+            type_section,
+            function_section,
+            result_types_to_func_idx,
+            step_function_idx,
+            bounds_check_to_func_idx,
+        ) = {
             let mut type_section = TypeSection::new();
             let mut function_section = FunctionSection::new();
 
@@ -1034,7 +1047,7 @@ impl<'a> ValidModule<'a> {
             type_section.ty().function([EncoderValType::I32], []);
             let num_inserted_types = 1;
 
-            // Last in type section will be the "transparent" instrumention function types (below)
+            // Next in type section will be the "transparent" instrumention function types (below)
 
             /* Start function section */
 
@@ -1053,7 +1066,7 @@ impl<'a> ValidModule<'a> {
             function_section.function(step_function_type_idx);
             let num_inserted_functions = 1;
 
-            // Last in function section: the "transparent" instrumentation functions (which return their inputs)
+            // Next in function section: the "transparent" instrumentation functions (which return their inputs)
 
             // Map operator result types to the func idx of the "transparent" instrumentation function
             let mut result_types_to_func_idx = IndexMap::new();
@@ -1096,11 +1109,43 @@ impl<'a> ValidModule<'a> {
                     }
                 }
             }
+            // Last in type and function section: dynamically generated functions to do
+            // software bounds checks on memory operations for memories with pagesize 1
+            let mut bounds_check_to_func_idx = IndexMap::new();
+            for func in &self.functions {
+                for op in &func.operators {
+                    if let Some((mem_idx, _, ty)) = bounds_check_info(&op.inner.op)
+                        && shadow_memory_indices.contains(&(mem_idx as usize))
+                        && !bounds_check_to_func_idx.contains_key(&ty)
+                    {
+                        let (params, results) = match ty {
+                            None => (
+                                vec![EncoderValType::I32, EncoderValType::I32], // offset, limit
+                                vec![EncoderValType::I32],                      // offset
+                            ),
+                            Some(ty) => {
+                                (
+                                    vec![EncoderValType::I32, ty, EncoderValType::I32], // offset, value, limit
+                                    vec![EncoderValType::I32, ty], // offset, value
+                                )
+                            }
+                        };
+                        debug_assert_eq!(type_section.len(), next_type_idx);
+                        type_section.ty().function(params, results);
+                        debug_assert_eq!(num_func_imports + function_section.len(), next_func_idx);
+                        function_section.function(next_type_idx);
+                        bounds_check_to_func_idx.insert(ty, next_func_idx);
+                        next_type_idx += 1;
+                        next_func_idx += 1;
+                    }
+                }
+            }
             (
                 type_section,
                 function_section,
                 result_types_to_func_idx,
                 step_function_idx,
+                bounds_check_to_func_idx,
             )
         };
 
@@ -1114,8 +1159,19 @@ impl<'a> ValidModule<'a> {
         /* Memory section */
         {
             let mut memory_section = MemorySection::new();
-            for memory in &self.memory {
-                memory_section.memory(RoundtripReencoder.memory_type(*memory)?);
+            for (mem_idx, memory) in self.memory.iter().enumerate() {
+                if shadow_memory_indices.contains(&mem_idx) {
+                    // Convert to using 64 KiB pagesize
+                    memory_section.memory(wasm_encoder::MemoryType {
+                        minimum: memory.initial.div_ceil(65536).max(1),
+                        maximum: None,
+                        memory64: memory.memory64,
+                        shared: memory.shared,
+                        page_size_log2: None,
+                    });
+                } else {
+                    memory_section.memory(RoundtripReencoder.memory_type(*memory)?);
+                }
             }
             module.section(&memory_section);
         }
@@ -1127,6 +1183,16 @@ impl<'a> ValidModule<'a> {
             let mut global_section = GlobalSection::new();
             for global in &self.globals {
                 RoundtripReencoder.parse_global(&mut global_section, global.inner.clone())?;
+            }
+            for &mem_idx in &shadow_memory_indices {
+                global_section.global(
+                    wasm_encoder::GlobalType {
+                        val_type: EncoderValType::I32,
+                        mutable: true,
+                        shared: false,
+                    },
+                    &wasm_encoder::ConstExpr::i32_const(self.memory[mem_idx].initial as i32),
+                );
             }
             module.section(&global_section);
         }
@@ -1149,15 +1215,16 @@ impl<'a> ValidModule<'a> {
             let mut code_section = CodeSection::new();
 
             // First in code section: the original functions
-            for (valid_func, typed_func) in self.functions.iter().zip(&types.funcs) {
-                self.build_function(
-                    valid_func,
-                    typed_func,
-                    &mut code_section,
+            for func_idx in 0..self.functions.len() {
+                let function = self.build_function(
+                    func_idx,
                     types,
                     &result_types_to_func_idx,
                     step_function_idx,
+                    &shadow_memory_indices,
+                    &bounds_check_to_func_idx,
                 )?;
+                code_section.function(&function);
             }
 
             // Next in code section: the "step" function.
@@ -1175,10 +1242,15 @@ impl<'a> ValidModule<'a> {
                 code_section.function(&f);
             }
 
-            // Last in code section: the "transparent" (dynamically generated) instrumentation functions
+            // Next in code section: the "transparent" (dynamically generated) instrumentation functions
             for result_type in result_types_to_func_idx.keys() {
                 // iterated in same order as inserted
                 self.dynamically_generate_function(result_type, &mut code_section)?;
+            }
+
+            // Last in code section: the dynamically generated memory bounds check functions
+            for ty in bounds_check_to_func_idx.keys() {
+                self.dynamically_generate_bounds_check_function(*ty, &mut code_section)?;
             }
 
             module.section(&code_section);
@@ -1192,14 +1264,16 @@ impl<'a> ValidModule<'a> {
 
     fn build_function(
         &self,
-        orig_function: &ValidFunction,
-        typed_function: &TypedFunction,
-        code_section: &mut CodeSection,
+        func_idx: usize,
         types: &TypedModule,
         result_types_to_func_idx: &IndexMap<Vec<ValType>, u32>,
         step_function_idx: u32,
-    ) -> Result<()> {
+        shadow_memory_indices: &[usize],
+        bounds_check_to_func_idx: &IndexMap<Option<EncoderValType>, u32>,
+    ) -> Result<wasm_encoder::Function> {
         use wasm_encoder::Instruction::*;
+        let orig_function = &self.functions[func_idx];
+        let typed_function = &types.funcs[func_idx];
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32; // also idx of step function
         let mut new_function = wasm_encoder::Function::new_with_locals_types(
             orig_function
@@ -1308,6 +1382,19 @@ impl<'a> ValidModule<'a> {
                 }
             }
 
+            // bounds checking for load and store operations for memoreis with pagesize 1
+            if let Some((mem_idx, width, ty)) = bounds_check_info(&codillon_operator.inner.op)
+                && let Some(shadow_pos) = shadow_memory_indices
+                    .iter()
+                    .position(|&i| i == mem_idx as usize)
+            {
+                let shadow_global_idx = (self.globals.len() + shadow_pos) as u32;
+                new_function.instruction(&GlobalGet(shadow_global_idx));
+                new_function.instruction(&I32Const(width));
+                new_function.instruction(&I32Sub); // limit = size - (static_offset + width)
+                new_function.instruction(&Call(bounds_check_to_func_idx[&ty]));
+            }
+
             if i + 1 == orig_function.operators.len() {
                 debug_assert!(matches!(op, End));
                 debug_assert!(codillon_operator.inner.info == OpInfo::FuncEnd);
@@ -1320,8 +1407,17 @@ impl<'a> ValidModule<'a> {
                 continue; // function is over
             }
 
-            // the operator itself
-            new_function.instruction(&op);
+            // Deny memory.grow requests for memories with pagesize 1
+            if let MemoryGrow(mem_index) = op
+                && shadow_memory_indices.contains(&(mem_index as usize))
+            {
+                // Discard argument and return -1
+                new_function.instruction(&Drop);
+                new_function.instruction(&I32Const(-1));
+            } else {
+                // the operator itself
+                new_function.instruction(&op);
+            }
 
             if matches!(op, Call(_) | CallIndirect { .. }) {
                 // special handling: step this twice so pointer can return to the callsite after complete
@@ -1350,8 +1446,7 @@ impl<'a> ValidModule<'a> {
                 _ => {}
             }
         }
-        code_section.function(&new_function);
-        Ok(())
+        Ok(new_function)
     }
 
     fn dynamically_generate_function(
@@ -1381,6 +1476,63 @@ impl<'a> ValidModule<'a> {
         f.instruction(&End);
         code_section.function(&f);
         Ok(())
+    }
+    fn dynamically_generate_bounds_check_function(
+        &self,
+        ty: Option<EncoderValType>,
+        code_section: &mut CodeSection,
+    ) -> Result<()> {
+        use wasm_encoder::Instruction::*;
+        let limit_idx: u32 = if ty.is_none() { 1 } else { 2 };
+        let mut f = wasm_encoder::Function::new(vec![]);
+        f.instruction(&LocalGet(0)); // offset
+        f.instruction(&LocalGet(limit_idx)); // limit
+        f.instruction(&I32GtS);
+        f.instruction(&If(wasm_encoder::BlockType::Empty));
+        // Explicitly trigger out of bounds memory access
+        f.instruction(&I32Const(-1));
+        f.instruction(&I32Load(MemArg {
+            offset: 0,
+            align: 2,
+            memory_index: 0, // There must exist at least one memory at index 0
+        }));
+        f.instruction(&Drop);
+        f.instruction(&End);
+        f.instruction(&LocalGet(0)); // restore offset
+        if ty.is_some() {
+            f.instruction(&LocalGet(1)); // restore value
+        }
+        f.instruction(&End);
+        code_section.function(&f);
+        Ok(())
+    }
+}
+
+fn bounds_check_info(op: &Operator<'_>) -> Option<(u32, i32, Option<EncoderValType>)> {
+    use Operator::*;
+    match op {
+        I32Load8S { memarg }
+        | I32Load8U { memarg }
+        | I64Load8S { memarg }
+        | I64Load8U { memarg } => Some((memarg.memory, 1, None)),
+        I32Load16S { memarg }
+        | I32Load16U { memarg }
+        | I64Load16S { memarg }
+        | I64Load16U { memarg } => Some((memarg.memory, 2, None)),
+        I32Load { memarg } | F32Load { memarg } | I64Load32S { memarg } | I64Load32U { memarg } => {
+            Some((memarg.memory, 4, None))
+        }
+        I64Load { memarg } | F64Load { memarg } => Some((memarg.memory, 8, None)),
+        I32Store8 { memarg } => Some((memarg.memory, 1, Some(EncoderValType::I32))),
+        I32Store16 { memarg } => Some((memarg.memory, 2, Some(EncoderValType::I32))),
+        I32Store { memarg } => Some((memarg.memory, 4, Some(EncoderValType::I32))),
+        I64Store8 { memarg } => Some((memarg.memory, 1, Some(EncoderValType::I64))),
+        I64Store16 { memarg } => Some((memarg.memory, 2, Some(EncoderValType::I64))),
+        I64Store32 { memarg } => Some((memarg.memory, 4, Some(EncoderValType::I64))),
+        I64Store { memarg } => Some((memarg.memory, 8, Some(EncoderValType::I64))),
+        F32Store { memarg } => Some((memarg.memory, 4, Some(EncoderValType::F32))),
+        F64Store { memarg } => Some((memarg.memory, 8, Some(EncoderValType::F64))),
+        _ => None,
     }
 }
 
@@ -2278,38 +2430,61 @@ pub(crate) mod tests {
     }
     #[test]
     fn test_parse_memory_section() -> Result<()> {
-        let mut mem_exists = false;
-        let test_mem = wasmparser::MemoryType {
+        fn test_mem(valid_module: ValidModule, mem_value: wasmparser::MemoryType) -> Result<()> {
+            let mut mem_exists = false;
+            let wasm_bin = valid_module.build_instrumented_binary(&TypedModule {
+                slots: vec![],
+                globals: vec![],
+                funcs: vec![],
+            })?;
+            let mem_payload = wasmparser::Parser::new(0)
+                .parse_all(&wasm_bin)
+                .nth(4)
+                .expect("failed to get memory payload");
+            if let wasmparser::Payload::MemorySection(reader) = mem_payload? {
+                assert_eq!(
+                    reader.into_iter().next().expect("failed to get memory")?,
+                    mem_value
+                );
+                mem_exists = true;
+            }
+            assert!(mem_exists);
+            Ok(())
+        }
+        let mut mem_value = wasmparser::MemoryType {
             memory64: true,
             shared: false,
             initial: 3,
             maximum: Some(5),
-            page_size_log2: Some(0),
+            page_size_log2: Some(16),
         };
-        let valid_module = ValidModule {
-            types: vec![empty_ft()],
-            imports: vec![],
-            memory: vec![test_mem],
-            globals: vec![],
-            functions: vec![],
-        };
-        let wasm_bin = valid_module.build_instrumented_binary(&TypedModule {
-            slots: vec![],
-            globals: vec![],
-            funcs: vec![],
-        })?;
-        let mem_payload = wasmparser::Parser::new(0)
-            .parse_all(&wasm_bin)
-            .nth(4)
-            .expect("failed to get memory payload");
-        if let wasmparser::Payload::MemorySection(reader) = mem_payload? {
-            assert_eq!(
-                reader.into_iter().next().expect("failed to get memory")?,
-                test_mem
-            );
-            mem_exists = true;
+        // Test 65536 pagesize
+        {
+            let valid_module = ValidModule {
+                types: vec![empty_ft()],
+                imports: vec![],
+                memory: vec![mem_value],
+                globals: vec![],
+                functions: vec![],
+            };
+            test_mem(valid_module, mem_value)?;
         }
-        assert!(mem_exists);
+        // test 1 page size
+        {
+            mem_value.page_size_log2 = Some(0);
+            let valid_module = ValidModule {
+                types: vec![empty_ft()],
+                imports: vec![],
+                memory: vec![mem_value],
+                globals: vec![],
+                functions: vec![],
+            };
+            mem_value.initial = 1;
+            mem_value.maximum = None;
+            mem_value.page_size_log2 = None;
+            test_mem(valid_module, mem_value)?;
+        }
+
         Ok(())
     }
 
@@ -2461,6 +2636,13 @@ pub(crate) mod tests {
     if ;; label = @1
       unreachable
     end
+  )
+"#;
+    const EXPECTED_RECORD_I32: &str = r#"  (func (type 9) (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    call 2
+    local.get 0
   )
 "#;
 
@@ -2664,14 +2846,8 @@ pub(crate) mod tests {
     call 7
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
-    local.get 0
-    local.get 1
-    call 2
-    local.get 0
-  )
-)
-"#;
+                + EXPECTED_RECORD_I32
+                + ")\n";
 
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
@@ -2857,14 +3033,8 @@ pub(crate) mod tests {
     call 7
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
-    local.get 0
-    local.get 1
-    call 2
-    local.get 0
-  )
-)
-"#;
+                + EXPECTED_RECORD_I32
+                + ")\n";
 
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
@@ -2895,14 +3065,8 @@ pub(crate) mod tests {
     unreachable
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
-    local.get 0
-    local.get 1
-    call 2
-    local.get 0
-  )
-)
-"#;
+                + EXPECTED_RECORD_I32
+                + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2920,15 +3084,8 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + r#"  (type (func))
   (type (func (result i32 i32)))
-  (type (func))
-  (type (func (param i32) (result i32)))
-  (type (func (param i32)))
-  (type (func (param i32 i32)))
-  (type (func (param f32 i32)))
-  (type (func (param i64 i32)))
-  (type (func (param f64 i32)))
-  (type (func (param i32)))
-  (type (func (param i32 i32 i32 i32) (result i32 i32)))
+"# + EXPECTED_TYPES
+                + r#"  (type (func (param i32 i32 i32 i32) (result i32 i32)))
   (type (func (param i32 i32) (result i32)))
   (import "codillon_debug" "record_step" (func (type 3)))
   (import "codillon_debug" "record_invalid" (func (type 4)))
@@ -3004,6 +3161,10 @@ pub(crate) mod tests {
   )
 )
 "#;
+            let expected = expected.replace(
+                "  (type (func))\n  (type (func (param i32) (result i32)))",
+                "  (type (func (param i32) (result i32)))",
+            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -3054,15 +3215,8 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + r#"  (type (func))
   (type (func (param i32)))
-  (type (func))
-  (type (func (param i32) (result i32)))
-  (type (func (param i32)))
-  (type (func (param i32 i32)))
-  (type (func (param f32 i32)))
-  (type (func (param i64 i32)))
-  (type (func (param f64 i32)))
-  (type (func (param i32)))
-  (type (func (param i32 i32) (result i32)))
+"# + EXPECTED_TYPES
+                + r#"  (type (func (param i32 i32) (result i32)))
   (import "codillon_debug" "record_step" (func (type 3)))
   (import "codillon_debug" "record_invalid" (func (type 4)))
   (import "codillon_debug" "record_i32" (func (type 5)))
@@ -3106,6 +3260,10 @@ pub(crate) mod tests {
   )
 )
 "#;
+            let expected = expected.replace(
+                "  (type (func))\n  (type (func (param i32) (result i32)))",
+                "  (type (func (param i32) (result i32)))",
+            );
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -3450,6 +3608,156 @@ pub(crate) mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_bounds_checks() -> Result<()> {
+        // Test memory.grow is denied for memory with pagesize 1
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 8 100 (pagesize 1))");
+            editor.push_line("(func");
+            editor.push_line("(result i32)");
+            editor.push_line("i32.const 4");
+            editor.push_line("memory.grow");
+            editor.push_line(")");
+
+            let out = test_editor_flow(&mut editor)?;
+            assert!(out.contains("drop\n    i32.const -1"));
+            assert!(!out.contains("memory.grow"));
+        }
+
+        // Bounds check occurs for loads in memory with page size 1
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 8 100 (pagesize 1))");
+            editor.push_line("(func");
+            editor.push_line("(result i32)");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.load");
+            editor.push_line(")");
+
+            let expected = String::from("(module\n  (type (func (result i32)))\n")
+                + EXPECTED_TYPES
+                + r#"  (type (func (param i32 i32) (result i32)))
+  (type (func (param i32 i32) (result i32)))
+"# + EXPECTED_IMPORTS
+                + r#"  (memory 1)
+  (global (mut i32) i32.const 8)
+  (export "main" (func 6))
+  (func (type 0) (result i32)
+    i32.const 1
+    call 7
+    i32.const 3
+    call 7
+    i32.const 0
+    i32.const 0
+    call 8
+    i32.const 4
+    call 7
+    global.get 0
+    i32.const 4
+    i32.sub
+    call 9
+    i32.load
+    i32.const 1
+    call 8
+    i32.const 5
+    call 7
+    i32.const 2
+    call 8
+  )
+"# + EXPECTED_STEP
+                + EXPECTED_RECORD_I32
+                + r#"  (func (type 10) (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    i32.gt_s
+    if ;; label = @1
+      i32.const -1
+      i32.load
+      drop
+    end
+    local.get 0
+  )
+)
+"#;
+
+            let expected = expected.replace(
+                "  (type (func))\n  (type (func (param i32) (result i32)))",
+                "  (type (func (param i32) (result i32)))",
+            );
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // Bounds check ocurrs for store in memory with pagesize 1
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 8 100 (pagesize 1))");
+            editor.push_line("(func");
+            editor.push_line("i32.const 0");
+            editor.push_line("f64.const 7.0");
+            editor.push_line("f64.store");
+            editor.push_line(")");
+
+            let expected = String::from("(module\n")
+                + EXPECTED_TYPES
+                + r#"  (type (func (param i32 i32) (result i32)))
+  (type (func (param f64 i32) (result f64)))
+  (type (func (param i32 f64 i32) (result i32 f64)))
+"# + EXPECTED_IMPORTS
+                + r#"  (memory 1)
+  (global (mut i32) i32.const 8)
+  (export "main" (func 6))
+  (func (type 0)
+    i32.const 1
+    call 7
+    i32.const 2
+    call 7
+    i32.const 0
+    i32.const 0
+    call 8
+    i32.const 3
+    call 7
+    f64.const 0x1.cp+2 (;=7;)
+    i32.const 1
+    call 9
+    i32.const 4
+    call 7
+    global.get 0
+    i32.const 8
+    i32.sub
+    call 10
+    f64.store
+    i32.const 5
+    call 7
+  )
+"# + EXPECTED_STEP
+                + EXPECTED_RECORD_I32
+                + r#"  (func (type 10) (param f64 i32) (result f64)
+    local.get 0
+    local.get 1
+    call 5
+    local.get 0
+  )
+  (func (type 11) (param i32 f64 i32) (result i32 f64)
+    local.get 0
+    local.get 2
+    i32.gt_s
+    if ;; label = @1
+      i32.const -1
+      i32.load
+      drop
+    end
+    local.get 0
+    local.get 1
+  )
+)
+"#;
+
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
         Ok(())
     }
 }
