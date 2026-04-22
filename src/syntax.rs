@@ -661,18 +661,26 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
             } else if module_field || (parts.contains(&ModulePart::RParen) && !has_import) {
                 before_imports = false;
             }
+        }
 
-            // Collect module-level symbols
-            let collect_result =
-                collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
-            if let Err(reason) = collect_result {
-                lines.set_active_status(line_no, Inactive(reason));
-                continue;
-            }
+        // If line will be rejected in second pass, don't let it define a symbol.
+        let orig_state = state;
+        if state.transit_state(&lines.info(line_no), |_| {}).is_err() {
+            state = orig_state;
+            continue;
+        }
+
+        // Collect module-level symbols
+        let collect_result =
+            collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
+        if let Err(reason) = collect_result {
+            lines.set_active_status(line_no, Inactive(reason));
+            continue;
         }
     }
 
     // second pass: disable other lines that would make module malformed
+    state = Initial;
     for line_no in 0..lines.len() {
         let line_kind = lines.info(line_no).kind.stripped_clone();
 

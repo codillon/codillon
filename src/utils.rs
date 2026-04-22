@@ -3179,6 +3179,28 @@ pub(crate) mod tests {
         }
 
         {
+            // issue #226 case 1
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("call $g");
+            editor.push_line(")");
+            editor.push_line("(func $g (param i32) (result i32))");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            // issue #226 case 2
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func $draw (import \"draw\" \"point\") (param f64 f64)");
+            editor.push_line("(func $f");
+            editor.push_line(")");
+            editor.push_line("(func");
+            editor.push_line("call $f");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
             editor.push_line("call $f");
