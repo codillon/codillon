@@ -456,7 +456,10 @@ impl FuncHeader {
 
         let repeatable = matches!(
             part,
-            ModulePart::Export | ModulePart::Param | ModulePart::Result | ModulePart::Local(_)
+            ModulePart::InlineExport
+                | ModulePart::Param
+                | ModulePart::Result
+                | ModulePart::Local(_)
         );
         let order_invalid = if repeatable {
             part_pos + 1 < self.next_field
@@ -878,6 +881,21 @@ pub fn find_import_lines(code: &impl LineInfos) -> Vec<usize> {
         }
     }
     imports
+}
+
+pub fn find_export_lines(code: &impl LineInfos) -> Vec<usize> {
+    let mut exports = Vec::new();
+    for line_no in 0..code.len() {
+        if let LineKind::Other(parts) = &code.info(line_no).kind
+            && code.info(line_no).is_active()
+            && parts
+                .iter()
+                .any(|&p| matches!(p, ModulePart::Export | ModulePart::InlineExport))
+        {
+            exports.push(line_no);
+        }
+    }
+    exports
 }
 
 pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
