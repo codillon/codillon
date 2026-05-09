@@ -443,6 +443,7 @@ impl WithElement for FrameLine {
 }
 
 impl Component for FrameLine {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.elem.audit();
     }
@@ -566,6 +567,7 @@ impl WithElement for DomImage {
 }
 
 impl Component for DomImage {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.contents.audit();
     }
@@ -1241,6 +1243,7 @@ impl WithElement for AutoSizedNumber {
 }
 
 impl Component for AutoSizedNumber {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.elem.audit();
         if let Some(computed_width) = self.elem.elem().compute_text_width()
@@ -1462,6 +1465,7 @@ impl WithElement for OperatorFraction {
 }
 
 impl Component for OperatorFraction {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.symbols.audit();
     }

@@ -125,26 +125,28 @@ pub struct Handlers {
     mousedown: Option<Closure<dyn Fn(MouseEvent)>>,
 }
 
+#[cfg(debug_assertions)]
+fn audit_handler<EventType>(
+    expected: &Option<Closure<dyn Fn(EventType)>>,
+    actual: Option<::js_sys::Function>,
+) {
+    match (expected, actual) {
+        (Some(expected), Some(actual)) => {
+            assert_eq!(actual, *expected.as_ref().unchecked_ref())
+        }
+        (Some(_), None) => panic!("missing event handler"),
+        (None, Some(_)) => panic!("unexpected event handler"),
+        (None, None) => (),
+    }
+}
+
 impl Handlers {
+    #[cfg(debug_assertions)]
     pub fn audit(&self, elem: &impl AsRef<HtmlElement>) {
         audit_handler(&self.beforeinput, elem.as_ref().onbeforeinput());
         audit_handler(&self.input, elem.as_ref().oninput());
         audit_handler(&self.keydown, elem.as_ref().onkeydown());
         audit_handler(&self.mousedown, elem.as_ref().onmousedown());
-
-        fn audit_handler<EventType>(
-            expected: &Option<Closure<dyn Fn(EventType)>>,
-            actual: Option<::js_sys::Function>,
-        ) {
-            match (expected, actual) {
-                (Some(expected), Some(actual)) => {
-                    assert_eq!(actual, *expected.as_ref().unchecked_ref())
-                }
-                (Some(_), None) => panic!("missing event handler"),
-                (None, Some(_)) => panic!("unexpected event handler"),
-                (None, None) => (),
-            }
-        }
     }
 
     pub fn set_onbeforeinput<E: WithElement, F: Fn(InputEventHandle) + 'static>(
@@ -277,6 +279,7 @@ impl<T: ElementComponent> Component for ReactiveComponent<T>
 where
     T::Element: AsRef<HtmlElement>,
 {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.component.audit();
         self.component.with_element(
@@ -387,6 +390,25 @@ impl<T: AnyElement> ElementHandle<T> {
             .element()
             .scroll_into_view_with_scroll_into_view_options(&opts);
     }
+
+    #[cfg(debug_assertions)]
+    pub fn assert_is_entire_body(&self) {
+        self.with_node(
+            |node| {
+                let doc = node.owner_document().unwrap();
+                let body = doc.body().unwrap();
+                assert_eq!(body.child_nodes().length(), 1);
+                assert!(body.first_child().unwrap().is_same_node(Some(node)));
+            },
+            TOKEN,
+        );
+    }
+
+    delegate! {
+    to self.elem.element() {
+        pub fn is_connected(&self) -> bool;
+    }
+    }
 }
 
 impl ElementHandle<HtmlInputElement> {
@@ -456,6 +478,7 @@ impl ElementHandle<HtmlCanvasElement> {
 }
 
 impl<T: AnyElement> Component for ElementHandle<T> {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         for (key, value) in &self.attributes {
             if let Some(dom_value) = self.elem.element().get_attribute(key) {
@@ -519,6 +542,7 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> DocumentHandle<BodyT
         ElementFactory(self.document.clone())
     }
 
+    #[cfg(debug_assertions)]
     pub fn audit(&self) {
         match (&self.body, self.document.body()) {
             (Some(body), Some(dom_body)) => {
@@ -634,6 +658,7 @@ impl NodeListHandle {
         self.0.length() as usize
     }
 
+    #[cfg(debug_assertions)]
     pub fn audit_node(&self, index: usize, child: &impl WithNode) {
         child.with_node(
             |node| {
@@ -864,22 +889,6 @@ impl StorageHandle {
         self.0.set_item(key, value).is_ok()
     }
 
-    pub fn set_timeout_with_callback(callback: &Closure<dyn Fn()>, delay_ms: i32) -> i32 {
-        web_sys::window()
-            .expect("window")
-            .set_timeout_with_callback_and_timeout_and_arguments_0(
-                callback.as_ref().unchecked_ref(),
-                delay_ms,
-            )
-            .expect("set_timeout")
-    }
-
-    pub fn set_onbeforeunload(callback: &Closure<dyn Fn(BeforeUnloadEvent)>) {
-        web_sys::window()
-            .expect("window")
-            .set_onbeforeunload(Some(callback.as_ref().unchecked_ref()));
-    }
-
     delegate! {
     to self.0 {
     #[unwrap]
@@ -927,9 +936,55 @@ impl RangeLike for StaticRangeHandle {
     }
 }
 
+pub struct WindowHandle {
+    window: web_sys::Window,
+    onbeforeunload: Option<Closure<dyn Fn(BeforeUnloadEvent)>>,
+}
+
+impl Default for WindowHandle {
+    fn default() -> Self {
+        Self {
+            window: web_sys::window().expect("window"),
+            onbeforeunload: None,
+        }
+    }
+}
+
+impl WindowHandle {
+    pub fn set_onbeforeunload(&mut self, handler: impl Fn(BeforeUnloadEvent) + 'static) {
+        self.onbeforeunload = Some(Closure::new(handler));
+        self.window.set_onbeforeunload(Some(
+            self.onbeforeunload
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unchecked_ref(),
+        ));
+    }
+
+    pub fn set_timeout_with_callback(
+        &mut self,
+        callback: &Closure<dyn Fn()>,
+        delay_ms: i32,
+    ) -> i32 {
+        self.window
+            .set_timeout_with_callback_and_timeout_and_arguments_0(
+                callback.as_ref().unchecked_ref(),
+                delay_ms,
+            )
+            .expect("set_timeout")
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn audit(&self) {
+        audit_handler(&self.onbeforeunload, self.window.onbeforeunload());
+    }
+}
+
 // A trait for a safe "Component", allowing wrapped access to its root Node and audit
 // that the DOM subtree matches the Component's expectations.
 pub trait Component: WithNode {
+    #[cfg(debug_assertions)]
     fn audit(&self);
 }
 

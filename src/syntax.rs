@@ -7,7 +7,6 @@ use crate::symbolic::{
 };
 use anyhow::Result;
 use std::collections::HashSet;
-use std::ops::Deref;
 use wast::{
     Error,
     core::{
@@ -131,7 +130,7 @@ pub enum LineKind {
 pub trait LineInfos {
     fn is_empty(&self) -> bool;
     fn len(&self) -> usize;
-    fn info(&self, index: usize) -> impl Deref<Target = crate::line::LineInfo>;
+    fn info(&self, index: usize) -> &crate::line::LineInfo;
 }
 
 pub trait LineInfosMut: LineInfos {
@@ -665,7 +664,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         // If line will be rejected in second pass, don't let it define a symbol.
         let orig_state = state;
-        if state.transit_state(&lines.info(line_no), |_| {}).is_err() {
+        if state.transit_state(lines.info(line_no), |_| {}).is_err() {
             state = orig_state;
             continue;
         }
@@ -745,7 +744,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         // Process the line and transition the syntax state
         let orig_state = state;
         {
-            let res = state.transit_state(&lines.info(line_no), |_| {});
+            let res = state.transit_state(lines.info(line_no), |_| {});
             match res {
                 Ok(()) => {
                     if state == Initial {
@@ -913,7 +912,7 @@ pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
         };
 
         state
-            .transit_state(&code.info(line_no), on_transition)
+            .transit_state(code.info(line_no), on_transition)
             .expect("well-formed");
     }
     ranges

@@ -1,7 +1,7 @@
 // The Codillon code editor
 
 use crate::{
-    action_history::{ActionHistory, Edit, Selection},
+    action_history::{ActionHistory, Edit},
     autocomplete::Autocomplete,
     debug::{ExecutionState, TerminationType, run_binary, step_count, termination_type},
     dom_canvas::DomCanvas,
@@ -10,10 +10,10 @@ use crate::{
     graphics::DomImage,
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
-        RangeLike, ReactiveComponent, StorageHandle, WithElement, compare_document_position,
-        get_selection, now_ms, set_selection_range,
+        RangeLike, ReactiveComponent, StorageHandle, WindowHandle, WithElement,
+        compare_document_position, get_selection, now_ms, set_selection_range,
     },
-    line::{Activity, CodeLine, LineInfo, Position},
+    line::{Activity, CodeLine, LineInfo, Position, PositionRange},
     save_status::SaveStatus,
     slider::Slider,
     syntax::{
@@ -26,13 +26,12 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, bail};
-use itertools::{Itertools, zip_eq};
+use itertools::zip_eq;
 use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
     collections::HashMap,
-    ops::Deref,
-    rc::Rc,
+    rc::{Rc, Weak},
 };
 use wasm_bindgen::closure::Closure;
 use web_sys::{BeforeUnloadEvent, HtmlDivElement, console::log_1};
@@ -52,12 +51,45 @@ type ComponentType = DomStruct<
     HtmlDivElement,
 >;
 
+macro_rules! get {
+    ($comp:expr,$field:ident) => {
+        &field!($field $comp.get())
+    };
+}
+
+macro_rules! get_mut {
+    ($comp:expr,$field:ident) => {
+        &mut field!($field $comp.get_mut())
+    };
+}
+
+macro_rules! field {
+    (slider $comp:expr) => {
+        $comp.0
+    };
+    (image $comp:expr) => {
+        $comp.1.0
+    };
+    (textbox $comp:expr) => {
+        $comp.1.1.0
+    };
+    (canvas $comp:expr) => {
+        $comp.1.1.1.0
+    };
+    (autocomplete $comp:expr) => {
+        $comp.1.1.1.1.0
+    };
+    (save_status $comp:expr) => {
+        $comp.1.1.1.1.1.0
+    };
+}
+
 pub const LINE_SPACING: usize = 45;
 const STORAGE_ID: &str = "codillon_content";
 const SCHEDULE_STORE_MS: i32 = 500;
 const RETRY_STORE_MS: i32 = 2000;
 
-struct _Editor {
+struct Editor {
     component: ComponentType,
     factory: ElementFactory,
     action_history: ActionHistory,
@@ -70,157 +102,315 @@ struct _Editor {
     slot_connections: SlotConnections,
     execution_state: ExecutionState,
     scroll_on_next_input: bool,
+    window: WindowHandle,
+    holder: Weak<RefCell<Self>>,
 }
 
-pub struct Editor(Rc<RefCell<_Editor>>);
+pub struct EditorHolder(Rc<RefCell<Editor>>);
 
-impl Editor {
+impl EditorHolder {
     pub fn new(factory: ElementFactory) -> Result<Self> {
-        let inner = _Editor {
-            component: DomStruct::new(
-                (
-                    ReactiveComponent::new(Slider::new(factory.clone())),
-                    (
-                        DomImage::new(factory.clone()),
-                        (
-                            ReactiveComponent::new(DomVec::new(factory.div())),
-                            (
-                                DomCanvas::new(factory.canvas())?,
-                                (Autocomplete::new(&factory), (SaveStatus::new(&factory), ())),
-                            ),
-                        ),
-                    ),
-                ),
-                factory.div(),
-            ),
-            factory,
-            action_history: ActionHistory::default(),
-            storage: StorageHandle::new(),
-            pending_binary: None,
-            previous_instrumented_binary_hash: 0,
-            worker_running: false,
-            pending_save: None,
-            version: 0,
-            slot_connections: SlotConnections::default(),
-            execution_state: ExecutionState::default(),
-            scroll_on_next_input: false,
-        };
-
-        let mut ret = Editor(Rc::new(RefCell::new(inner)));
-        {
-            let mut text = ret.textbox_mut();
-            text.inner_mut().set_attribute("class", "textentry");
-            text.inner_mut().set_attribute(
-                "style",
-                &format!("--codillon-line-spacing: {}px;", LINE_SPACING),
-            );
-            text.inner_mut().set_attribute("contenteditable", "true");
-            text.inner_mut().set_attribute("spellcheck", "false");
-
-            let editor_ref = Rc::clone(&ret.0);
-            text.set_onbeforeinput(move |ev| {
-                Editor(editor_ref.clone())
-                    .handle_input(ev)
-                    .expect("input handler")
-            });
-
-            let editor_ref = Rc::clone(&ret.0);
-            text.set_onkeydown(move |ev| {
-                Editor(editor_ref.clone())
-                    .handle_keydown(ev)
-                    .expect("keydown handler")
-            });
-
-            let editor_ref = Rc::clone(&ret.0);
-            text.set_onmousedown(move |_| {
-                Editor(editor_ref.clone()).autocomplete_mut().update("");
-            });
-        }
-        {
-            let editor_ref = Rc::clone(&ret.0);
-            ret.autocomplete_mut().set_handler(move |accepted| {
-                Editor(Rc::clone(&editor_ref))
-                    .accept_autocomplete(accepted)
-                    .expect("autocomplete handler")
-            });
-
-            let editor_ref = Rc::clone(&ret.0);
-            ret.slider_mut().set_oninput(move |_| {
-                let editor = Editor(editor_ref.clone());
-                editor.update_live_info(step_count(), editor.current_step());
-            });
-
-            let editor_ref = Rc::clone(&ret.0);
-            ret.slider_mut().set_onkeydown(move |_| {
-                Editor(editor_ref.clone()).set_scroll_on_next_input();
-            });
-
-            let editor = Editor(Rc::clone(&ret.0));
-            let beforeunload = Closure::new(move |ev: BeforeUnloadEvent| {
-                if editor.save_status().is_dirty() {
-                    ev.prevent_default();
-                }
-            });
-            StorageHandle::set_onbeforeunload(&beforeunload);
-            // Must live for tab lifetime so small memory leak is ok until tab is closed
-            beforeunload.forget();
-        }
-
-        ret.image_mut().set_attribute("class", "annotations");
-
-        // Restore from localStorage, or use default content
-        if let Some(storage) = StorageHandle::new()
-            && let Some(content) = storage.get_item(STORAGE_ID)
-        {
-            for line_str in content.lines() {
-                ret.push_line(line_str);
-            }
-            if ret.on_change().is_err() {
-                ret.set_default_contents()
-            };
-        } else {
-            ret.set_default_contents();
-        }
-
-        ret.on_change().expect("well-formed initial contents");
-
-        let height = LINE_SPACING * ret.text().len();
-        ret.image_mut().set_attribute("height", &height.to_string());
-
+        let ret = Self(Rc::new(RefCell::new(Editor::new(factory)?)));
+        ret.borrow_mut().init(Rc::downgrade(&ret.0));
         Ok(ret)
     }
 
-    fn set_scroll_on_next_input(&mut self) {
-        self.0.borrow_mut().scroll_on_next_input = true;
+    fn borrow(&self) -> Ref<'_, Editor> {
+        self.0.borrow()
     }
 
-    fn push_line(&mut self, string: &str) {
-        let newline = CodeLine::new(string, &self.0.borrow().factory);
+    fn borrow_mut(&self) -> RefMut<'_, Editor> {
+        self.0.borrow_mut()
+    }
+}
+
+impl LineInfos for Editor {
+    fn is_empty(&self) -> bool {
+        self.text().is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.text().len()
+    }
+
+    fn info(&self, index: usize) -> &LineInfo {
+        self.line(index).info()
+    }
+}
+
+impl LineInfosMut for Editor {
+    fn set_active_status(&mut self, index: usize, new_val: Activity) {
+        self.line_mut(index).set_active_status(new_val)
+    }
+
+    fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm) {
+        self.line_mut(index).set_synthetic_before(synth);
+    }
+
+    fn push(&mut self) {
+        let newline = CodeLine::new("", &self.factory);
         self.text_mut().push(newline);
     }
 
-    fn set_default_contents(&mut self) {
-        let len = self.len();
-        self.text_mut().remove_range(0, len);
-        self.push_line("(func");
-        self.push_line("i32.const 5");
-        self.push_line("i32.const 6");
-        self.push_line("i32.add");
-        self.push_line("drop");
-        self.push_line(")");
+    fn set_invalid(&mut self, index: usize, reason: Option<String>) {
+        self.line_mut(index).set_invalid(reason)
     }
 
-    fn get_lines_and_positions(
-        &self,
-        range: &impl RangeLike,
-    ) -> Result<(usize, Position, usize, Position)> {
+    fn set_runtime_error(&mut self, index: usize, msg: Option<String>) {
+        self.line_mut(index).set_runtime_error(msg)
+    }
+}
+
+impl FrameInfosMut for Editor {
+    fn set_indent(&mut self, index: usize, num: usize) {
+        if self.line_mut(index).set_indent(num) {
+            self.component.set_attribute("class", "animated");
+        }
+    }
+
+    fn set_frames(&mut self, frames: Vec<FrameInfo>) {
+        let mut tagged_frames = HashMap::with_capacity(frames.len());
+        for frame in frames {
+            let id = self.line(frame.start).id();
+            tagged_frames.insert(id, frame);
+        }
+        let animated = self.component.get_attribute("class") == Some("animated");
+        self.image_mut().set_frames(tagged_frames, animated);
+    }
+}
+
+impl WithElement for EditorHolder {
+    type Element = HtmlDivElement;
+    fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
+        self.0.borrow().component.with_element(f, g);
+    }
+}
+
+impl Component for EditorHolder {
+    #[cfg(debug_assertions)]
+    fn audit(&self) {
+        self.0.borrow().audit()
+    }
+}
+
+impl Editor {
+    #[cfg(debug_assertions)]
+    fn audit(&self) {
+        self.component.audit();
+        self.window.audit();
+
+        if self.component.elem().is_connected() {
+            self.component.elem().assert_is_entire_body();
+        }
+    }
+
+    fn textbox(&self) -> &ReactiveComponent<TextType> {
+        get!(self.component, textbox)
+    }
+
+    fn textbox_mut(&mut self) -> &mut ReactiveComponent<TextType> {
+        get_mut!(self.component, textbox)
+    }
+
+    fn image_mut(&mut self) -> &mut DomImage {
+        get_mut!(self.component, image)
+    }
+
+    fn text(&self) -> &TextType {
+        self.textbox().inner()
+    }
+
+    fn text_mut(&mut self) -> &mut TextType {
+        self.textbox_mut().inner_mut()
+    }
+
+    fn line(&self, idx: usize) -> &CodeLine {
+        &self.text()[idx]
+    }
+
+    fn line_mut(&mut self, idx: usize) -> &mut CodeLine {
+        &mut self.text_mut()[idx]
+    }
+
+    fn slider(&self) -> &ReactiveComponent<Slider> {
+        get!(self.component, slider)
+    }
+
+    fn slider_mut(&mut self) -> &mut ReactiveComponent<Slider> {
+        get_mut!(self.component, slider)
+    }
+
+    fn autocomplete(&self) -> &Autocomplete {
+        get!(self.component, autocomplete)
+    }
+
+    fn autocomplete_mut(&mut self) -> &mut Autocomplete {
+        get_mut!(self.component, autocomplete)
+    }
+
+    fn save_status(&self) -> &SaveStatus {
+        get!(self.component, save_status)
+    }
+
+    fn save_status_mut(&mut self) -> &mut SaveStatus {
+        get_mut!(self.component, save_status)
+    }
+
+    fn slot_connections(&self) -> &SlotConnections {
+        &self.slot_connections
+    }
+
+    fn slot_connections_mut(&mut self) -> &mut SlotConnections {
+        &mut self.slot_connections
+    }
+
+    fn execution_state_mut(&mut self) -> &mut ExecutionState {
+        &mut self.execution_state
+    }
+
+    fn update_live_info(
+        &mut self,
+        step_count: usize,
+        current_step: Option<usize>,
+        source_changed: bool,
+    ) {
+        assert!(step_count > 0);
+        let current_step = current_step.unwrap_or(self.current_step());
+        if step_count > 1 {
+            self.slider_mut().inner_mut().show();
+            self.slider_mut().inner_mut().build_ticks(
+                step_count - 1,
+                current_step,
+                &termination_type(),
+            )
+        } else {
+            self.slider_mut().inner_mut().hide();
+        }
+
+        fn find_error(state: &ExecutionState) -> Option<(usize, &str)> {
+            Some(match &state.status {
+                Some((line_no, TerminationType::Error, Some(msg))) => (*line_no, msg),
+                Some((line_no, TerminationType::HitBadImport, _)) => {
+                    (*line_no, "called unknown import")
+                }
+                _ => return None,
+            })
+        }
+
+        // clear runtime error
+        if let Some((line_no, _)) = find_error(&self.execution_state) {
+            self.line_mut(line_no).set_runtime_error(None);
+        };
+
+        // compute the state for the desired step
+        self.execution_state
+            .goto_step(current_step, get_mut!(self.component, canvas));
+
+        for (slot_idx, value) in self.execution_state.slots.iter().enumerate() {
+            let where_written = &self.slot_connections.written[slot_idx];
+            if let Some(coord) = where_written {
+                get_mut!(self.component, image).set_slot_value(coord, false, value);
+            }
+
+            let where_read = &self.slot_connections.read[slot_idx];
+            if let Some(coord) = where_read {
+                get_mut!(self.component, image).set_slot_value(coord, true, value);
+            }
+        }
+
+        if step_count > 1
+            && let Some((line_no, _, _)) = &self.execution_state.status
+            && let Some(indent) = &self.text()[*line_no].info().indent.clone()
+        {
+            get_mut!(self.component, image)
+                .set_arrow_location(!source_changed, Some((*line_no, *indent as usize)));
+            if self.scroll_on_next_input {
+                get_mut!(self.component, image).scroll_to_arrow();
+                self.scroll_on_next_input = false;
+            }
+        } else {
+            get_mut!(self.component, image).set_arrow_location(false, None);
+        }
+
+        // display runtime error (and HitBadImport)
+        let Self {
+            execution_state,
+            component,
+            ..
+        } = self;
+        if let Some((line_no, msg)) = find_error(execution_state) {
+            get_mut!(component, textbox).inner_mut()[line_no]
+                .set_runtime_error(Some(msg.to_string()));
+        }
+    }
+
+    fn current_step(&self) -> usize {
+        self.slider().inner().value_as_number().round() as usize
+    }
+
+    fn execute(&mut self, binary: &[u8], version: usize) {
+        self.pending_binary = Some((binary.to_vec(), version));
+        if self.worker_running {
+            return;
+        }
+        self.worker_running = true;
+
+        let holder = self.holder();
+
+        wasm_bindgen_futures::spawn_local(async move {
+            loop {
+                let Some((binary, version)) = holder.borrow_mut().pending_binary.take() else {
+                    break;
+                };
+                run_binary(&binary)
+                    .await
+                    .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
+
+                let mut ed = holder.borrow_mut();
+                if version != ed.version {
+                    continue;
+                }
+
+                let mut slider_step = ed.current_step();
+                // Move slider to the end if binary changed and it's in the middle
+                if step_count() == 0 {
+                    ed.slider_mut().inner_mut().hide();
+                    ed.image_mut().set_arrow_location(false, None);
+                    break;
+                }
+
+                if ed.slider().inner().is_visible() {
+                    if slider_step != 0 {
+                        slider_step = step_count() - 1;
+                    }
+                } else {
+                    slider_step = step_count() - 1;
+                }
+
+                let slot_count = ed.slot_connections().written.len();
+                ed.execution_state_mut().reset(slot_count);
+                ed.update_live_info(step_count(), Some(slider_step), true);
+                ed.slider_mut()
+                    .inner_mut()
+                    .set_value_as_number(slider_step as f64);
+            }
+            holder.borrow_mut().worker_running = false;
+        });
+    }
+
+    fn get_lines_and_positions(&self, range: &impl RangeLike) -> Result<PositionRange> {
         let (start_line, start_pos) =
             self.find_idx_and_utf16_pos(range.node1().unwrap(), range.offset1())?;
 
         let (end_line, end_pos) =
             self.find_idx_and_utf16_pos(range.node2().unwrap(), range.offset2())?;
 
-        Ok((start_line, start_pos, end_line, end_pos))
+        Ok(PositionRange {
+            start_line,
+            start_pos,
+            end_line,
+            end_pos,
+        })
     }
 
     // Replace a given range (currently within a single line) with new text
@@ -231,8 +421,12 @@ impl Editor {
 
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
 
-        let (start_line, start_pos, end_line, end_pos) =
-            self.get_lines_and_positions(target_range)?;
+        let PositionRange {
+            start_line,
+            start_pos,
+            end_line,
+            end_pos,
+        } = self.get_lines_and_positions(target_range)?;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -240,7 +434,7 @@ impl Editor {
         }
 
         // disable animations; will be re-enabled if any indentation changes
-        self.0.borrow_mut().component.remove_attribute("class");
+        self.component.remove_attribute("class");
 
         let mut new_cursor_pos = if start_line == end_line {
             // Single-line edit.
@@ -275,13 +469,13 @@ impl Editor {
                     }
                 }
                 if need_end {
-                    let matching_end = CodeLine::new("end", &self.0.borrow().factory);
+                    let matching_end = CodeLine::new("end", &self.factory);
                     self.text_mut().insert(start_line + 1, matching_end);
                     self.line_mut(start_line + 1).reveal();
                 }
             } else if was_structured && !is_structured {
                 // Should we delete an unnecessary subsequent `end` (because of a removed structured instr)?
-                if self.len() > start_line + 1
+                if self.text().len() > start_line + 1
                     && self.line(start_line + 1).info().is_active()
                     && self.line(start_line + 1).info().kind == LineKind::Instr(InstrKind::End)
                     && self.line(start_line + 1).comment().is_empty()
@@ -350,7 +544,7 @@ impl Editor {
                     let rest = self.line(fixup_line).suffix(pos)?;
                     let end_pos = self.line(fixup_line).end_position();
                     self.line_mut(fixup_line).replace_range(pos, end_pos, "")?;
-                    let mut newline = CodeLine::new(&rest[1..], &self.0.borrow().factory);
+                    let mut newline = CodeLine::new(&rest[1..], &self.factory);
 
                     // preserve identity in one special case
                     if pos == Position::begin() {
@@ -377,17 +571,12 @@ impl Editor {
                 }
                 // Store new edit
                 {
-                    self.0.borrow_mut().action_history.store_edit(Edit {
+                    self.action_history.store_edit(Edit {
                         start_line,
                         old_lines: backup,
                         new_lines,
-                        selection_before: Selection {
-                            start_line: saved_selection.0,
-                            start_pos: saved_selection.1,
-                            end_line: saved_selection.2,
-                            end_pos: saved_selection.3,
-                        },
-                        selection_after: Selection {
+                        selection_before: saved_selection,
+                        selection_after: PositionRange {
                             start_line: fixup_line,
                             start_pos: new_cursor_pos,
                             end_line: fixup_line,
@@ -403,7 +592,7 @@ impl Editor {
                 // restore backup
                 self.text_mut().remove_range(start_line, fixup_line + 1);
                 for (i, contents) in backup.iter().enumerate() {
-                    let mut line = CodeLine::new(contents, &self.0.borrow().factory);
+                    let mut line = CodeLine::new(contents, &self.factory);
                     line.shake();
                     self.text_mut().insert(start_line + i, line);
                 }
@@ -411,18 +600,16 @@ impl Editor {
                 self.on_change().expect("well-formed after restore");
 
                 // restore selection
-                let (start_line, start_pos, end_line, end_pos) = saved_selection;
-
-                let start_line = self.line(start_line);
-                let new_start_node = start_line.position_to_node(start_pos);
-                let end_line = self.line(end_line);
-                let new_end_node = end_line.position_to_node(end_pos);
+                let start_line = self.line(saved_selection.start_line);
+                let new_start_node = start_line.position_to_node(saved_selection.start_pos);
+                let end_line = self.line(saved_selection.end_line);
+                let new_end_node = end_line.position_to_node(saved_selection.end_pos);
 
                 set_selection_range(
                     new_start_node,
-                    start_pos.offset.try_into().expect("offset -> u32"),
+                    saved_selection.start_pos.offset.try_into().unwrap(),
                     new_end_node,
-                    end_pos.offset.try_into().expect("offset -> u32"),
+                    saved_selection.end_pos.offset.try_into().unwrap(),
                 );
             }
         }
@@ -538,43 +725,6 @@ impl Editor {
         Ok(())
     }
 
-    fn accept_autocomplete(&mut self, accepted: &str) -> Result<()> {
-        let selection = get_selection();
-        if selection.is_collapsed() {
-            let (_, pos) = self.find_idx_and_utf16_pos(
-                selection.focus_node().context("focus")?,
-                selection.focus_offset(),
-            )?;
-
-            if pos.in_instr && pos.offset < accepted.len() {
-                Editor(Rc::clone(&self.0)).replace_range(&selection, &accepted[pos.offset..])?;
-            }
-        }
-        self.autocomplete_mut().update("");
-        Ok(())
-    }
-
-    fn show_autocomplete(&self) -> Result<()> {
-        let selection = get_selection();
-        if !selection.is_collapsed() {
-            self.autocomplete_mut().update("");
-            return Ok(());
-        }
-
-        let (line_idx, pos) = self.find_idx_and_utf16_pos(
-            selection.focus_node().context("focus")?,
-            selection.focus_offset(),
-        )?;
-        if !pos.in_instr {
-            self.autocomplete_mut().update("");
-            return Ok(());
-        }
-
-        let prefix = self.line(line_idx).instr().get()[..pos.offset].to_string();
-        self.autocomplete_mut().update(&prefix);
-        Ok(())
-    }
-
     // Given a node and offset, find the line index and (UTF-16) position within that line.
     // There are several possibilities for the node (e.g. the div element, the span element,
     // or the text node).
@@ -583,7 +733,7 @@ impl Editor {
 
         // If the position is "in" the div element, make sure the offset matches expectations
         // (either 0 for the very beginning, or #lines for the very end).
-        if node.is_same_node(&*self.text()) {
+        if node.is_same_node(self.text()) {
             let line_count = self.text().len();
             return Ok(if offset == 0 {
                 (0, Position::begin())
@@ -607,97 +757,11 @@ impl Editor {
         Ok((line_idx, self.line(line_idx).get_position(node, offset)?))
     }
 
-    // Accessors
-    fn textbox(&self) -> Ref<'_, ReactiveComponent<TextType>> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.0)
-    }
-
-    fn textbox_mut(&self) -> RefMut<'_, ReactiveComponent<TextType>> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.1.0)
-    }
-
-    fn image_mut(&self) -> RefMut<'_, DomImage> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().1.0)
-    }
-
-    fn text(&self) -> Ref<'_, TextType> {
-        Ref::map(self.textbox(), |c| c.inner())
-    }
-
-    fn text_mut(&mut self) -> RefMut<'_, TextType> {
-        RefMut::map(self.textbox_mut(), |c| c.inner_mut())
-    }
-
-    fn line(&self, idx: usize) -> Ref<'_, CodeLine> {
-        Ref::map(self.text(), |c| &c[idx])
-    }
-
-    fn line_mut(&mut self, idx: usize) -> RefMut<'_, CodeLine> {
-        RefMut::map(self.text_mut(), |c| &mut c[idx])
-    }
-
-    fn slider(&self) -> Ref<'_, ReactiveComponent<Slider>> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().0)
-    }
-
-    fn slider_mut(&self) -> RefMut<'_, ReactiveComponent<Slider>> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.component.get_mut().0)
-    }
-
-    fn autocomplete(&self) -> Ref<'_, Autocomplete> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.1.1.0)
-    }
-
-    fn autocomplete_mut(&self) -> RefMut<'_, Autocomplete> {
-        RefMut::map(self.0.borrow_mut(), |c| {
-            &mut c.component.get_mut().1.1.1.1.0
-        })
-    }
-
-    fn save_status(&self) -> Ref<'_, SaveStatus> {
-        Ref::map(self.0.borrow(), |c| &c.component.get().1.1.1.1.1.0)
-    }
-
-    fn save_status_mut(&self) -> RefMut<'_, SaveStatus> {
-        RefMut::map(self.0.borrow_mut(), |c| {
-            &mut c.component.get_mut().1.1.1.1.1.0
-        })
-    }
-
-    fn slot_connections(&self) -> Ref<'_, SlotConnections> {
-        Ref::map(self.0.borrow(), |c| &c.slot_connections)
-    }
-
-    fn slot_connections_mut(&mut self) -> RefMut<'_, SlotConnections> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.slot_connections)
-    }
-
-    fn execution_state_mut(&self) -> RefMut<'_, ExecutionState> {
-        RefMut::map(self.0.borrow_mut(), |c| &mut c.execution_state)
-    }
-
-    // get the user-entered text buffer (doesn't include synthetic Wasm)
-    fn buffer_as_text(&self) -> impl Iterator<Item = Ref<'_, str>> {
-        UserTextIterator {
-            editor: self.text(),
-            line_field_idx: 0,
-        }
-    }
-
-    // get the active, well-formed line contents
-    fn active_as_text(&self) -> impl Iterator<Item = Ref<'_, str>> {
-        ActiveTextIterator {
-            editor: self.text(),
-            line_idx: 0,
-            active_str_idx: 0,
-        }
-    }
-
     fn on_change(&mut self) -> Result<()> {
         // repair syntax
         fix_syntax(self);
 
-        let wasm_bin = str_to_binary(self.active_as_text().join(" "))?;
+        let wasm_bin = str_to_binary(self.active_as_text())?;
         let raw_module = RawModule::new(self, &wasm_bin)?;
         let validized = raw_module.fix_validity(self, &wasm_bin)?;
         let types = validized.to_types_table(&wasm_bin)?;
@@ -706,21 +770,20 @@ impl Editor {
         indent_and_frame(self, &validized, &types);
 
         // update visual types of params, locals, and operators
-        self.0.borrow_mut().scroll_on_next_input = false; // edit to text buffer -> don't scroll to arrow
+        self.scroll_on_next_input = false; // edit to text buffer -> don't scroll to arrow
         *self.slot_connections_mut() = find_connections(&validized, &types);
         self.update_displayed_types(&validized, &types)?;
 
         // instrumentation
         let instrumented_binary = &validized.build_instrumented_binary(&types)?;
         let instrumented_binary_hash = Self::hash_binary(instrumented_binary);
-        if self.0.borrow().previous_instrumented_binary_hash != instrumented_binary_hash {
-            self.0.borrow_mut().version += 1;
-            let version = self.0.borrow().version;
-            self.execute(instrumented_binary, version);
-            self.0.borrow_mut().previous_instrumented_binary_hash = instrumented_binary_hash;
+        if self.previous_instrumented_binary_hash != instrumented_binary_hash {
+            self.version += 1;
+            self.execute(instrumented_binary, self.version);
+            self.previous_instrumented_binary_hash = instrumented_binary_hash;
         } else {
             if step_count() > 0 {
-                self.update_live_info(step_count(), self.current_step());
+                self.update_live_info(step_count(), None, false);
             } else {
                 self.image_mut().set_arrow_location(false, None);
             }
@@ -734,13 +797,36 @@ impl Editor {
         Ok(())
     }
 
+    // get the user-entered text buffer (doesn't include synthetic Wasm)
+    fn buffer_as_text(&self) -> String {
+        let mut ret = String::new();
+        for line in self.text().iter() {
+            ret.push_str(line.instr().get());
+            ret.push_str(line.comment().get());
+            ret.push('\n');
+        }
+        ret
+    }
+
+    // get the active, well-formed line contents
+    fn active_as_text(&self) -> String {
+        let mut ret = String::new();
+        for line in self.text().iter() {
+            for i in 0..line.info().num_well_formed_strs() {
+                ret.push_str(line.well_formed_str(i));
+                ret.push(' ');
+            }
+        }
+        ret
+    }
+
     fn update_displayed_types<'a>(
         &mut self,
         validized: &ValidModule<'a>,
         types: &TypedModule,
     ) -> Result<()> {
         // set types
-        let line_count = self.len();
+        let line_count = self.text().len();
         self.image_mut().set_type_count(line_count);
         let mut last_line_no = 0;
         // set types of globals
@@ -813,7 +899,7 @@ impl Editor {
                                 last_line_no += 1;
                             }
 
-                            let indent = self.info(line_idx).indent.unwrap_or(0);
+                            let indent = self.line(line_idx).info().indent.unwrap_or(0);
                             self.image_mut().set_type(
                                 line_idx,
                                 indent,
@@ -843,7 +929,7 @@ impl Editor {
                         self.image_mut().clear_type(last_line_no);
                         last_line_no += 1;
                     }
-                    let indent = self.info(local_line_idx).indent.unwrap_or(0);
+                    let indent = self.line(local_line_idx).info().indent.unwrap_or(0);
                     self.image_mut().set_type(
                         local_line_idx,
                         indent,
@@ -893,11 +979,11 @@ impl Editor {
                     })
                     .collect();
 
-                if !all_used && self.info(op.line_idx).invalid.is_none() {
+                if !all_used && self.line(op.line_idx).info().invalid.is_none() {
                     self.line_mut(op.line_idx).set_invalid(Some(String::new()));
                 }
 
-                let indent = self.info(op.line_idx).indent.unwrap_or(0);
+                let indent = self.line(op.line_idx).info().indent.unwrap_or(0);
 
                 if !func_types.params.is_empty() && op.line_idx == start_line {
                     // special case: for an empty func, don't override the param types with the function end type
@@ -919,36 +1005,29 @@ impl Editor {
             self.image_mut().clear_type(i);
         }
 
-        let editor_ref = &mut *self.0.borrow_mut();
-        editor_ref
-            .component
-            .get_mut()
-            .1
-            .0
-            .set_connections(&editor_ref.slot_connections);
+        get_mut!(self.component, image).set_connections(&self.slot_connections);
         Ok(())
     }
 
     fn schedule_save(&mut self) {
         self.save_status_mut().mark_dirty();
-        if self.0.borrow().pending_save.is_some() {
+        if self.pending_save.is_some() {
             // A save or retry already in flight
             return;
         }
         self.attempt_save(SCHEDULE_STORE_MS);
     }
 
-    fn attempt_save(&self, delay_ms: i32) {
-        let editor_ref = Rc::clone(&self.0);
+    fn attempt_save(&mut self, delay_ms: i32) {
+        let holder = Rc::clone(&self.holder.upgrade().unwrap());
         let closure = Closure::new(move || {
-            let mut editor = Editor(editor_ref.clone());
+            let mut editor = holder.borrow_mut();
             let saved_version = editor.save_status().get_version();
-            let content = editor.buffer_as_text().join("");
+            let content = editor.buffer_as_text();
             let success = {
-                let mut inner = editor_ref.borrow_mut();
-                inner.pending_save = None;
+                editor.pending_save = None;
                 // Currently synchronous and atomic but could be asynchronous in the future
-                inner
+                editor
                     .storage
                     .as_ref()
                     .map(|s| s.try_set_item(STORAGE_ID, &content))
@@ -968,55 +1047,8 @@ impl Editor {
                 editor.attempt_save(RETRY_STORE_MS);
             }
         });
-        StorageHandle::set_timeout_with_callback(&closure, delay_ms);
-        self.0.borrow_mut().pending_save = Some(closure);
-    }
-
-    fn execute(&self, binary: &[u8], version: usize) {
-        let inner = Rc::clone(&self.0);
-        inner.borrow_mut().pending_binary = Some((binary.to_vec(), version));
-        if inner.borrow().worker_running {
-            return;
-        }
-        inner.borrow_mut().worker_running = true;
-        wasm_bindgen_futures::spawn_local(async move {
-            loop {
-                let Some((binary, version)) = inner.borrow_mut().pending_binary.take() else {
-                    break;
-                };
-                run_binary(&binary)
-                    .await
-                    .unwrap_or_else(|e| log_1(&format!("Codillon runtime error: {e}").into()));
-
-                let editor_handle = Editor(Rc::clone(&inner));
-
-                if version != editor_handle.0.borrow().version {
-                    continue;
-                }
-
-                let mut slider_step = editor_handle.current_step();
-                // Move slider to the end if binary changed and it's in the middle
-                if step_count() == 0 {
-                    editor_handle.slider_mut().inner_mut().hide();
-                    editor_handle.image_mut().set_arrow_location(false, None);
-                    break;
-                }
-
-                if editor_handle.slider().inner().is_visible() {
-                    if slider_step != 0 {
-                        slider_step = step_count() - 1;
-                    }
-                } else {
-                    slider_step = step_count() - 1;
-                }
-
-                let slot_count = editor_handle.slot_connections().written.len();
-                editor_handle.execution_state_mut().reset(slot_count);
-                editor_handle.update_live_info(step_count(), slider_step);
-                editor_handle.move_slider(slider_step);
-            }
-            inner.borrow_mut().worker_running = false;
-        });
+        self.window.set_timeout_with_callback(&closure, delay_ms);
+        self.pending_save = Some(closure);
     }
 
     fn hash_binary(binary: &[u8]) -> u64 {
@@ -1026,131 +1058,14 @@ impl Editor {
         hasher.finish()
     }
 
-    fn current_step(&self) -> usize {
-        self.slider().inner().value_as_number().round() as usize
-    }
-
-    fn move_slider(&self, current_step: usize) {
-        self.slider_mut()
-            .inner_mut()
-            .set_value_as_number(current_step as f64);
-    }
-
-    fn update_live_info(&self, step_count: usize, current_step: usize) {
-        assert!(step_count > 0);
-        if step_count > 1 {
-            self.slider_mut().inner_mut().show();
-            self.slider_mut().inner_mut().build_ticks(
-                step_count - 1,
-                current_step,
-                &termination_type(),
-            )
-        } else {
-            self.slider_mut().inner_mut().hide();
-        }
-
-        fn find_error(state: &ExecutionState) -> Option<(usize, &str)> {
-            Some(match &state.status {
-                Some((line_no, TerminationType::Error, Some(msg))) => (*line_no, msg),
-                Some((line_no, TerminationType::HitBadImport, _)) => {
-                    (*line_no, "called unknown import")
-                }
-                _ => return None,
-            })
-        }
-
-        let editor_ref = &mut *self.0.borrow_mut();
-
-        // clear runtime error
-        if let Some((line_no, _)) = find_error(&editor_ref.execution_state) {
-            editor_ref
-                .component
-                .get_mut()
-                .1
-                .1
-                .0
-                .inner_mut()
-                .get_mut(line_no)
-                .unwrap()
-                .set_runtime_error(None);
-        };
-
-        // compute the state for the desired step
-        editor_ref
-            .execution_state
-            .goto_step(current_step, &mut editor_ref.component.get_mut().1.1.1.0);
-        Self::update_slots(editor_ref);
-        if step_count > 1
-            && let Some((line_no, _, _)) = &editor_ref.execution_state.status
-            && let Some(indent) = &editor_ref.component.get().1.1.0.inner()[*line_no]
-                .info()
-                .indent
-                .clone()
-        {
-            editor_ref.component.get_mut().1.0.set_arrow_location(
-                editor_ref.scroll_on_next_input,
-                Some((*line_no, *indent as usize)),
-            );
-            if editor_ref.scroll_on_next_input {
-                editor_ref.component.get_mut().1.0.scroll_to_arrow();
-                editor_ref.scroll_on_next_input = false;
-            }
-        } else {
-            editor_ref
-                .component
-                .get_mut()
-                .1
-                .0
-                .set_arrow_location(false, None);
-        }
-
-        // display runtime error (and HitBadImport)
-        if let Some((line_no, msg)) = find_error(&editor_ref.execution_state) {
-            editor_ref
-                .component
-                .get_mut()
-                .1
-                .1
-                .0
-                .inner_mut()
-                .get_mut(line_no)
-                .unwrap()
-                .set_runtime_error(Some(msg.to_string()));
-        }
-    }
-
-    fn update_slots(editor_ref: &mut _Editor) {
-        for (slot_idx, value) in editor_ref.execution_state.slots.iter().enumerate() {
-            let where_written = &editor_ref.slot_connections.written[slot_idx];
-            if let Some(coord) = where_written {
-                editor_ref
-                    .component
-                    .get_mut()
-                    .1
-                    .0
-                    .set_slot_value(coord, false, value);
-            }
-
-            let where_read = &editor_ref.slot_connections.read[slot_idx];
-            if let Some(coord) = where_read {
-                editor_ref
-                    .component
-                    .get_mut()
-                    .1
-                    .0
-                    .set_slot_value(coord, true, value);
-            }
-        }
-    }
-
     fn apply_selection(
         &mut self,
         start_line: usize,
         remove_len: usize,
         insert_lines: &[String],
-        selection_after: &Selection,
+        selection_after: &PositionRange,
     ) -> Result<()> {
-        let mut document_length = self.len();
+        let mut document_length = self.text().len();
         if start_line > document_length {
             bail!("start_line {start_line} out of range");
         }
@@ -1159,200 +1074,219 @@ impl Editor {
             start_line
                 .checked_add(remove_len)
                 .unwrap_or(document_length),
-            self.len(),
+            self.text().len(),
         );
         if end > start_line {
             self.text_mut().remove_range(start_line, end);
         }
         // Add new lines
         for (index, value) in insert_lines.iter().enumerate() {
-            let newline = CodeLine::new(value, &self.0.borrow().factory);
+            let newline = CodeLine::new(value, &self.factory);
             self.text_mut().insert(start_line + index, newline);
         }
         self.on_change()?;
-        document_length = self.len().saturating_sub(1);
+        document_length = self.text().len().saturating_sub(1);
         let start_index = min(selection_after.start_line, document_length);
         let end_index = min(selection_after.end_line, document_length);
         // Restore caret position
         set_selection_range(
             self.line(start_index)
                 .position_to_node(selection_after.start_pos),
-            selection_after
-                .start_pos
-                .offset
-                .try_into()
-                .expect("offset -> u32"),
+            selection_after.start_pos.offset.try_into().unwrap(),
             self.line(end_index)
                 .position_to_node(selection_after.end_pos),
-            selection_after
-                .end_pos
-                .offset
-                .try_into()
-                .expect("offset -> u32"),
+            selection_after.end_pos.offset.try_into().unwrap(),
         );
         Ok(())
     }
 
     // Undo the most recent edit.
     pub fn undo(&mut self) -> Result<()> {
-        let mut inner = self.0.borrow_mut();
-        if let Some(edit) = inner.action_history.undo_stack.pop() {
-            drop(inner);
+        if let Some(edit) = self.action_history.undo_stack.pop() {
             self.apply_selection(
                 edit.start_line,
                 edit.new_lines.len(),
                 &edit.old_lines,
                 &edit.selection_before,
             )?;
-            let mut inner = self.0.borrow_mut();
-            inner.action_history.redo_stack.push(edit);
-            inner.action_history.last_time_ms = 0.0;
+            self.action_history.redo_stack.push(edit);
+            self.action_history.last_time_ms = 0.0;
         }
         Ok(())
     }
 
     // Re-apply most recently undone edit
     pub fn redo(&mut self) -> Result<()> {
-        let mut inner = self.0.borrow_mut();
-        if let Some(edit) = inner.action_history.redo_stack.pop() {
-            drop(inner);
+        if let Some(edit) = self.action_history.redo_stack.pop() {
             self.apply_selection(
                 edit.start_line,
                 edit.old_lines.len(),
                 &edit.new_lines,
                 &edit.selection_after,
             )?;
-            let mut inner = self.0.borrow_mut();
-            inner.action_history.undo_stack.push(edit);
-            inner.action_history.last_time_ms = 0.0;
+            self.action_history.undo_stack.push(edit);
+            self.action_history.last_time_ms = 0.0;
         }
         Ok(())
     }
-}
 
-pub struct UserTextIterator<'a> {
-    editor: Ref<'a, TextType>,
-    line_field_idx: usize,
-}
+    fn accept_autocomplete(&mut self, accepted: &str) -> Result<()> {
+        let selection = get_selection();
+        if selection.is_collapsed() {
+            let (_, pos) = self.find_idx_and_utf16_pos(
+                selection.focus_node().context("focus")?,
+                selection.focus_offset(),
+            )?;
 
-impl<'a> Iterator for UserTextIterator<'a> {
-    type Item = Ref<'a, str>;
+            if pos.in_instr && pos.offset < accepted.len() {
+                self.replace_range(&selection, &accepted[pos.offset..])?;
+            }
+        }
+        self.autocomplete_mut().update("");
+        Ok(())
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.line_field_idx == self.editor.len() * 3 {
-            return None;
+    fn show_autocomplete(&mut self) -> Result<()> {
+        let selection = get_selection();
+        if !selection.is_collapsed() {
+            self.autocomplete_mut().update("");
+            return Ok(());
         }
 
-        let (line_idx, field_idx) = (self.line_field_idx / 3, self.line_field_idx % 3);
-        self.line_field_idx += 1;
+        let (line_idx, pos) = self.find_idx_and_utf16_pos(
+            selection.focus_node().context("focus")?,
+            selection.focus_offset(),
+        )?;
+        if !pos.in_instr {
+            self.autocomplete_mut().update("");
+            return Ok(());
+        }
 
-        let line = Ref::map(Ref::clone(&self.editor), |x| &x[line_idx]);
-        Some(Ref::map(line, |x| match field_idx {
-            0 => x.instr().get(),
-            1 => x.comment().get(),
-            _ => "\n",
-        }))
+        let prefix = self.line(line_idx).instr().get()[..pos.offset].to_string();
+        self.autocomplete_mut().update(&prefix);
+        Ok(())
     }
-}
 
-pub struct ActiveTextIterator<'a> {
-    editor: Ref<'a, TextType>,
-    line_idx: usize,
-    active_str_idx: usize,
-}
+    fn new(factory: ElementFactory) -> Result<Self> {
+        let mut ret = Self {
+            component: DomStruct::new(
+                (
+                    ReactiveComponent::new(Slider::new(factory.clone())),
+                    (
+                        DomImage::new(factory.clone()),
+                        (
+                            ReactiveComponent::new(DomVec::new(factory.div())),
+                            (
+                                DomCanvas::new(factory.canvas())?,
+                                (Autocomplete::new(&factory), (SaveStatus::new(&factory), ())),
+                            ),
+                        ),
+                    ),
+                ),
+                factory.div(),
+            ),
+            factory,
+            action_history: ActionHistory::default(),
+            storage: StorageHandle::new(),
+            pending_binary: None,
+            previous_instrumented_binary_hash: 0,
+            worker_running: false,
+            pending_save: None,
+            version: 0,
+            slot_connections: SlotConnections::default(),
+            execution_state: ExecutionState::default(),
+            scroll_on_next_input: false,
+            window: WindowHandle::default(),
+            holder: Weak::new(),
+        };
 
-impl<'a> Iterator for ActiveTextIterator<'a> {
-    type Item = Ref<'a, str>;
+        let text = ret.textbox_mut();
+        text.inner_mut().set_attribute("class", "textentry");
+        text.inner_mut().set_attribute(
+            "style",
+            &format!("--codillon-line-spacing: {}px;", LINE_SPACING),
+        );
+        text.inner_mut().set_attribute("contenteditable", "true");
+        text.inner_mut().set_attribute("spellcheck", "false");
 
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.line_idx < self.editor.len()
-            && self.active_str_idx >= self.editor[self.line_idx].info().num_well_formed_strs()
+        ret.image_mut().set_attribute("class", "annotations");
+
+        Ok(ret)
+    }
+
+    fn holder(&self) -> EditorHolder {
+        EditorHolder(self.holder.upgrade().unwrap())
+    }
+
+    fn init(&mut self, holder: Weak<RefCell<Editor>>) {
+        self.holder = holder;
+
+        let e = self.holder();
+        self.textbox_mut()
+            .set_onbeforeinput(move |ev| e.borrow_mut().handle_input(ev).unwrap());
+
+        let e = self.holder();
+        self.textbox_mut()
+            .set_onkeydown(move |ev| e.borrow_mut().handle_keydown(ev).unwrap());
+
+        let e = self.holder();
+        self.textbox_mut()
+            .set_onmousedown(move |_| e.borrow_mut().autocomplete_mut().update(""));
+
+        let e = self.holder();
+        self.autocomplete_mut()
+            .set_handler(move |accepted| e.borrow_mut().accept_autocomplete(accepted).unwrap());
+
+        let e = self.holder();
+        self.slider_mut()
+            .set_oninput(move |_| e.borrow_mut().update_live_info(step_count(), None, false));
+
+        let e = self.holder();
+        self.slider_mut()
+            .set_onkeydown(move |_| e.borrow_mut().scroll_on_next_input = true);
+
+        let e = self.holder();
+        self.window
+            .set_onbeforeunload(move |ev: BeforeUnloadEvent| {
+                if e.borrow().save_status().is_dirty() {
+                    ev.prevent_default();
+                }
+            });
+
+        // Restore from localStorage, or use default content
+        if let Some(storage) = StorageHandle::new()
+            && let Some(content) = storage.get_item(STORAGE_ID)
         {
-            self.line_idx += 1;
-            self.active_str_idx = 0;
+            for line_str in content.lines() {
+                self.push_line(line_str);
+            }
+            if self.on_change().is_err() {
+                self.set_default_contents()
+            };
+        } else {
+            self.set_default_contents();
         }
 
-        if self.line_idx == self.editor.len() {
-            return None;
-        }
+        self.on_change().expect("well-formed initial contents");
 
-        let ret = Some(Ref::map(Ref::clone(&self.editor), |x| {
-            x[self.line_idx].well_formed_str(self.active_str_idx)
-        }));
-
-        self.active_str_idx += 1;
-
-        ret
-    }
-}
-
-impl LineInfos for Editor {
-    fn is_empty(&self) -> bool {
-        self.text().is_empty()
+        let height = LINE_SPACING * self.text().len();
+        self.image_mut()
+            .set_attribute("height", &height.to_string());
     }
 
-    fn len(&self) -> usize {
-        self.text().len()
+    fn push_line(&mut self, string: &str) {
+        let newline = CodeLine::new(string, &self.factory);
+        self.text_mut().push(newline);
     }
 
-    fn info(&self, index: usize) -> impl Deref<Target = LineInfo> {
-        Ref::map(self.line(index), |x| x.info())
-    }
-}
-
-impl LineInfosMut for Editor {
-    fn set_active_status(&mut self, index: usize, new_val: Activity) {
-        self.line_mut(index).set_active_status(new_val)
-    }
-
-    fn set_synthetic_before(&mut self, index: usize, synth: SyntheticWasm) {
-        self.line_mut(index).set_synthetic_before(synth);
-        // self.image_mut().set_synthetic_before(index, synth);
-    }
-
-    fn push(&mut self) {
-        self.push_line("");
-    }
-
-    fn set_invalid(&mut self, index: usize, reason: Option<String>) {
-        self.line_mut(index).set_invalid(reason)
-    }
-
-    fn set_runtime_error(&mut self, index: usize, msg: Option<String>) {
-        self.line_mut(index).set_runtime_error(msg)
-    }
-}
-
-impl FrameInfosMut for Editor {
-    fn set_indent(&mut self, index: usize, num: usize) {
-        if self.line_mut(index).set_indent(num) {
-            self.0
-                .borrow_mut()
-                .component
-                .set_attribute("class", "animated");
-        }
-    }
-
-    fn set_frames(&mut self, frames: Vec<FrameInfo>) {
-        let mut tagged_frames = HashMap::with_capacity(frames.len());
-        for frame in frames {
-            let id = self.line(frame.start).id();
-            tagged_frames.insert(id, frame);
-        }
-        let animated = self.0.borrow().component.get_attribute("class") == Some("animated");
-        self.image_mut().set_frames(tagged_frames, animated);
-    }
-}
-
-impl WithElement for Editor {
-    type Element = HtmlDivElement;
-    fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
-        self.0.borrow().component.with_element(f, g);
-    }
-}
-
-impl Component for Editor {
-    fn audit(&self) {
-        self.0.borrow().component.audit()
+    fn set_default_contents(&mut self) {
+        let len = self.text().len();
+        self.text_mut().remove_range(0, len);
+        self.push_line("(func");
+        self.push_line("i32.const 5");
+        self.push_line("i32.const 6");
+        self.push_line("i32.add");
+        self.push_line("drop");
+        self.push_line(")");
     }
 }

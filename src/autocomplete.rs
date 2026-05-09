@@ -125,6 +125,7 @@ impl Autocomplete {
 }
 
 impl Component for Autocomplete {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.bar.audit();
     }

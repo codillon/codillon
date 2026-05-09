@@ -79,6 +79,7 @@ impl DomCanvas {
 }
 
 impl Component for DomCanvas {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.elem.audit();
     }
