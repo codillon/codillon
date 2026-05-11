@@ -27,6 +27,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use itertools::zip_eq;
+use regex::Regex;
 use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
@@ -104,6 +105,7 @@ struct Editor {
     scroll_on_next_input: bool,
     window: WindowHandle,
     holder: Weak<RefCell<Self>>,
+    input_filter: Regex,
 }
 
 pub struct EditorHolder(Rc<RefCell<Editor>>);
@@ -627,10 +629,13 @@ impl Editor {
             "insertText" => self.replace_range(&target_range, &ev.data().context("no data")?),
             "insertFromPaste" => self.replace_range(
                 &target_range,
-                &ev.data_transfer()
-                    .context("no data_transfer")?
-                    .get_data("text/plain")
-                    .fmt_err()?,
+                &self.input_filter.replace_all(
+                    &ev.data_transfer()
+                        .context("no data transfer")?
+                        .get_data("text/plain")
+                        .fmt_err()?,
+                    "",
+                ),
             ),
             "deleteContentBackward" | "deleteContentForward" | "deleteByCut" => {
                 self.replace_range(&target_range, "")
@@ -1198,6 +1203,7 @@ impl Editor {
             scroll_on_next_input: false,
             window: WindowHandle::default(),
             holder: Weak::new(),
+            input_filter: Regex::new("\r")?,
         };
 
         let text = ret.textbox_mut();
