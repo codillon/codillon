@@ -175,7 +175,15 @@ impl Position {
     }
 }
 
+pub struct PositionRange {
+    pub start_line: usize,
+    pub start_pos: Position,
+    pub end_line: usize,
+    pub end_pos: Position,
+}
+
 impl Component for CodeLine {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         assert_eq!(self.info.kind, parse_line(self.instr().get()));
         assert_eq!(self.contents.get_attribute("class").unwrap(), &self.class());

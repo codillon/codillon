@@ -51,6 +51,7 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         pub fn get_mut(&mut self, index: usize) -> Option<&mut Child>;
         pub fn last(&self) -> Option<&Child>;
         pub fn last_mut(&mut self) -> Option<&mut Child>;
+        pub fn iter(&self) -> std::slice::Iter<'_, Child>;
         pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Child>;
     pub fn binary_search_by<'a, F>(&'a self, f: F) -> Result<usize, usize>
     where
@@ -83,6 +84,7 @@ impl<Child: Component, Element: AnyElement> std::ops::IndexMut<usize> for DomVec
 // audit it, and also verify that the child's opinion of its node matches the
 // actual child node of the DomVec's parent element.
 impl<Child: Component, Element: AnyElement> Component for DomVec<Child, Element> {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.elem.audit();
         let dom_children = self.elem.get_child_node_list();

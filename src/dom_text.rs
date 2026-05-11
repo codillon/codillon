@@ -139,6 +139,7 @@ impl WithNode for &DomText {
 }
 
 impl Component for DomText {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         assert_eq!(self.contents, self.text_node.data());
     }

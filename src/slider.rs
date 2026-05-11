@@ -133,6 +133,7 @@ impl Slider {
 }
 
 impl Component for Slider {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.container.audit();
         self.input.audit();

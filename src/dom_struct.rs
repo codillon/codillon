@@ -1,9 +1,9 @@
 // A Codillon DOM "struct" (product type): a (possibly empty) collection
 // of heterogeneous Components of (possibly) different types.
 
-use crate::jet::{
-    AccessToken, AnyElement, ArrayHandle, Component, ElementHandle, NodeListHandle, WithElement,
-};
+#[cfg(debug_assertions)]
+use crate::jet::NodeListHandle;
+use crate::jet::{AccessToken, AnyElement, ArrayHandle, Component, ElementHandle, WithElement};
 use delegate::delegate;
 
 pub struct DomStruct<Child: Structure, Element: AnyElement> {
@@ -17,6 +17,8 @@ pub struct DomStruct<Child: Structure, Element: AnyElement> {
 pub trait Structure {
     const LEN: usize;
     fn install(&self, nodes: &mut ArrayHandle, index: usize);
+
+    #[cfg(debug_assertions)]
     fn audit(&self, node_list: &NodeListHandle, index: usize);
 }
 
@@ -26,6 +28,8 @@ impl Structure for () {
     fn install(&self, nodes: &mut ArrayHandle, index: usize) {
         assert_eq!(index, nodes.length());
     }
+
+    #[cfg(debug_assertions)]
     fn audit(&self, node_list: &NodeListHandle, index: usize) {
         assert_eq!(index, node_list.length());
     }
@@ -39,6 +43,8 @@ impl<First: Component, Rest: Structure> Structure for (First, Rest) {
         nodes.set(index, &self.0);
         self.1.install(nodes, index + 1);
     }
+
+    #[cfg(debug_assertions)]
     fn audit(&self, node_list: &NodeListHandle, index: usize) {
         assert_eq!(index + Self::LEN, node_list.length());
         node_list.audit_node(index, &self.0);
@@ -87,6 +93,7 @@ impl<Child: Structure, Element: AnyElement> DomStruct<Child, Element> {
 
 // To audit, audit the parent element itself, then audit the structure members.
 impl<Child: Structure, Element: AnyElement> Component for DomStruct<Child, Element> {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.elem.audit();
         let dom_children = self.elem.get_child_node_list();

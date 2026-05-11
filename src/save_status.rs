@@ -75,6 +75,7 @@ impl WithElement for SaveStatus {
 }
 
 impl Component for SaveStatus {
+    #[cfg(debug_assertions)]
     fn audit(&self) {
         self.contents.audit()
     }
