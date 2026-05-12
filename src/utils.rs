@@ -32,6 +32,7 @@ enum InstrImports {
     RecordF32,
     RecordI64,
     RecordF64,
+    RecordMemory,
 }
 impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
@@ -41,6 +42,7 @@ impl InstrImports {
         ("record_f32", 4),
         ("record_i64", 5),
         ("record_f64", 6),
+        ("record_memory", 7),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: () -> () (type of func_placeholder)
@@ -57,6 +59,16 @@ impl InstrImports {
         (&[EncoderValType::I64, EncoderValType::I32], &[]),
         // 6: (f64, i32) -> ()
         (&[EncoderValType::F64, EncoderValType::I32], &[]),
+        // 7: (is_load: i32, addr_slot: i32, byte_count: i32, value_slot: i32) -> ()
+        (
+            &[
+                EncoderValType::I32,
+                EncoderValType::I32,
+                EncoderValType::I32,
+                EncoderValType::I32,
+            ],
+            &[],
+        ),
     ];
 }
 
@@ -1246,6 +1258,23 @@ impl<'a> ValidModule<'a> {
             Ok(())
         };
 
+        let memory_record =
+            |f: &mut wasm_encoder::Function, byte_count: u8, op_type: &OperatorType| {
+                let is_load = !op_type.outputs.is_empty();
+                let input0 = op_type.inputs.first().and_then(|s| s.as_ref());
+                let input1 = op_type.inputs.get(1).and_then(|s| s.as_ref());
+                let (addr, value) = match (is_load, input0, input1) {
+                    (true, Some(SlotUse(a)), _) => (*a, op_type.outputs[0].0),
+                    (false, Some(SlotUse(a)), Some(SlotUse(v))) => (*a, *v),
+                    _ => return, /* don't record memory footprint in unreachable code */
+                };
+                f.instruction(&I32Const(is_load as i32));
+                f.instruction(&I32Const(addr.try_into().expect("slot -> i32")));
+                f.instruction(&I32Const(byte_count as i32));
+                f.instruction(&I32Const(value.try_into().expect("slot -> i32")));
+                f.instruction(&Call(InstrImports::RecordMemory as u32));
+            };
+
         let step_debug = |f: &mut wasm_encoder::Function, line_number: usize| {
             // Step before each operator evaluation
             f.instruction(&I32Const(line_number.try_into().expect("line_no -> i32")));
@@ -1331,7 +1360,7 @@ impl<'a> ValidModule<'a> {
             // record result operands
             transparent_record_results(&mut new_function, &op_type.outputs);
 
-            // did this operator change a global or local (XXX or memory?)
+            // did this operator change a global or local or memory
             match op {
                 GlobalSet(idx) => {
                     new_function.instruction(&GlobalGet(idx));
@@ -1346,6 +1375,19 @@ impl<'a> ValidModule<'a> {
                         .nth(idx as usize)
                         .expect("valid local idx");
                     primitive_record(&mut new_function, local_type)?;
+                }
+
+                I32Load8S(_) | I32Load8U(_) | I64Load8S(_) | I64Load8U(_) | I32Store8(_)
+                | I64Store8(_) => memory_record(&mut new_function, 1, op_type),
+
+                I32Load16S(_) | I32Load16U(_) | I64Load16S(_) | I64Load16U(_) | I32Store16(_)
+                | I64Store16(_) => memory_record(&mut new_function, 2, op_type),
+
+                I32Load(_) | F32Load(_) | I32Store(_) | F32Store(_) | I64Load32S(_)
+                | I64Load32U(_) | I64Store32(_) => memory_record(&mut new_function, 4, op_type),
+
+                I64Load(_) | F64Load(_) | I64Store(_) | F64Store(_) => {
+                    memory_record(&mut new_function, 8, op_type)
                 }
                 _ => {}
             }
