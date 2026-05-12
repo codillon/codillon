@@ -2483,6 +2483,7 @@ pub(crate) mod tests {
   (type (func (param f32 i32)))
   (type (func (param i64 i32)))
   (type (func (param f64 i32)))
+  (type (func (param i32 i32 i32 i32)))
   (type (func (param i32)))
 "#;
     const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 2)))
@@ -2491,12 +2492,13 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 5)))
   (import "codillon_debug" "record_i64" (func (type 6)))
   (import "codillon_debug" "record_f64" (func (type 7)))
+  (import "codillon_debug" "record_memory" (func (type 8)))
 "#;
 
-    const EXPECTED_MAIN: &str = r#"  (export "main" (func 6))
+    const EXPECTED_MAIN: &str = r#"  (export "main" (func 7))
 "#;
 
-    const EXPECTED_STEP: &str = r#"  (func (type 8) (param i32)
+    const EXPECTED_STEP: &str = r#"  (func (type 9) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -2520,9 +2522,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 0
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2539,9 +2541,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2558,9 +2560,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2577,9 +2579,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2598,20 +2600,20 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
-    i32.const 0
-    call 7
-    i64.const 17
+    call 8
     i32.const 0
     call 8
+    i64.const 17
+    i32.const 0
+    call 9
     i32.const 1
-    call 7
+    call 8
     drop
     i32.const 2
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i64 i32) (result i64)
+                + r#"  (func (type 10) (param i64 i32) (result i64)
     local.get 0
     local.get 1
     call 4
@@ -2624,15 +2626,15 @@ pub(crate) mod tests {
 
         // well-formed block
         const JUST_BLOCK_END: &str = r#"    i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     block ;; label = @1
       i32.const 2
-      call 7
+      call 8
     end
     i32.const 3
-    call 7
+    call 8
   )
 "#;
         {
@@ -2685,28 +2687,28 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 137
     i32.const 0
-    call 8
+    call 9
     i32.const 2
-    call 7
+    call 8
     i32.const 2
     call 1
     unreachable
     i32.add
     i32.const 3
-    call 8
+    call 9
     i32.const 3
-    call 7
+    call 8
     drop
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
+                + r#"  (func (type 10) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2732,12 +2734,12 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
-  (export "main" (func 7))
+  (export "main" (func 8))
   (func (type 0)
     i32.const 6
-    call 8
+    call 9
     i32.const 6
-    call 8
+    call 9
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2782,21 +2784,21 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     block ;; label = @1
       i32.const 2
-      call 7
+      call 8
       loop ;; label = @2
         i32.const 4
-        call 7
+        call 8
       end
       i32.const 5
-      call 7
+      call 8
     end
     i32.const 6
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2815,15 +2817,15 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 1
     call 1
     unreachable
     nop
     i32.const 2
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2845,21 +2847,21 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 7
+    call 8
     i32.const 2
-    call 7
+    call 8
     i32.const 2
     call 1
     unreachable
     nop
     i32.const 3
-    call 7
+    call 8
     i32.const 3
     call 1
     unreachable
     drop
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2880,26 +2882,26 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 0
-    call 7
+    call 8
     loop ;; label = @1
       i32.const 1
-      call 7
+      call 8
       i32.const 5
       i32.const 0
-      call 8
+      call 9
       i32.const 2
-      call 7
+      call 8
       br 0 (;@1;)
       i32.const 3
-      call 7
+      call 8
     end
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
+                + r#"  (func (type 10) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2924,20 +2926,20 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 4
     i32.const 0
-    call 8
+    call 9
     i32.const 2
-    call 7
+    call 8
     i32.const 2
     call 1
     unreachable
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
+                + r#"  (func (type 10) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2969,6 +2971,7 @@ pub(crate) mod tests {
   (type (func (param f32 i32)))
   (type (func (param i64 i32)))
   (type (func (param f64 i32)))
+  (type (func (param i32 i32 i32 i32)))
   (type (func (param i32)))
   (type (func (param i32 i32 i32 i32) (result i32 i32)))
   (type (func (param i32 i32) (result i32)))
@@ -2978,49 +2981,50 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 6)))
   (import "codillon_debug" "record_i64" (func (type 7)))
   (import "codillon_debug" "record_f64" (func (type 8)))
-  (export "main" (func 6))
+  (import "codillon_debug" "record_memory" (func (type 9)))
+  (export "main" (func 7))
   (func (type 0)
     i32.const 0
-    call 8
-    i32.const 1
-    call 8
-    call 7
-    i32.const 1
-    call 8
-    i32.const 0
+    call 9
     i32.const 1
     call 9
-    i32.const 2
     call 8
+    i32.const 1
+    call 9
+    i32.const 0
+    i32.const 1
+    call 10
+    i32.const 2
+    call 9
     i32.add
     i32.const 2
-    call 10
+    call 11
     i32.const 3
-    call 8
+    call 9
     i32.const 3
     call 1
     unreachable
   )
   (func (type 1) (result i32 i32)
     i32.const 4
-    call 8
+    call 9
     i32.const 5
-    call 8
+    call 9
     i32.const 9
     i32.const 3
-    call 10
-    i32.const 6
-    call 8
-    i32.const 10
-    i32.const 4
-    call 10
-    i32.const 7
-    call 8
-    i32.const 5
+    call 11
     i32.const 6
     call 9
+    i32.const 10
+    i32.const 4
+    call 11
+    i32.const 7
+    call 9
+    i32.const 5
+    i32.const 6
+    call 10
   )
-  (func (type 9) (param i32)
+  (func (type 10) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -3028,7 +3032,7 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (type 10) (param i32 i32 i32 i32) (result i32 i32)
+  (func (type 11) (param i32 i32 i32 i32) (result i32 i32)
     local.get 0
     local.get 2
     call 2
@@ -3038,7 +3042,7 @@ pub(crate) mod tests {
     local.get 0
     local.get 1
   )
-  (func (type 11) (param i32 i32) (result i32)
+  (func (type 12) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3076,9 +3080,9 @@ pub(crate) mod tests {
     i32.const 3
     call 5
     i32.const 0
-    call 7
+    call 8
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3103,6 +3107,7 @@ pub(crate) mod tests {
   (type (func (param f32 i32)))
   (type (func (param i64 i32)))
   (type (func (param f64 i32)))
+  (type (func (param i32 i32 i32 i32)))
   (type (func (param i32)))
   (type (func (param i32 i32) (result i32)))
   (import "codillon_debug" "record_step" (func (type 3)))
@@ -3111,28 +3116,29 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 6)))
   (import "codillon_debug" "record_i64" (func (type 7)))
   (import "codillon_debug" "record_f64" (func (type 8)))
-  (export "main" (func 6))
+  (import "codillon_debug" "record_memory" (func (type 9)))
+  (export "main" (func 7))
   (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 1
     call 1
     unreachable
     block (type 1) (param i32) ;; label = @1
       i32.const 1
-      call 8
+      call 9
       i32.const 2
-      call 7
+      call 8
       i32.const 2
       call 1
       unreachable
     end
     i32.const 3
-    call 7
+    call 8
   )
-  (func (type 9) (param i32)
+  (func (type 10) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -3140,7 +3146,7 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (type 10) (param i32 i32) (result i32)
+  (func (type 11) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3162,17 +3168,17 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
-  (export "main" (func 7))
+  (export "main" (func 8))
   (func (type 0)
     i32.const 1
-    call 8
+    call 9
     i32.const 2
-    call 8
-    call 6
+    call 9
+    call 7
     i32.const 2
-    call 8
+    call 9
     i32.const 3
-    call 8
+    call 9
   )
 "# + EXPECTED_STEP
                 + ")\n";
