@@ -202,13 +202,28 @@ fn error_string() -> Option<String> {
     }
 }
 
+#[derive(Debug, Copy, Clone)]
+pub enum MemoryOp {
+    Load,
+    Store,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct MemoryAccess {
+    pub op: MemoryOp,
+    pub addr_slot: u32,  // slot idx for address
+    pub byte_count: u8,  // can be 1, 2, 4, or 8
+    pub value_slot: u32, // slot idx for value
+}
+
 #[derive(Default, Debug)]
 struct ExecutionStep {
     line_num: u32,
     slot_assignments: SmallVec<[(u32, WasmValue); 1]>, // slot idx, value (SmallVec stores in-line if <=1 result)
-    graphics_op: Option<Action>,                       // XXX todo: memory
-                                                       // XXX todo: clear any func/frame on entry
-                                                       // XXX todo: save any func on call/call_indirect, restore after
+    graphics_op: Option<Action>,
+    memory_access: Option<MemoryAccess>,
+    // XXX todo: clear any func/frame on entry
+    // XXX todo: save any func on call/call_indirect, restore after
 }
 
 impl ExecutionStep {
@@ -216,6 +231,7 @@ impl ExecutionStep {
         self.line_num = 0;
         self.slot_assignments.clear();
         self.graphics_op = None;
+        self.memory_access = None;
     }
 }
 
@@ -372,6 +388,21 @@ fn create_graphics_helpers(draw: &Object) {
     register_closure(draw, "set_radius", set_radius);
 }
 
+fn record_memory_access(is_load: i32, addr_slot: u32, byte_count: u8, value_slot: u32) {
+    with_current_step_mut(|step| {
+        step.memory_access = Some(MemoryAccess {
+            op: if is_load != 0 {
+                MemoryOp::Load
+            } else {
+                MemoryOp::Store
+            },
+            addr_slot,
+            byte_count,
+            value_slot,
+        });
+    });
+}
+
 fn create_closure_record_operations(obj: &Object) {
     let record = |value: WasmValue, slot: u32| {
         with_current_step_mut(|step| step.slot_assignments.push((slot, value)))
@@ -395,6 +426,13 @@ fn create_closure_record_operations(obj: &Object) {
         Box::new(move |value: f64, slot: u32| record(value.into(), slot)) as Box<dyn Fn(f64, u32)>,
     );
     register_closure(obj, "record_f64", record_f64);
+
+    let record_memory = Closure::wrap(Box::new(
+        move |is_load: i32, addr_slot: u32, byte_count: i32, value_slot: u32| {
+            record_memory_access(is_load, addr_slot, byte_count as u8, value_slot)
+        },
+    ) as Box<dyn Fn(i32, u32, i32, u32)>);
+    register_closure(obj, "record_memory", record_memory);
 }
 
 pub async fn run_binary(binary: &[u8]) -> Result<()> {
