@@ -2774,6 +2774,56 @@ pub(crate) mod tests {
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
+        // instrumentation for memory track
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 1)");
+            editor.push_line("(func");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.load");
+            editor.push_line("drop");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_TYPES
+                + "  (type (func (param i32 i32) (result i32)))\n"
+                + EXPECTED_IMPORTS
+                + "  (memory 1)\n"
+                + EXPECTED_MAIN
+                + r#"  (func (type 0)
+    i32.const 1
+    call 8
+    i32.const 2
+    call 8
+    i32.const 0
+    i32.const 0
+    call 9
+    i32.const 3
+    call 8
+    i32.load
+    i32.const 1
+    call 9
+    i32.const 1
+    i32.const 0
+    i32.const 4
+    i32.const 1
+    call 6
+    i32.const 4
+    call 8
+    drop
+    i32.const 5
+    call 8
+  )
+"# + EXPECTED_STEP
+                + r#"  (func (type 10) (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    call 2
+    local.get 0
+  )
+"# + ")\n";
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
         // syntax error (synthesizes closing paren)
         {
             let mut editor = FakeTextBuffer::default();
