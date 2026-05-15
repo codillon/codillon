@@ -60,11 +60,14 @@ impl InstrImports {
         (&[EncoderValType::I64, EncoderValType::I32], &[]),
         // 5: (f64, i32) -> ()
         (&[EncoderValType::F64, EncoderValType::I32], &[]),
-        // 6: (is_load: i32, addr_slot: i32, byte_count: i32, value_slot: i32) -> ()
+        // 6: (is_load: i32, mem_idx: i32, addr_slot: i32, offset: i64,
+        //     byte_count: i32, value_slot: i32) -> ()
         (
             &[
                 EncoderValType::I32,
                 EncoderValType::I32,
+                EncoderValType::I32,
+                EncoderValType::I64,
                 EncoderValType::I32,
                 EncoderValType::I32,
             ],
@@ -1322,22 +1325,27 @@ impl<'a> ValidModule<'a> {
             Ok(())
         };
 
-        let memory_record =
-            |f: &mut wasm_encoder::Function, byte_count: u8, op_type: &OperatorType| {
-                let is_load = !op_type.outputs.is_empty();
-                let input0 = op_type.inputs.first().and_then(|s| s.as_ref());
-                let input1 = op_type.inputs.get(1).and_then(|s| s.as_ref());
-                let (addr, value) = match (is_load, input0, input1) {
-                    (true, Some(SlotUse(a)), _) => (*a, op_type.outputs[0].0),
-                    (false, Some(SlotUse(a)), Some(SlotUse(v))) => (*a, *v),
-                    _ => return, /* don't record memory footprint in unreachable code */
-                };
-                f.instruction(&I32Const(is_load as i32));
-                f.instruction(&I32Const(addr.try_into().expect("slot -> i32")));
-                f.instruction(&I32Const(byte_count as i32));
-                f.instruction(&I32Const(value.try_into().expect("slot -> i32")));
-                f.instruction(&Call(InstrImports::RecordMemory as u32));
+        let memory_record = |f: &mut wasm_encoder::Function,
+                             mem_idx: u32,
+                             offset: u64,
+                             byte_count: u8,
+                             op_type: &OperatorType| {
+            let is_load = !op_type.outputs.is_empty();
+            let input0 = op_type.inputs.first().and_then(|s| s.as_ref());
+            let input1 = op_type.inputs.get(1).and_then(|s| s.as_ref());
+            let (addr, value) = match (is_load, input0, input1) {
+                (true, Some(SlotUse(a)), _) => (*a, op_type.outputs[0].0),
+                (false, Some(SlotUse(a)), Some(SlotUse(v))) => (*a, *v),
+                _ => return, /* don't record memory footprint in unreachable code */
             };
+            f.instruction(&I32Const(is_load as i32));
+            f.instruction(&I32Const(mem_idx as i32));
+            f.instruction(&I32Const(addr.try_into().expect("slot -> i32")));
+            f.instruction(&I64Const(offset as i64));
+            f.instruction(&I32Const(byte_count as i32));
+            f.instruction(&I32Const(value.try_into().expect("slot -> i32")));
+            f.instruction(&Call(InstrImports::RecordMemory as u32));
+        };
 
         let step_debug = |f: &mut wasm_encoder::Function, line_number: usize| {
             // Step before each operator evaluation
@@ -1465,17 +1473,23 @@ impl<'a> ValidModule<'a> {
                     primitive_record(&mut new_function, local_type)?;
                 }
 
-                I32Load8S(_) | I32Load8U(_) | I64Load8S(_) | I64Load8U(_) | I32Store8(_)
-                | I64Store8(_) => memory_record(&mut new_function, 1, op_type),
+                I32Load8S(m) | I32Load8U(m) | I64Load8S(m) | I64Load8U(m) | I32Store8(m)
+                | I64Store8(m) => {
+                    memory_record(&mut new_function, m.memory_index, m.offset, 1, op_type)
+                }
 
-                I32Load16S(_) | I32Load16U(_) | I64Load16S(_) | I64Load16U(_) | I32Store16(_)
-                | I64Store16(_) => memory_record(&mut new_function, 2, op_type),
+                I32Load16S(m) | I32Load16U(m) | I64Load16S(m) | I64Load16U(m) | I32Store16(m)
+                | I64Store16(m) => {
+                    memory_record(&mut new_function, m.memory_index, m.offset, 2, op_type)
+                }
 
-                I32Load(_) | F32Load(_) | I32Store(_) | F32Store(_) | I64Load32S(_)
-                | I64Load32U(_) | I64Store32(_) => memory_record(&mut new_function, 4, op_type),
+                I32Load(m) | F32Load(m) | I32Store(m) | F32Store(m) | I64Load32S(m)
+                | I64Load32U(m) | I64Store32(m) => {
+                    memory_record(&mut new_function, m.memory_index, m.offset, 4, op_type)
+                }
 
-                I64Load(_) | F64Load(_) | I64Store(_) | F64Store(_) => {
-                    memory_record(&mut new_function, 8, op_type)
+                I64Load(m) | F64Load(m) | I64Store(m) | F64Store(m) => {
+                    memory_record(&mut new_function, m.memory_index, m.offset, 8, op_type)
                 }
                 _ => {}
             }
@@ -2719,7 +2733,7 @@ pub(crate) mod tests {
   (type (func (param f32 i32)))
   (type (func (param i64 i32)))
   (type (func (param f64 i32)))
-  (type (func (param i32 i32 i32 i32)))
+  (type (func (param i32 i32 i32 i64 i32 i32)))
   (type (func (param i32)))
 "#;
     const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 1)))
@@ -2804,6 +2818,8 @@ pub(crate) mod tests {
     call 9
     i32.const 1
     i32.const 0
+    i32.const 0
+    i64.const 0
     i32.const 4
     i32.const 1
     call 6
@@ -2814,7 +2830,7 @@ pub(crate) mod tests {
     call 8
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 10) (param i32 i32) (result i32)
+                + r#"  (func (type 9) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3833,6 +3849,8 @@ pub(crate) mod tests {
     call 9
     i32.const 1
     i32.const 0
+    i32.const 0
+    i64.const 7
     i32.const 4
     i32.const 1
     call 6
@@ -3906,6 +3924,8 @@ pub(crate) mod tests {
     f64.store offset=1
     i32.const 0
     i32.const 0
+    i32.const 0
+    i64.const 1
     i32.const 8
     i32.const 1
     call 6
