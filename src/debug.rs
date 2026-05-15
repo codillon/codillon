@@ -210,9 +210,11 @@ pub enum MemoryOp {
 #[derive(Debug, Copy, Clone)]
 pub struct MemoryAccess {
     pub op: MemoryOp,
+    pub mem_idx: u32,    // memory index
     pub addr_slot: u32,  // slot idx for address
+    pub offset: u64,     // concrete addr = slots[addr_slot] + offset
     pub byte_count: u8,  // can be 1, 2, 4, or 8
-    pub value_slot: u32, // slot idx for value
+    pub value_slot: u32, // slot idx for value (only for store)
 }
 
 #[derive(Default, Debug)]
@@ -380,7 +382,14 @@ fn create_graphics_helpers(draw: &Object) {
     register_closure(draw, "set_radius", set_radius);
 }
 
-fn record_memory_access(is_load: i32, addr_slot: u32, byte_count: u8, value_slot: u32) {
+fn record_memory_access(
+    is_load: i32,
+    mem_idx: u32,
+    addr_slot: u32,
+    offset: u64,
+    byte_count: u8,
+    value_slot: u32,
+) {
     with_current_step_mut(|step| {
         step.memory_access = Some(MemoryAccess {
             op: if is_load != 0 {
@@ -388,7 +397,9 @@ fn record_memory_access(is_load: i32, addr_slot: u32, byte_count: u8, value_slot
             } else {
                 MemoryOp::Store
             },
+            mem_idx,
             addr_slot,
+            offset,
             byte_count,
             value_slot,
         });
@@ -420,10 +431,22 @@ fn create_closure_record_operations(obj: &Object) {
     register_closure(obj, "record_f64", record_f64);
 
     let record_memory = Closure::wrap(Box::new(
-        move |is_load: i32, addr_slot: u32, byte_count: i32, value_slot: u32| {
-            record_memory_access(is_load, addr_slot, byte_count as u8, value_slot)
+        move |is_load: i32,
+              mem_idx: u32,
+              addr_slot: u32,
+              offset: i64,
+              byte_count: i32,
+              value_slot: u32| {
+            record_memory_access(
+                is_load,
+                mem_idx,
+                addr_slot,
+                offset as u64,
+                byte_count as u8,
+                value_slot,
+            )
         },
-    ) as Box<dyn Fn(i32, u32, i32, u32)>);
+    ) as Box<dyn Fn(i32, u32, u32, i64, i32, u32)>);
     register_closure(obj, "record_memory", record_memory);
 }
 
