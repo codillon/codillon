@@ -3278,6 +3278,17 @@ pub(crate) mod tests {
             test_editor_flow(&mut editor)?;
         }
 
+        {
+            // issue #242
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("call $x");
+            editor.push_line(")");
+            editor.push_line("nop");
+            editor.push_line("(func $x)");
+            test_editor_flow(&mut editor)?;
+        }
+
         Ok(())
     }
 
