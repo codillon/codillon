@@ -32,6 +32,7 @@ enum InstrImports {
     RecordF32,
     RecordI64,
     RecordF64,
+    RecordMemory,
 }
 impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
@@ -41,6 +42,7 @@ impl InstrImports {
         ("record_f32", 4),
         ("record_i64", 5),
         ("record_f64", 6),
+        ("record_memory", 7),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: () -> () (type of func_placeholder)
@@ -57,6 +59,19 @@ impl InstrImports {
         (&[EncoderValType::I64, EncoderValType::I32], &[]),
         // 6: (f64, i32) -> ()
         (&[EncoderValType::F64, EncoderValType::I32], &[]),
+        // 7: (is_load: i32, mem_idx: i32, addr_slot: i32, offset: i64,
+        //     byte_count: i32, value_slot: i32) -> ()
+        (
+            &[
+                EncoderValType::I32,
+                EncoderValType::I32,
+                EncoderValType::I32,
+                EncoderValType::I64,
+                EncoderValType::I32,
+                EncoderValType::I32,
+            ],
+            &[],
+        ),
     ];
 }
 
@@ -1246,6 +1261,28 @@ impl<'a> ValidModule<'a> {
             Ok(())
         };
 
+        let memory_record = |f: &mut wasm_encoder::Function,
+                             mem_idx: u32,
+                             offset: u64,
+                             byte_count: u8,
+                             op_type: &OperatorType| {
+            let is_load = !op_type.outputs.is_empty();
+            let input0 = op_type.inputs.first().and_then(|s| s.as_ref());
+            let input1 = op_type.inputs.get(1).and_then(|s| s.as_ref());
+            let (addr, value) = match (is_load, input0, input1) {
+                (true, Some(SlotUse(a)), _) => (*a, op_type.outputs[0].0),
+                (false, Some(SlotUse(a)), Some(SlotUse(v))) => (*a, *v),
+                _ => return, /* don't record memory footprint in unreachable code */
+            };
+            f.instruction(&I32Const(is_load as i32));
+            f.instruction(&I32Const(mem_idx as i32));
+            f.instruction(&I32Const(addr.try_into().expect("slot -> i32")));
+            f.instruction(&I64Const(offset as i64));
+            f.instruction(&I32Const(byte_count as i32));
+            f.instruction(&I32Const(value.try_into().expect("slot -> i32")));
+            f.instruction(&Call(InstrImports::RecordMemory as u32));
+        };
+
         let step_debug = |f: &mut wasm_encoder::Function, line_number: usize| {
             // Step before each operator evaluation
             f.instruction(&I32Const(line_number.try_into().expect("line_no -> i32")));
@@ -1331,7 +1368,7 @@ impl<'a> ValidModule<'a> {
             // record result operands
             transparent_record_results(&mut new_function, &op_type.outputs);
 
-            // did this operator change a global or local (XXX or memory?)
+            // did this operator change a global or local or memory
             match op {
                 GlobalSet(idx) => {
                     new_function.instruction(&GlobalGet(idx));
@@ -1346,6 +1383,25 @@ impl<'a> ValidModule<'a> {
                         .nth(idx as usize)
                         .expect("valid local idx");
                     primitive_record(&mut new_function, local_type)?;
+                }
+
+                I32Load8S(m) | I32Load8U(m) | I64Load8S(m) | I64Load8U(m) | I32Store8(m)
+                | I64Store8(m) => {
+                    memory_record(&mut new_function, m.memory_index, m.offset, 1, op_type)
+                }
+
+                I32Load16S(m) | I32Load16U(m) | I64Load16S(m) | I64Load16U(m) | I32Store16(m)
+                | I64Store16(m) => {
+                    memory_record(&mut new_function, m.memory_index, m.offset, 2, op_type)
+                }
+
+                I32Load(m) | F32Load(m) | I32Store(m) | F32Store(m) | I64Load32S(m)
+                | I64Load32U(m) | I64Store32(m) => {
+                    memory_record(&mut new_function, m.memory_index, m.offset, 4, op_type)
+                }
+
+                I64Load(m) | F64Load(m) | I64Store(m) | F64Store(m) => {
+                    memory_record(&mut new_function, m.memory_index, m.offset, 8, op_type)
                 }
                 _ => {}
             }
@@ -2441,6 +2497,7 @@ pub(crate) mod tests {
   (type (func (param f32 i32)))
   (type (func (param i64 i32)))
   (type (func (param f64 i32)))
+  (type (func (param i32 i32 i32 i64 i32 i32)))
   (type (func (param i32)))
 "#;
     const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 2)))
@@ -2449,12 +2506,13 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 5)))
   (import "codillon_debug" "record_i64" (func (type 6)))
   (import "codillon_debug" "record_f64" (func (type 7)))
+  (import "codillon_debug" "record_memory" (func (type 8)))
 "#;
 
-    const EXPECTED_MAIN: &str = r#"  (export "main" (func 6))
+    const EXPECTED_MAIN: &str = r#"  (export "main" (func 7))
 "#;
 
-    const EXPECTED_STEP: &str = r#"  (func (type 8) (param i32)
+    const EXPECTED_STEP: &str = r#"  (func (type 9) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -2478,12 +2536,64 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 0
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // instrumentation for memory track
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 1)");
+            editor.push_line("(func");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.load");
+            editor.push_line("drop");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_TYPES
+                + "  (type (func (param i32 i32) (result i32)))\n"
+                + EXPECTED_IMPORTS
+                + "  (memory 1)\n"
+                + EXPECTED_MAIN
+                + r#"  (func (type 0)
+    i32.const 1
+    call 8
+    i32.const 2
+    call 8
+    i32.const 0
+    i32.const 0
+    call 9
+    i32.const 3
+    call 8
+    i32.load
+    i32.const 1
+    call 9
+    i32.const 1
+    i32.const 0
+    i32.const 0
+    i64.const 0
+    i32.const 4
+    i32.const 1
+    call 6
+    i32.const 4
+    call 8
+    drop
+    i32.const 5
+    call 8
+  )
+"# + EXPECTED_STEP
+                + r#"  (func (type 10) (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    call 2
+    local.get 0
+  )
+"# + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2497,9 +2607,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2516,9 +2626,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2535,9 +2645,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2556,20 +2666,20 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
-    i32.const 0
-    call 7
-    i64.const 17
+    call 8
     i32.const 0
     call 8
+    i64.const 17
+    i32.const 0
+    call 9
     i32.const 1
-    call 7
+    call 8
     drop
     i32.const 2
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i64 i32) (result i64)
+                + r#"  (func (type 10) (param i64 i32) (result i64)
     local.get 0
     local.get 1
     call 4
@@ -2582,15 +2692,15 @@ pub(crate) mod tests {
 
         // well-formed block
         const JUST_BLOCK_END: &str = r#"    i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     block ;; label = @1
       i32.const 2
-      call 7
+      call 8
     end
     i32.const 3
-    call 7
+    call 8
   )
 "#;
         {
@@ -2643,28 +2753,28 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 137
     i32.const 0
-    call 8
+    call 9
     i32.const 2
-    call 7
+    call 8
     i32.const 2
     call 1
     unreachable
     i32.add
     i32.const 3
-    call 8
+    call 9
     i32.const 3
-    call 7
+    call 8
     drop
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
+                + r#"  (func (type 10) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2690,12 +2800,12 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
-  (export "main" (func 7))
+  (export "main" (func 8))
   (func (type 0)
     i32.const 6
-    call 8
+    call 9
     i32.const 6
-    call 8
+    call 9
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2740,21 +2850,21 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     block ;; label = @1
       i32.const 2
-      call 7
+      call 8
       loop ;; label = @2
         i32.const 4
-        call 7
+        call 8
       end
       i32.const 5
-      call 7
+      call 8
     end
     i32.const 6
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2773,15 +2883,15 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 1
     call 1
     unreachable
     nop
     i32.const 2
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2803,21 +2913,21 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 7
+    call 8
     i32.const 2
-    call 7
+    call 8
     i32.const 2
     call 1
     unreachable
     nop
     i32.const 3
-    call 7
+    call 8
     i32.const 3
     call 1
     unreachable
     drop
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2838,26 +2948,26 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 0
-    call 7
+    call 8
     loop ;; label = @1
       i32.const 1
-      call 7
+      call 8
       i32.const 5
       i32.const 0
-      call 8
+      call 9
       i32.const 2
-      call 7
+      call 8
       br 0 (;@1;)
       i32.const 3
-      call 7
+      call 8
     end
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
+                + r#"  (func (type 10) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2882,20 +2992,20 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 4
     i32.const 0
-    call 8
+    call 9
     i32.const 2
-    call 7
+    call 8
     i32.const 2
     call 1
     unreachable
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
+                + r#"  (func (type 10) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2927,6 +3037,7 @@ pub(crate) mod tests {
   (type (func (param f32 i32)))
   (type (func (param i64 i32)))
   (type (func (param f64 i32)))
+  (type (func (param i32 i32 i32 i64 i32 i32)))
   (type (func (param i32)))
   (type (func (param i32 i32 i32 i32) (result i32 i32)))
   (type (func (param i32 i32) (result i32)))
@@ -2936,49 +3047,50 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 6)))
   (import "codillon_debug" "record_i64" (func (type 7)))
   (import "codillon_debug" "record_f64" (func (type 8)))
-  (export "main" (func 6))
+  (import "codillon_debug" "record_memory" (func (type 9)))
+  (export "main" (func 7))
   (func (type 0)
     i32.const 0
-    call 8
-    i32.const 1
-    call 8
-    call 7
-    i32.const 1
-    call 8
-    i32.const 0
+    call 9
     i32.const 1
     call 9
-    i32.const 2
     call 8
+    i32.const 1
+    call 9
+    i32.const 0
+    i32.const 1
+    call 10
+    i32.const 2
+    call 9
     i32.add
     i32.const 2
-    call 10
+    call 11
     i32.const 3
-    call 8
+    call 9
     i32.const 3
     call 1
     unreachable
   )
   (func (type 1) (result i32 i32)
     i32.const 4
-    call 8
+    call 9
     i32.const 5
-    call 8
+    call 9
     i32.const 9
     i32.const 3
-    call 10
-    i32.const 6
-    call 8
-    i32.const 10
-    i32.const 4
-    call 10
-    i32.const 7
-    call 8
-    i32.const 5
+    call 11
     i32.const 6
     call 9
+    i32.const 10
+    i32.const 4
+    call 11
+    i32.const 7
+    call 9
+    i32.const 5
+    i32.const 6
+    call 10
   )
-  (func (type 9) (param i32)
+  (func (type 10) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -2986,7 +3098,7 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (type 10) (param i32 i32 i32 i32) (result i32 i32)
+  (func (type 11) (param i32 i32 i32 i32) (result i32 i32)
     local.get 0
     local.get 2
     call 2
@@ -2996,7 +3108,7 @@ pub(crate) mod tests {
     local.get 0
     local.get 1
   )
-  (func (type 11) (param i32 i32) (result i32)
+  (func (type 12) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3034,9 +3146,9 @@ pub(crate) mod tests {
     i32.const 3
     call 5
     i32.const 0
-    call 7
+    call 8
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3061,6 +3173,7 @@ pub(crate) mod tests {
   (type (func (param f32 i32)))
   (type (func (param i64 i32)))
   (type (func (param f64 i32)))
+  (type (func (param i32 i32 i32 i64 i32 i32)))
   (type (func (param i32)))
   (type (func (param i32 i32) (result i32)))
   (import "codillon_debug" "record_step" (func (type 3)))
@@ -3069,28 +3182,29 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 6)))
   (import "codillon_debug" "record_i64" (func (type 7)))
   (import "codillon_debug" "record_f64" (func (type 8)))
-  (export "main" (func 6))
+  (import "codillon_debug" "record_memory" (func (type 9)))
+  (export "main" (func 7))
   (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 1
     call 1
     unreachable
     block (type 1) (param i32) ;; label = @1
       i32.const 1
-      call 8
+      call 9
       i32.const 2
-      call 7
+      call 8
       i32.const 2
       call 1
       unreachable
     end
     i32.const 3
-    call 7
+    call 8
   )
-  (func (type 9) (param i32)
+  (func (type 10) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -3098,7 +3212,7 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (type 10) (param i32 i32) (result i32)
+  (func (type 11) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3120,17 +3234,17 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
-  (export "main" (func 7))
+  (export "main" (func 8))
   (func (type 0)
     i32.const 1
-    call 8
+    call 9
     i32.const 2
-    call 8
-    call 6
+    call 9
+    call 7
     i32.const 2
-    call 8
+    call 9
     i32.const 3
-    call 8
+    call 9
   )
 "# + EXPECTED_STEP
                 + ")\n";
