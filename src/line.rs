@@ -12,7 +12,7 @@ use crate::{
     utils::find_comment,
 };
 use anyhow::{Result, bail};
-use std::cell::RefCell;
+use std::{cell::Cell, mem::swap};
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
 
 type DomBr = DomStruct<(), HtmlBrElement>;
@@ -35,8 +35,13 @@ impl PartialEq<bool> for Activity {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+thread_local! {
+    static NEXT_LINE_ID: Cell<u32> = Default::default();
+}
+
+#[derive(Debug, Clone)]
 pub struct LineInfo {
+    pub id: u32,
     pub kind: LineKind,
     pub active: Activity,
     pub indent: Option<u16>,
@@ -46,14 +51,24 @@ pub struct LineInfo {
     pub symbols: LineSymbols,
 }
 
-impl LineInfo {
-    pub fn new(kind: LineKind) -> Self {
-        Self {
-            kind,
-            ..Default::default()
-        }
+impl Default for LineInfo {
+    fn default() -> Self {
+        let ret = Self {
+            id: NEXT_LINE_ID.get(),
+            kind: Default::default(),
+            active: Default::default(),
+            indent: None,
+            synthetic_before: Default::default(),
+            invalid: None,
+            runtime_error: None,
+            symbols: Default::default(),
+        };
+        NEXT_LINE_ID.replace(ret.id + 1);
+        ret
     }
+}
 
+impl LineInfo {
     pub fn is_active(&self) -> bool {
         self.active == true
     }
@@ -139,12 +154,11 @@ pub struct CodeLine {
     contents: LinePara,
     info: LineInfo,
     animation_state: AnimationState,
-    id: u32,
 }
 
 impl WithElement for CodeLine {
     type Element = HtmlDivElement;
-    fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
+    fn with_element<T, F: FnMut(&HtmlDivElement) -> T>(&self, f: F, g: AccessToken) -> T {
         self.contents.with_element(f, g)
     }
 }
@@ -208,10 +222,6 @@ impl Component for CodeLine {
 
         self.contents.audit();
     }
-}
-
-thread_local! {
-    static NEXT_LINE_ID: RefCell<u32> = const { RefCell::new(0) };
 }
 
 impl CodeLine {
@@ -405,11 +415,6 @@ impl CodeLine {
             ),
             info: LineInfo::default(),
             animation_state: AnimationState::Normal,
-            id: NEXT_LINE_ID.with_borrow_mut(|id| {
-                let ret = *id;
-                *id += 1;
-                ret
-            }),
         };
 
         ret.contents.get_mut().0.set_attribute("class", "instr");
@@ -608,11 +613,11 @@ impl CodeLine {
     }
 
     pub fn id(&self) -> u32 {
-        self.id
+        self.info.id
     }
 
-    pub fn set_id(&mut self, new_id: u32) {
-        self.id = new_id;
+    pub fn swap_ids(&mut self, other: &mut CodeLine) {
+        swap(&mut self.info.id, &mut other.info.id);
     }
 
     pub fn position_to_node(&self, pos: Position) -> &DomText {

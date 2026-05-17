@@ -7,7 +7,7 @@ use crate::{
     dom_canvas::DomCanvas,
     dom_struct::DomStruct,
     dom_vec::DomVec,
-    graphics::DomImage,
+    graphics::{DomImage, FractionInfo},
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
         RangeLike, ReactiveComponent, StorageHandle, WindowHandle, WithElement,
@@ -183,8 +183,8 @@ impl FrameInfosMut for Editor {
 
 impl WithElement for EditorHolder {
     type Element = HtmlDivElement;
-    fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
-        self.0.borrow().component.with_element(f, g);
+    fn with_element<T, F: FnMut(&HtmlDivElement) -> T>(&self, f: F, g: AccessToken) -> T {
+        self.0.borrow().component.with_element(f, g)
     }
 }
 
@@ -198,10 +198,12 @@ impl Component for EditorHolder {
 impl Editor {
     #[cfg(debug_assertions)]
     fn audit(&self) {
+        use crate::jet::WithNode;
+
         self.component.audit();
         self.window.audit();
 
-        if self.component.elem().is_connected() {
+        if self.component.is_connected() {
             self.component.elem().assert_is_entire_body();
         }
     }
@@ -258,18 +260,6 @@ impl Editor {
         get_mut!(self.component, save_status)
     }
 
-    fn slot_connections(&self) -> &SlotConnections {
-        &self.slot_connections
-    }
-
-    fn slot_connections_mut(&mut self) -> &mut SlotConnections {
-        &mut self.slot_connections
-    }
-
-    fn execution_state_mut(&mut self) -> &mut ExecutionState {
-        &mut self.execution_state
-    }
-
     fn update_live_info(
         &mut self,
         step_count: usize,
@@ -309,12 +299,12 @@ impl Editor {
             .goto_step(current_step, get_mut!(self.component, canvas));
 
         for (slot_idx, value) in self.execution_state.slots.iter().enumerate() {
-            let where_written = &self.slot_connections.written[slot_idx];
+            let where_written = &self.slot_connections[slot_idx].written;
             if let Some(coord) = where_written {
                 get_mut!(self.component, image).set_slot_value(coord, false, value);
             }
 
-            let where_read = &self.slot_connections.read[slot_idx];
+            let where_read = &self.slot_connections[slot_idx].read;
             if let Some(coord) = where_read {
                 get_mut!(self.component, image).set_slot_value(coord, true, value);
             }
@@ -389,8 +379,8 @@ impl Editor {
                     slider_step = step_count() - 1;
                 }
 
-                let slot_count = ed.slot_connections().written.len();
-                ed.execution_state_mut().reset(slot_count);
+                let slot_count = ed.slot_connections.len();
+                ed.execution_state.reset(slot_count);
                 ed.update_live_info(step_count(), Some(slider_step), true);
                 ed.slider_mut()
                     .inner_mut()
@@ -502,10 +492,8 @@ impl Editor {
 
             // Special case: if end line contributes 100% of the text, preserve its ID
             if end_pos == Position::begin() && start_pos == Position::begin() {
-                let start_id = self.line(start_line).id();
-                let end_id = self.line(end_line).id();
-                self.line_mut(start_line).set_id(end_id);
-                self.line_mut(end_line).set_id(start_id);
+                let (l1, l2) = self.text_mut().get_two_mut(start_line, end_line);
+                l1.swap_ids(l2);
             }
 
             // Save absolute offset for use later, because changing the line can
@@ -550,10 +538,7 @@ impl Editor {
 
                     // preserve identity in one special case
                     if pos == Position::begin() {
-                        let old_id = self.line(fixup_line).id();
-                        let new_id = newline.id();
-                        self.line_mut(fixup_line).set_id(new_id);
-                        newline.set_id(old_id);
+                        newline.swap_ids(self.line_mut(fixup_line));
                     }
 
                     new_cursor_pos = Position::begin();
@@ -776,7 +761,7 @@ impl Editor {
 
         // update visual types of params, locals, and operators
         self.scroll_on_next_input = false; // edit to text buffer -> don't scroll to arrow
-        *self.slot_connections_mut() = find_connections(&validized, &types);
+        self.slot_connections = find_connections(&validized, &types);
         self.update_displayed_types(&validized, &types)?;
 
         // instrumentation
@@ -830,39 +815,34 @@ impl Editor {
         validized: &ValidModule<'a>,
         types: &TypedModule,
     ) -> Result<()> {
-        // set types
-        let line_count = self.text().len();
-        self.image_mut().set_type_count(line_count);
-        let mut last_line_no = 0;
+        let type_count = types.globals.len()
+            + types
+                .funcs
+                .iter()
+                .map(|f| f.locals.len() + f.ops.len())
+                .sum::<usize>();
+        let mut tagged_types = HashMap::with_capacity(type_count);
+
         // set types of globals
         for (global, global_type) in zip_eq(&validized.globals, &types.globals) {
-            while last_line_no < global.line_idx {
-                self.image_mut().clear_type(last_line_no);
-                last_line_no += 1;
-            }
-
-            self.image_mut().set_type(
-                global.line_idx,
-                0,
-                AnnotatedOperatorType {
-                    inputs: vec![],
-                    outputs: vec![SlotInfo {
-                        slot: types.slots[global_type.0].clone(),
-                        used: true,
-                    }],
+            tagged_types.insert(
+                self.line(global.line_idx).id(),
+                FractionInfo {
+                    line_no: global.line_idx,
+                    indent: 0,
+                    ty: AnnotatedOperatorType {
+                        inputs: vec![],
+                        outputs: vec![SlotInfo {
+                            slot: types.slots[global_type.0].clone(),
+                            used: true,
+                        }],
+                    },
                 },
             );
-            last_line_no = global.line_idx + 1;
         }
 
         for (func, func_types) in zip_eq(&validized.functions, &types.funcs) {
             // set types of params
-            let start_line = func.lines.0;
-            while last_line_no < start_line {
-                self.image_mut().clear_type(last_line_no);
-                last_line_no += 1;
-            }
-
             if !func_types.params.is_empty() {
                 let param_types: Vec<Option<SlotInfo>> = func_types
                     .params
@@ -874,15 +854,17 @@ impl Editor {
                         })
                     })
                     .collect();
-                self.image_mut().set_type(
-                    start_line,
-                    0,
-                    AnnotatedOperatorType {
-                        inputs: param_types,
-                        outputs: vec![],
+                tagged_types.insert(
+                    self.line(func.lines.0).id(),
+                    FractionInfo {
+                        line_no: func.lines.0,
+                        indent: 0,
+                        ty: AnnotatedOperatorType {
+                            inputs: param_types,
+                            outputs: vec![],
+                        },
                     },
                 );
-                last_line_no = start_line + 1;
             }
 
             // set types of locals
@@ -899,57 +881,51 @@ impl Editor {
                         }
                         Some(line_idx) => {
                             // flush
-                            while last_line_no < line_idx {
-                                self.image_mut().clear_type(last_line_no);
-                                last_line_no += 1;
-                            }
-
                             let indent = self.line(line_idx).info().indent.unwrap_or(0);
-                            self.image_mut().set_type(
-                                line_idx,
-                                indent,
-                                AnnotatedOperatorType {
-                                    inputs: vec![],
-                                    outputs: local_slots
-                                        .iter()
-                                        .map(|x| SlotInfo {
-                                            slot: types.slots[*x].clone(),
-                                            used: true,
-                                        })
-                                        .collect(),
+                            tagged_types.insert(
+                                self.line(line_idx).id(),
+                                FractionInfo {
+                                    line_no: line_idx,
+                                    indent,
+                                    ty: AnnotatedOperatorType {
+                                        inputs: vec![],
+                                        outputs: local_slots
+                                            .iter()
+                                            .map(|x| SlotInfo {
+                                                slot: types.slots[*x].clone(),
+                                                used: true,
+                                            })
+                                            .collect(),
+                                    },
                                 },
                             );
 
                             local_line_idx = Some(local.line_idx);
                             local_slots.truncate(0);
                             local_slots.push(*slot_idx);
-
-                            last_line_no = line_idx + 1;
                         }
                     }
                 }
                 // flush
                 if let Some(local_line_idx) = local_line_idx {
-                    while last_line_no < local_line_idx {
-                        self.image_mut().clear_type(last_line_no);
-                        last_line_no += 1;
-                    }
                     let indent = self.line(local_line_idx).info().indent.unwrap_or(0);
-                    self.image_mut().set_type(
-                        local_line_idx,
-                        indent,
-                        AnnotatedOperatorType {
-                            inputs: vec![],
-                            outputs: local_slots
-                                .iter()
-                                .map(|x| SlotInfo {
-                                    slot: types.slots[*x].clone(),
-                                    used: true,
-                                })
-                                .collect(),
+                    tagged_types.insert(
+                        self.line(local_line_idx).id(),
+                        FractionInfo {
+                            line_no: local_line_idx,
+                            indent,
+                            ty: AnnotatedOperatorType {
+                                inputs: vec![],
+                                outputs: local_slots
+                                    .iter()
+                                    .map(|x| SlotInfo {
+                                        slot: types.slots[*x].clone(),
+                                        used: true,
+                                    })
+                                    .collect(),
+                            },
                         },
                     );
-                    last_line_no = local_line_idx + 1;
                 }
             }
 
@@ -957,16 +933,12 @@ impl Editor {
             for (i, (op, OperatorType { inputs, outputs })) in
                 zip_eq(&func.operators, &func_types.ops).enumerate()
             {
-                while last_line_no < op.line_idx {
-                    self.image_mut().clear_type(last_line_no);
-                    last_line_no += 1;
-                }
                 let inputs: Vec<Option<SlotInfo>> = inputs
                     .iter()
                     .map(|x| {
                         x.as_ref().map(|SlotUse(y)| SlotInfo {
                             slot: types.slots[*y].clone(),
-                            used: self.slot_connections().written[*y].is_some(),
+                            used: self.slot_connections[*y].written.is_some(),
                         })
                     })
                     .collect();
@@ -977,7 +949,7 @@ impl Editor {
                         slot: types.slots[*x].clone(),
                         used: {
                             let is_used = i + 1 == func.operators.len()
-                                || self.slot_connections().read[*x].is_some();
+                                || self.slot_connections[*x].read.is_some();
                             all_used &= is_used;
                             is_used
                         },
@@ -990,26 +962,25 @@ impl Editor {
 
                 let indent = self.line(op.line_idx).info().indent.unwrap_or(0);
 
-                if !func_types.params.is_empty() && op.line_idx == start_line {
+                if !func_types.params.is_empty() && op.line_idx == func.lines.0 {
                     // special case: for an empty func, don't override the param types with the function end type
                     if !inputs.is_empty() {
                         bail!("unexpected non-empty end op on same line as function start");
                     }
                 } else {
-                    self.image_mut().set_type(
-                        op.line_idx,
-                        indent,
-                        AnnotatedOperatorType { inputs, outputs },
+                    tagged_types.insert(
+                        self.line(op.line_idx).id(),
+                        FractionInfo {
+                            line_no: op.line_idx,
+                            indent,
+                            ty: AnnotatedOperatorType { inputs, outputs },
+                        },
                     );
                 }
-
-                last_line_no = op.line_idx + 1;
             }
         }
-        for i in last_line_no..line_count {
-            self.image_mut().clear_type(i);
-        }
 
+        self.image_mut().set_types(tagged_types, true);
         get_mut!(self.component, image).set_connections(&self.slot_connections);
         Ok(())
     }

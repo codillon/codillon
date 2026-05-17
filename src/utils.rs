@@ -167,11 +167,13 @@ pub struct GeneralOperator<'a> {
 pub struct Aligned<T> {
     pub inner: T,
     pub line_idx: usize,
+    pub position_id: u32,
 }
 
 pub struct RawFunction<'a> {
     pub type_idx: u32,
     pub lines: (usize, usize),
+    pub positions: (u32, u32),
     pub params: Vec<Aligned<ValType>>,
     pub locals: Vec<Aligned<ValType>>,
     pub operators: Vec<Aligned<Operator<'a>>>,
@@ -181,6 +183,7 @@ pub struct RawFunction<'a> {
 pub struct ValidFunction<'a> {
     pub type_idx: u32,
     pub lines: (usize, usize),
+    pub positions: (u32, u32),
     pub params: Vec<Aligned<ValType>>,
     pub locals: Vec<Aligned<ValType>>,
     pub operators: Vec<Aligned<GeneralOperator<'a>>>,
@@ -213,6 +216,7 @@ impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
                 info: OpInfo::Normal,
             },
             line_idx: val.line_idx,
+            position_id: val.position_id,
         }
     }
 }
@@ -270,6 +274,7 @@ impl<'a> RawModule<'a> {
                     for global in reader.into_iter_with_offsets().flatten() {
                         globals.push(Aligned {
                             line_idx: 0,
+                            position_id: 0,
                             inner: global.1,
                         });
                     }
@@ -282,6 +287,7 @@ impl<'a> RawModule<'a> {
                         for _ in 0..num {
                             locals.push(Aligned {
                                 line_idx: 0,
+                                position_id: 0,
                                 inner: ty,
                             });
                         }
@@ -290,6 +296,7 @@ impl<'a> RawModule<'a> {
                     for op in body.get_operators_reader()?.into_iter() {
                         ops.push(Aligned {
                             line_idx: 0,
+                            position_id: 0,
                             inner: op?,
                         });
                     }
@@ -308,10 +315,9 @@ impl<'a> RawModule<'a> {
                     && parts.first() == Some(&ModulePart::Global)
                 {
                     debug_assert_eq!(parts.len(), 1);
-                    globals_iter
-                        .next()
-                        .expect("not enough enough globals in module")
-                        .line_idx = line_no;
+                    let glob = globals_iter.next().expect("not enough globals in module");
+                    glob.line_idx = line_no;
+                    glob.position_id = editor.info(line_no).id;
                 }
             }
             assert!(globals_iter.next().is_none(), "too many globals in module");
@@ -333,6 +339,7 @@ impl<'a> RawModule<'a> {
                 .into_iter()
                 .map(|ty| Aligned {
                     line_idx: start_line,
+                    position_id: editor.info(start_line).id,
                     inner: ty,
                 })
                 .collect();
@@ -346,10 +353,9 @@ impl<'a> RawModule<'a> {
                 {
                     debug_assert_eq!(parts.len(), 1);
                     for _ in 0..*num {
-                        locals_iter
-                            .next()
-                            .expect("not enough locals in function")
-                            .line_idx = line_no;
+                        let loc = locals_iter.next().expect("not enough locals in function");
+                        loc.line_idx = line_no;
+                        loc.position_id = editor.info(line_no).id;
                     }
                 }
             }
@@ -359,18 +365,19 @@ impl<'a> RawModule<'a> {
             let mut ops_iter = operators.iter_mut();
             for line_no in start_line..=end_line {
                 for _ in 0..editor.info(line_no).num_ops() {
-                    ops_iter
-                        .next()
-                        .expect("not enough ops in function")
-                        .line_idx = line_no;
+                    let op = ops_iter.next().expect("not enough ops in function");
+                    op.line_idx = line_no;
+                    op.position_id = editor.info(line_no).id;
                 }
             }
             match ops_iter.next() {
                 Some(Aligned {
                     line_idx,
+                    position_id,
                     inner: wasmparser::Operator::End,
                 }) => {
                     *line_idx = end_line;
+                    *position_id = editor.info(end_line).id;
                 }
                 Some(_) => {
                     bail!("too many ops in function");
@@ -382,6 +389,7 @@ impl<'a> RawModule<'a> {
             functions.push(RawFunction {
                 type_idx: func_type_indices[func_idx],
                 lines: (start_line, end_line),
+                positions: (editor.info(start_line).id, editor.info(end_line).id),
                 params,
                 locals,
                 operators,
@@ -483,6 +491,7 @@ impl<'a> RawModule<'a> {
                 let RawFunction {
                     type_idx,
                     lines,
+                    positions,
                     params,
                     locals,
                     operators,
@@ -500,6 +509,7 @@ impl<'a> RawModule<'a> {
                 let mut valid_function = ValidFunction {
                     type_idx,
                     lines,
+                    positions,
                     params,
                     locals,
                     operators: Vec::with_capacity(operators.len()),
@@ -521,6 +531,7 @@ impl<'a> RawModule<'a> {
                                 /* does a plain "else" work here? */
                                 let plain_else = Aligned {
                                     line_idx: op.line_idx,
+                                    position_id: op.position_id,
                                     inner: GeneralOperator {
                                         prepended: vec![],
                                         op: Operator::Else,
@@ -541,6 +552,7 @@ impl<'a> RawModule<'a> {
                                         func_validator.clone(),
                                         Aligned {
                                             line_idx: op.line_idx,
+                                            position_id: op.position_id,
                                             inner: Operator::Else,
                                         },
                                     )?;
@@ -644,6 +656,7 @@ impl<'a> RawModule<'a> {
             debug_assert!(op.inner.op != Operator::Else);
             Aligned {
                 line_idx: op.line_idx,
+                position_id: op.position_id,
                 inner: GeneralOperator {
                     prepended: vec![],
                     untyped: true,
@@ -1421,15 +1434,17 @@ pub struct TypedModule {
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Coordinate {
-    pub line_idx: usize,
+    pub position_id: u32,
     pub operand_num: usize,
 }
 
-#[derive(Default)]
-pub struct SlotConnections {
-    pub written: Vec<Option<Coordinate>>, // same index space as Slot #
-    pub read: Vec<Option<Coordinate>>,
+#[derive(Default, Clone)]
+pub struct SlotConnection {
+    pub written: Option<Coordinate>,
+    pub read: Option<Coordinate>,
 }
+
+pub type SlotConnections = Vec<SlotConnection>; // same index space as Slot #
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SlotInfo {
@@ -1444,15 +1459,18 @@ pub struct AnnotatedOperatorType {
 }
 
 pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnections {
-    let mut cx = SlotConnections {
-        written: vec![None; tys.slots.len()],
-        read: vec![None; tys.slots.len()],
-    };
+    let mut cx = vec![
+        SlotConnection {
+            written: None,
+            read: None
+        };
+        tys.slots.len()
+    ];
 
     // locate globals
-    for (Aligned { line_idx, .. }, SlotUse(slot_idx)) in zip_eq(&module.globals, &tys.globals) {
-        cx.written[*slot_idx] = Some(Coordinate {
-            line_idx: *line_idx,
+    for (Aligned { position_id, .. }, SlotUse(slot_idx)) in zip_eq(&module.globals, &tys.globals) {
+        cx[*slot_idx].written = Some(Coordinate {
+            position_id: *position_id,
             operand_num: 0,
         });
     }
@@ -1460,42 +1478,43 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
     for (func, func_tys) in zip_eq(&module.functions, &tys.funcs) {
         // locate params
         for (operand_num, SlotUse(slot_idx)) in func_tys.params.iter().enumerate() {
-            cx.read[*slot_idx] = Some(Coordinate {
-                line_idx: func.lines.0,
+            cx[*slot_idx].read = Some(Coordinate {
+                position_id: func.positions.0,
                 operand_num,
             });
         }
 
         // locate locals
         let mut local_counter = (None, 0);
-        for (Aligned { line_idx, .. }, SlotUse(slot_idx)) in zip_eq(&func.locals, &func_tys.locals)
+        for (Aligned { position_id, .. }, SlotUse(slot_idx)) in
+            zip_eq(&func.locals, &func_tys.locals)
         {
-            if local_counter.0 == Some(*line_idx) {
+            if local_counter.0 == Some(*position_id) {
                 local_counter.1 += 1;
             } else {
-                local_counter.0 = Some(*line_idx);
+                local_counter.0 = Some(*position_id);
                 local_counter.1 = 0;
             }
-            cx.written[*slot_idx] = Some(Coordinate {
-                line_idx: *line_idx,
+            cx[*slot_idx].written = Some(Coordinate {
+                position_id: *position_id,
                 operand_num: local_counter.1,
             });
         }
 
-        for (Aligned { line_idx, .. }, OperatorType { inputs, outputs }) in
+        for (Aligned { position_id, .. }, OperatorType { inputs, outputs }) in
             zip_eq(&func.operators, &func_tys.ops)
         {
             for (operand_num, SlotUse(idx)) in outputs.iter().enumerate() {
-                cx.written[*idx] = Some(Coordinate {
-                    line_idx: *line_idx,
+                cx[*idx].written = Some(Coordinate {
+                    position_id: *position_id,
                     operand_num,
                 });
             }
 
             for (operand_num, maybe_slot) in inputs.iter().enumerate() {
                 if let Some(SlotUse(idx)) = maybe_slot {
-                    cx.read[*idx] = Some(Coordinate {
-                        line_idx: *line_idx,
+                    cx[*idx].read = Some(Coordinate {
+                        position_id: *position_id,
                         operand_num,
                     });
                 }
@@ -1660,12 +1679,20 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                         });
 
                         /* process synthetic else if present */
-                        if let Some((Aligned { line_idx, inner }, OperatorType { inputs, outputs })) =
-                            func_ops_rev.peek()
+                        if let Some((
+                            Aligned {
+                                line_idx,
+                                position_id,
+                                inner,
+                            },
+                            OperatorType { inputs, outputs },
+                        )) = func_ops_rev.peek()
                             && *line_idx == line_no
                         {
-                            debug_assert!(inner.op == Operator::Else);
-                            debug_assert!(inner.info == OpInfo::SyntheticElse);
+                            debug_assert_eq!(inner.op, Operator::Else);
+                            debug_assert_eq!(inner.info, OpInfo::SyntheticElse);
+                            debug_assert_eq!(*position_id, typed_op.0.position_id);
+                            debug_assert_eq!(*position_id, code.info(line_no).id);
                             process_outputs(&mut slot_map, outputs);
                             process_inputs(&mut slot_map, inputs, instr_indent, &mut frame_stack);
                             func_ops_rev.next();
@@ -1746,11 +1773,13 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                                 ..
                             },
                         line_idx,
+                        position_id,
                     },
                     OperatorType { inputs, .. },
                 )) = func_ops_rev.peek()
                     && *line_idx == line_no
                 {
+                    debug_assert_eq!(*position_id, code.info(line_no).id);
                     debug_assert!(frame_stack.is_empty());
                     slot_map.clear();
                     process_inputs(&mut slot_map, inputs, 0, &mut frame_stack);
@@ -1783,12 +1812,19 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                     );
 
                     /* discard prepended else if present */
-                    if let Some((Aligned { line_idx, inner }, OperatorType { inputs, outputs })) =
-                        func_ops_rev.peek()
+                    if let Some((
+                        Aligned {
+                            line_idx,
+                            position_id,
+                            inner,
+                        },
+                        OperatorType { inputs, outputs },
+                    )) = func_ops_rev.peek()
                         && *line_idx == line_no
                         && inner.info == OpInfo::SyntheticElse
                     {
-                        debug_assert!(inner.op == Operator::Else);
+                        debug_assert_eq!(*position_id, code.info(line_no).id);
+                        debug_assert_eq!(inner.op, Operator::Else);
                         process_outputs(&mut slot_map, outputs);
                         process_inputs(&mut slot_map, inputs, 0, &mut frame_stack);
                         func_ops_rev.next();
@@ -1902,6 +1938,7 @@ pub(crate) mod tests {
                 let mut valid = ValidFunction {
                     type_idx: func.type_idx,
                     lines: func.lines,
+                    positions: func.positions,
                     params: func.params,
                     locals: func.locals,
                     operators: vec![],
@@ -1945,38 +1982,46 @@ pub(crate) mod tests {
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
+                positions: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 1 },
                         line_idx: 0,
+                        position_id: 0,
                     },
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 2 },
                         line_idx: 1,
+                        position_id: 1,
                     },
                     CodillonInstruction {
                         inner: Operator::Block {
                             blockty: BlockType::FuncType(1),
                         },
                         line_idx: 2,
+                        position_id: 2,
                     },
                     CodillonInstruction {
                         inner: Operator::I32Add,
                         line_idx: 3,
+                        position_id: 3,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 4,
+                        position_id: 4,
                     },
                     CodillonInstruction {
                         inner: Operator::Drop,
                         line_idx: 5,
+                        position_id: 5,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 6,
+                        position_id: 6,
                     },
                 ],
             }],
@@ -2016,42 +2061,51 @@ pub(crate) mod tests {
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
+                positions: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 1 },
                         line_idx: 0,
+                        position_id: 0,
                     },
                     CodillonInstruction {
                         inner: Operator::If {
                             blockty: BlockType::Type(I32),
                         },
                         line_idx: 1,
+                        position_id: 1,
                     },
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 1 },
                         line_idx: 2,
+                        position_id: 2,
                     },
                     CodillonInstruction {
                         inner: Operator::Else,
                         line_idx: 3,
+                        position_id: 3,
                     },
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 2 },
                         line_idx: 4,
+                        position_id: 4,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 5,
+                        position_id: 5,
                     },
                     CodillonInstruction {
                         inner: Operator::Drop,
                         line_idx: 6,
+                        position_id: 6,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 7,
+                        position_id: 7,
                     },
                 ],
             }],
@@ -2092,46 +2146,56 @@ pub(crate) mod tests {
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
+                positions: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 10 },
                         line_idx: 0,
+                        position_id: 0,
                     },
                     CodillonInstruction {
                         inner: Operator::Loop {
                             blockty: BlockType::FuncType(1),
                         },
                         line_idx: 1,
+                        position_id: 1,
                     },
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 1 },
                         line_idx: 2,
+                        position_id: 2,
                     },
                     CodillonInstruction {
                         inner: Operator::I32Sub,
                         line_idx: 3,
+                        position_id: 3,
                     },
                     CodillonInstruction {
                         inner: Operator::BrIf { relative_depth: 1 },
                         line_idx: 4,
+                        position_id: 4,
                     },
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 2 },
                         line_idx: 5,
+                        position_id: 5,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 6,
+                        position_id: 6,
                     },
                     CodillonInstruction {
                         inner: Operator::Drop,
                         line_idx: 7,
+                        position_id: 7,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 8,
+                        position_id: 8,
                     },
                 ],
             }],
@@ -2173,52 +2237,63 @@ pub(crate) mod tests {
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
+                positions: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 10 },
                         line_idx: 0,
+                        position_id: 0,
                     },
                     CodillonInstruction {
                         inner: Operator::Block {
                             blockty: BlockType::FuncType(1),
                         },
                         line_idx: 1,
+                        position_id: 1,
                     },
                     CodillonInstruction {
                         inner: Operator::If {
                             blockty: BlockType::Type(I32),
                         },
                         line_idx: 2,
+                        position_id: 2,
                     },
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 1 },
                         line_idx: 3,
+                        position_id: 3,
                     },
                     CodillonInstruction {
                         inner: Operator::Else,
                         line_idx: 4,
+                        position_id: 4,
                     },
                     CodillonInstruction {
                         inner: Operator::I32Const { value: 2 },
                         line_idx: 5,
+                        position_id: 5,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 6,
+                        position_id: 6,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 7,
+                        position_id: 7,
                     },
                     CodillonInstruction {
                         inner: Operator::Drop,
                         line_idx: 8,
+                        position_id: 8,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 9,
+                        position_id: 9,
                     },
                 ],
             }],
@@ -2249,6 +2324,7 @@ pub(crate) mod tests {
             functions: vec![RawFunction {
                 type_idx: 0,
                 lines: (0, 0),
+                positions: (0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -2257,14 +2333,17 @@ pub(crate) mod tests {
                             blockty: BlockType::Empty,
                         },
                         line_idx: 0,
+                        position_id: 0,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 1,
+                        position_id: 1,
                     },
                     CodillonInstruction {
                         inner: Operator::End,
                         line_idx: 2,
+                        position_id: 2,
                     },
                 ],
             }],
@@ -2329,13 +2408,14 @@ pub(crate) mod tests {
     }
 
     impl FakeTextLine {
-        fn new(s: &str) -> Self {
+        fn new(s: &str, id: u32) -> Self {
             let kind = parse_line(s);
             let symbols = parse_line_symbols(s, &kind);
             Self {
                 instr_text: String::from(s),
                 info: LineInfo {
                     kind,
+                    id,
                     symbols,
                     ..Default::default()
                 },
@@ -2345,7 +2425,8 @@ pub(crate) mod tests {
 
     impl FakeTextBuffer {
         fn push_line(&mut self, string: &str) {
-            self.lines.push(FakeTextLine::new(string))
+            self.lines
+                .push(FakeTextLine::new(string, self.lines.len() as u32))
         }
     }
 

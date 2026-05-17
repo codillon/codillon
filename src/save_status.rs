@@ -69,7 +69,7 @@ impl SaveStatus {
 
 impl WithElement for SaveStatus {
     type Element = HtmlDivElement;
-    fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
+    fn with_element<T, F: FnMut(&HtmlDivElement) -> T>(&self, f: F, g: AccessToken) -> T {
         self.contents.with_element(f, g)
     }
 }

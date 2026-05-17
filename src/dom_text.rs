@@ -127,14 +127,14 @@ impl DomText {
 }
 
 impl WithNode for DomText {
-    fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken) {
-        self.text_node.with_node(f, g);
+    fn with_node<T, F: FnMut(&web_sys::Node) -> T>(&self, f: F, g: AccessToken) -> T {
+        self.text_node.with_node(f, g)
     }
 }
 
 impl WithNode for &DomText {
-    fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken) {
-        self.text_node.with_node(f, g);
+    fn with_node<T, F: FnMut(&web_sys::Node) -> T>(&self, f: F, g: AccessToken) -> T {
+        self.text_node.with_node(f, g)
     }
 }
 

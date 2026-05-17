@@ -2,6 +2,7 @@
 // include the dataflow.
 
 use crate::{
+    dom_set::DomSet,
     dom_struct::DomStruct,
     dom_text::DomText,
     dom_vec::DomVec,
@@ -9,11 +10,13 @@ use crate::{
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement, now_ms},
     line::INDENT_PX,
     syntax::{FrameInfo, InstrKind},
-    utils::{AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, Coordinate, SlotConnections, SlotInfo},
+    utils::{
+        AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, Coordinate, SlotConnection, SlotConnections,
+        SlotInfo,
+    },
 };
 use anyhow::Result;
 use delegate::delegate;
-use itertools::zip_eq;
 use palette::{Mix, Srgb};
 use std::{collections::HashMap, str::FromStr};
 use thousands::Separable;
@@ -24,6 +27,13 @@ use web_sys::{
 };
 
 const SYM_HW: f32 = 15.0;
+
+#[derive(Debug)]
+pub struct FractionInfo {
+    pub line_no: usize,
+    pub indent: u16,
+    pub ty: AnnotatedOperatorType,
+}
 
 type AnimLine = DomStruct<
     (
@@ -111,7 +121,7 @@ impl SymbolUse {
         let old_opacity = self
             .anim_opacity()
             .get_attribute("to")
-            .unwrap_or("0.5")
+            .unwrap_or("0.0")
             .to_string();
         self.anim_opacity().set_attribute("from", &old_opacity);
     }
@@ -356,6 +366,13 @@ impl FrameLine {
     // Make the DOM SVG element reflect the new Wasm FrameInfo that it represents.
     // Store the "info" in the FrameLine so that we can short-circuit future updates if there is no change.
     fn update(&mut self, info: FrameInfo, mut smooth: bool) -> Result<()> {
+        let FrameLimits {
+            x_left,
+            x_right,
+            y_top,
+            y_bot,
+        } = FrameLimits::new(&info);
+
         if let Some(current_info) = &self.info {
             if info == *current_info {
                 return Ok(());
@@ -368,14 +385,9 @@ impl FrameLine {
             {
                 smooth = false;
             }
+        } else {
+            self.symbol().goto(false, x_left, y_bot);
         }
-
-        let FrameLimits {
-            x_left,
-            x_right,
-            y_top,
-            y_bot,
-        } = FrameLimits::new(&info);
 
         if info.kind == InstrKind::Else {
             self.line1()
@@ -437,7 +449,7 @@ impl FrameLine {
 
 impl WithElement for FrameLine {
     type Element = SvggElement;
-    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
+    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
         self.elem.with_element(f, g)
     }
 }
@@ -539,8 +551,8 @@ impl Arrow {
 }
 
 type SVGDefs = DomVec<ElementHandle<SvgPathElement>, SvgDefsElement>; // definitions in SVG header
-type CodillonBlocks = DomVec<FrameLine, SvggElement>; // the lines themselves
-type Fractions = DomVec<OperatorFraction, SvggElement>;
+type CodillonBlocks = DomSet<FrameLine, SvggElement>; // the lines themselves
+type Fractions = DomSet<OperatorFraction, SvggElement>;
 type Connections = DomVec<ElementHandle<SvgPathElement>, SvggElement>;
 type CodillonSVG = DomStruct<
     (
@@ -555,13 +567,12 @@ pub struct DomImage {
     height: usize,
     width: usize,
     factory: ElementFactory,
-    frame_map: HashMap<u32, usize>,    // frame identity -> block idx
     pending_delete: HashMap<u32, f64>, // frame identity -> timestamp to delete
 }
 
 impl WithElement for DomImage {
     type Element = SvgElement;
-    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
+    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
         self.contents.with_element(f, g)
     }
 }
@@ -606,33 +617,59 @@ fn icon_height(ty: Option<ValType>) -> f32 {
     }
 }
 
-impl DomImage {
-    fn blocks(&self) -> &CodillonBlocks {
-        &self.contents.get().1.1.1.0
-    }
+macro_rules! get {
+    ($comp:expr,$field:ident) => {
+        &field!($field $comp.get())
+    };
+}
 
-    fn blocks_mut(&mut self) -> &mut CodillonBlocks {
-        &mut self.contents.get_mut().1.1.1.0
+macro_rules! get_mut {
+    ($comp:expr,$field:ident) => {
+        &mut field!($field $comp.get_mut())
+    };
+}
+
+macro_rules! field {
+    (defs $comp:expr) => {
+        $comp.0
+    };
+    (connections $comp:expr) => {
+        $comp.1.0
+    };
+    (fractions $comp:expr) => {
+        $comp.1.1.0
+    };
+    (blocks $comp:expr) => {
+        $comp.1.1.1.0
+    };
+    (arrow $comp:expr) => {
+        $comp.1.1.1.1.0
+    };
+}
+
+impl DomImage {
+    fn defs_mut(&mut self) -> &mut SVGDefs {
+        get_mut!(self.contents, defs)
     }
 
     fn connections_mut(&mut self) -> &mut Connections {
-        &mut self.contents.get_mut().1.0
+        get_mut!(self.contents, connections)
     }
 
     fn fractions(&self) -> &Fractions {
-        &self.contents.get().1.1.0
+        get!(self.contents, fractions)
     }
 
     fn fractions_mut(&mut self) -> &mut Fractions {
-        &mut self.contents.get_mut().1.1.0
+        get_mut!(self.contents, fractions)
     }
 
-    fn defs_mut(&mut self) -> &mut SVGDefs {
-        &mut self.contents.get_mut().0
+    fn blocks(&self) -> &CodillonBlocks {
+        get!(self.contents, blocks)
     }
 
     fn arrow_mut(&mut self) -> &mut Arrow {
-        &mut self.contents.get_mut().1.1.1.1.0
+        get_mut!(self.contents, arrow)
     }
 
     fn make_icon(
@@ -679,7 +716,7 @@ impl DomImage {
                     (
                         Connections::new(factory.svg_g()),
                         (
-                            DomVec::new(factory.svg_g()),
+                            DomSet::new(factory.svg_g()),
                             (
                                 CodillonBlocks::new(factory.svg_g()),
                                 (Arrow::new_arrow(&factory), ()),
@@ -692,7 +729,6 @@ impl DomImage {
             height: 0,
             width: 0,
             factory: factory.clone(),
-            frame_map: Default::default(),
             pending_delete: Default::default(),
         };
 
@@ -955,16 +991,15 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             smooth = true;
         }
         for (id, info) in &frames {
-            if let Some(idx) = self.frame_map.get(id) {
-                let old_info = &self.blocks().get(*idx).unwrap().info;
-                if let Some(old_info) = old_info
-                    && (old_info.indent != info.indent
-                        || old_info.unclosed != info.unclosed
-                        || old_info.kind != info.kind)
-                {
-                    smooth = true;
-                }
-            } else {
+            let Some(old_block) = self.blocks().get(*id) else {
+                smooth = true;
+                break;
+            };
+            if let Some(old_info) = &old_block.info
+                && (old_info.indent != info.indent
+                    || old_info.unclosed != info.unclosed
+                    || old_info.kind != info.kind)
+            {
                 smooth = true;
             }
         }
@@ -974,118 +1009,93 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             .pending_delete
             .extract_if(|id, ts| *ts > now || frames.contains_key(id))
         {
-            let idx = self.frame_map[&id];
-            self.contents.get_mut().1.1.1.0.remove(idx);
-            self.frame_map.remove(&id);
-            for other_idx in self.frame_map.values_mut() {
-                if *other_idx >= idx {
-                    *other_idx -= 1;
-                }
-            }
+            get_mut!(self.contents, blocks).remove(id, FrameLine::new(&self.factory));
         }
 
         /* smoothly vanish frames that no longer exist */
-        {
-            let mut to_vanish: Vec<(u32, usize)> = vec![];
-            for (id, idx) in &self.frame_map {
-                if !frames.contains_key(id) {
-                    to_vanish.push((*id, *idx));
-                }
-            }
-            for (id, idx) in to_vanish {
-                self.blocks_mut()
-                    .get_mut(idx)
-                    .unwrap()
-                    .set_visibility(true, false, false);
+        get_mut!(self.contents, blocks).for_each_mut(|id, block| {
+            if !frames.contains_key(&id) {
+                block.set_visibility(true, false, false);
                 self.pending_delete.insert(id, now + 1000.0);
             }
-        }
+        });
 
         /* update existing frames and add new ones */
-        for frame in frames {
-            self.make_height_at_least(frame.1.end + 2);
-            let index = self.frame_map.get(&frame.0).copied();
+        for (id, info) in frames {
+            self.make_height_at_least(info.end + 2);
+            self.make_width_at_least(info.indent);
 
-            if let Some(idx) = index {
-                self.make_width_at_least(frame.1.indent);
-                // update existing
-                let last_block = self.blocks_mut().get_mut(idx).unwrap();
-                let unclosed = frame.1.unclosed;
-                last_block.set_visibility(true, true, unclosed);
-                last_block.update(frame.1, smooth).unwrap();
-            } else {
-                // add new frame
-                let idx = self.blocks().len();
-                self.make_width_at_least(frame.1.indent);
-                let blocks = &mut self.contents.get_mut().1.1.1.0;
-                blocks.push(FrameLine::new(&self.factory));
-                let last_block = blocks.last_mut().unwrap();
-                let unclosed = frame.1.unclosed;
-                last_block.set_visibility(false, false, false);
-                last_block.update(frame.1, false).unwrap();
-                last_block.set_visibility(true, true, unclosed);
-                self.frame_map.insert(frame.0, idx);
+            if self.blocks().get(id).is_none() {
+                get_mut!(self.contents, blocks).insert(id, FrameLine::new(&self.factory));
+            }
+
+            let bl = &mut get_mut!(self.contents, blocks)[id];
+            let unclosed = info.unclosed;
+            bl.update(info, smooth).unwrap();
+            bl.set_visibility(true, true, unclosed);
+        }
+    }
+
+    pub fn set_types(&mut self, types: HashMap<u32, FractionInfo>, _smooth: bool) {
+        /* delete types that no longer exist */
+        {
+            let mut to_vanish: Vec<u32> = vec![];
+            for id in self.fractions().ids() {
+                if !types.contains_key(id) {
+                    to_vanish.push(*id);
+                }
+            }
+            for id in to_vanish {
+                get_mut!(self.contents, fractions)
+                    .remove(id, OperatorFraction::new(&self.factory, 0, 0));
             }
         }
-    }
 
-    pub fn clear_type(&mut self, line_no: usize) {
-        if let Some(frac) = self.fractions_mut().get_mut(line_no) {
-            frac.clear()
-        }
-    }
+        /* update existing types and add new ones */
+        for (
+            id,
+            FractionInfo {
+                line_no,
+                indent,
+                ty,
+            },
+        ) in types
+        {
+            self.make_height_at_least(line_no + 2);
+            self.make_width_at_least(indent as usize);
 
-    pub fn set_type(&mut self, line_no: usize, indent: u16, ty: AnnotatedOperatorType) {
-        self.make_height_at_least(line_no + 2);
-        self.make_width_at_least(indent as usize);
+            if self.fractions().get(id).is_none() {
+                get_mut!(self.contents, fractions)
+                    .insert(id, OperatorFraction::new(&self.factory, line_no, indent));
+            }
 
-        self.contents
-            .get_mut()
-            .1
-            .1
-            .0
-            .get_mut(line_no)
-            .unwrap()
-            .draw(&self.factory, line_no, indent, ty.inputs, ty.outputs);
-    }
-
-    pub fn set_type_count(&mut self, count: usize) {
-        self.fractions_mut().truncate(count);
-        while self.contents.get().1.1.0.len() < count {
-            self.contents
-                .get_mut()
-                .1
-                .1
-                .0
-                .push(OperatorFraction::new_empty(&self.factory));
+            get_mut!(self.contents, fractions)[id].draw(
+                &self.factory,
+                line_no,
+                indent,
+                ty.inputs,
+                ty.outputs,
+            );
         }
     }
 
     pub fn set_connections(&mut self, connections: &SlotConnections) {
         let mut connection_idx = 0;
-        self.connections_mut().truncate(0);
-        for (src, dst) in zip_eq(&connections.written, &connections.read) {
-            let (Some(src), Some(dst)) = (src, dst) else {
+        for SlotConnection { written, read } in connections {
+            let (Some(src), Some(dst)) = (written, read) else {
                 continue;
             };
-            let write_base = self.fractions().get(src.line_idx).unwrap().target.unwrap();
-            let read_base = self.fractions().get(dst.line_idx).unwrap().target.unwrap();
-            let (x, write_scale, ty) = self
-                .fractions()
-                .get(src.line_idx)
-                .unwrap()
-                .output_locations_scales_and_types[src.operand_num];
+            let src_frac = &self.fractions()[src.position_id];
+            let dst_frac = &self.fractions()[dst.position_id];
+            let (write_base, read_base) = (src_frac.target, dst_frac.target);
+            let (x, write_scale, ty) = src_frac.output_locations_scales_and_types[src.operand_num];
             let reader_offset = icon_height(ty);
+
             let write_x = write_base.0 + x;
-            let (relative_x, read_scale) = self
-                .fractions()
-                .get(dst.line_idx)
-                .unwrap()
-                .input_locations_and_scales[dst.operand_num];
+            let (relative_x, read_scale) = dst_frac.input_locations_and_scales[dst.operand_num];
             let read_x = read_base.0 + relative_x;
             let write_y = write_base.1 + 10.0 * write_scale;
             let read_y = read_base.1 - reader_offset * read_scale;
-            // let y_distance = read_y - write_y;
             let first_control_height = write_y + 1.0;
             let second_control_height = write_y;
 
@@ -1106,6 +1116,7 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
             );
             connection_idx += 1;
         }
+        self.connections_mut().truncate(connection_idx);
     }
 
     pub fn set_slot_value(
@@ -1114,7 +1125,7 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
         is_input: bool,
         value: &Option<impl Separable>,
     ) {
-        let fraction = &mut self.fractions_mut()[location.line_idx];
+        let fraction = &mut self.fractions_mut()[location.position_id];
         let slot = if is_input {
             &mut fraction.inputs()[location.operand_num]
         } else {
@@ -1177,7 +1188,8 @@ struct FractionCache {
 struct OperatorFraction {
     symbols: SymbolsType,
     cache: Option<FractionCache>,
-    target: Option<(f32, f32)>,
+    line_no: usize,
+    target: (f32, f32),
     input_locations_and_scales: Vec<(f32, f32)>,
     output_locations_scales_and_types: Vec<(f32, f32, Option<ValType>)>,
 }
@@ -1237,7 +1249,7 @@ impl AutoSizedNumber {
 
 impl WithElement for AutoSizedNumber {
     type Element = SvgTextElement;
-    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
+    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
         self.elem.with_element(f, g)
     }
 }
@@ -1272,7 +1284,7 @@ impl Slot {
 }
 
 impl OperatorFraction {
-    fn new_empty(factory: &ElementFactory) -> Self {
+    fn new(factory: &ElementFactory, line_no: usize, indent: u16) -> Self {
         let mut ret = Self {
             symbols: DomStruct::new(
                 (
@@ -1282,7 +1294,8 @@ impl OperatorFraction {
                 factory.svg_g(),
             ),
             cache: None,
-            target: None,
+            line_no,
+            target: Self::compute_target(line_no, indent),
             input_locations_and_scales: vec![],
             output_locations_scales_and_types: vec![],
         };
@@ -1299,13 +1312,22 @@ impl OperatorFraction {
         &mut self.symbols.get_mut().1.0
     }
 
-    fn clear(&mut self) {
-        self.inputs().truncate(0);
-        self.outputs().truncate(0);
-        self.cache = None;
-        self.target = None;
-        self.input_locations_and_scales.clear();
-        self.output_locations_scales_and_types.clear();
+    fn compute_target(line_no: usize, indent: u16) -> (f32, f32) {
+        let target_x = X_OFFSET_PX + INDENT_PX * indent as usize
+            - INDENT_PX * BLOCK_BOUNDARY_INDENT / 2
+            - MARGIN / 2;
+        let target_y = line_no * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX;
+        (target_x as f32, target_y as f32)
+    }
+
+    fn goto(&mut self, line_no: usize, indent: u16) {
+        self.line_no = line_no;
+        self.target = Self::compute_target(line_no, indent);
+
+        self.symbols.set_attribute(
+            "transform",
+            &format!("translate({} {})", self.target.0, self.target.1),
+        );
     }
 
     fn draw(
@@ -1316,15 +1338,7 @@ impl OperatorFraction {
         input_types: Vec<Option<SlotInfo>>,
         output_types: Vec<SlotInfo>,
     ) {
-        let target_x = X_OFFSET_PX + INDENT_PX * indent as usize
-            - INDENT_PX * BLOCK_BOUNDARY_INDENT / 2
-            - MARGIN / 2;
-        let target_y = line_no * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX;
-        self.symbols.set_attribute(
-            "transform",
-            &format!("translate({} {})", target_x, target_y),
-        );
-        self.target = Some((target_x as f32, target_y as f32));
+        self.goto(line_no, indent);
 
         if let Some(cache) = &self.cache
             && cache.input_types == input_types
@@ -1459,7 +1473,7 @@ impl OperatorFraction {
 
 impl WithElement for OperatorFraction {
     type Element = SvggElement;
-    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
+    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
         self.symbols.with_element(f, g)
     }
 }

@@ -105,7 +105,7 @@ impl<Child: Structure, Element: AnyElement> Component for DomStruct<Child, Eleme
 // Accessors for the parent element (only usable by the jet (web support) module).
 impl<Child: Structure, Element: AnyElement> WithElement for DomStruct<Child, Element> {
     type Element = Element;
-    fn with_element(&self, f: impl FnMut(&Element), g: AccessToken) {
-        self.elem.with_element(f, g);
+    fn with_element<T, F: FnMut(&Element) -> T>(&self, f: F, g: AccessToken) -> T {
+        self.elem.with_element(f, g)
     }
 }

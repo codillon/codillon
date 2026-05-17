@@ -143,7 +143,7 @@ impl Component for Slider {
 
 impl WithElement for Slider {
     type Element = HtmlDivElement;
-    fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
+    fn with_element<T, F: FnMut(&HtmlDivElement) -> T>(&self, f: F, g: AccessToken) -> T {
         self.container.with_element(f, g)
     }
 }
