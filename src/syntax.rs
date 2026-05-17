@@ -664,6 +664,22 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         // If line will be rejected in second pass, don't let it define a symbol.
         let orig_state = state;
+
+        if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
+            match state {
+                // Fix #2 (simulation from below): prepend "(func" if an instruction appears at module scope
+                Initial => {
+                    let _ = state.transit_state_from_module_part(ModulePart::LParen);
+                    let _ = state.transit_state_from_module_part(ModulePart::FuncKeyword);
+                }
+                // Fix #3 (simulation from below): prepend "func" if an instruction appears after just "("
+                AfterModuleFieldLParen => {
+                    let _ = state.transit_state_from_module_part(ModulePart::FuncKeyword);
+                }
+                _ => {}
+            }
+        }
+
         if state.transit_state(lines.info(line_no), |_| {}).is_err() {
             state = orig_state;
             continue;
