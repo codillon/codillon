@@ -526,27 +526,41 @@ impl Editor {
 
         // Split the start line if it contains newline chars.
         let mut fixup_line = start_line;
+        let mut absolute_new_cursor_pos = self
+            .line(fixup_line)
+            .position_to_absolute_utf16_offset(new_cursor_pos)?;
         loop {
             let pos: Option<Position> = self.line(fixup_line).first_newline()?;
             match pos {
                 None => break,
                 Some(pos) => {
-                    let rest = self.line(fixup_line).suffix(pos)?;
-                    let end_pos = self.line(fixup_line).end_position();
-                    self.line_mut(fixup_line).replace_range(pos, end_pos, "")?;
+                    let the_line = self.line_mut(fixup_line);
+
+                    let rest = the_line.suffix(pos)?;
+                    let end_pos = the_line.end_position();
+
+                    let olen = the_line.position_to_absolute_utf16_offset(end_pos)?;
+                    the_line.replace_range(pos, end_pos, "")?;
+
                     let mut newline = CodeLine::new(&rest[1..], &self.factory);
+                    let nlen = newline.position_to_absolute_utf16_offset(newline.end_position())?;
+                    // may truncate initial whitespace
+
+                    absolute_new_cursor_pos -= olen - nlen;
 
                     // preserve identity in one special case
                     if pos == Position::begin() {
                         newline.swap_ids(self.line_mut(fixup_line));
                     }
 
-                    new_cursor_pos = Position::begin();
                     fixup_line += 1;
                     self.text_mut().insert(fixup_line, newline);
                 }
             }
         }
+        new_cursor_pos = self
+            .line(fixup_line)
+            .absolute_utf16_offset_to_position(absolute_new_cursor_pos)?;
 
         // Is the new module well-formed and "validizable"? Otherwise, revert this entire change.
         match self.on_change() {

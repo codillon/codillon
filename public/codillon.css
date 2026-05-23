@@ -73,7 +73,7 @@ div.textentry:focus {
     font-size: 20pt;
     color: darkred;
     display: inline-block;
-    width: 50px;
+    width: 70px;
     text-align: right;
     content: " ";
 }
@@ -121,6 +121,7 @@ span.instr[data-synthetic-before]::before {
     font-size: 12pt;
     transform: translateY(10px);
     content: attr(data-synthetic-before);
+    width: auto;
 }
 
 span.instr[data-debug]::before {
