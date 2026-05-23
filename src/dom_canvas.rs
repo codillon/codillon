@@ -87,7 +87,7 @@ impl Component for DomCanvas {
 
 impl WithElement for DomCanvas {
     type Element = HtmlCanvasElement;
-    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
-        self.elem.with_element(f, g);
+    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
+        self.elem.with_element(f, g)
     }
 }

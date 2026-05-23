@@ -133,7 +133,7 @@ impl Component for Autocomplete {
 
 impl WithElement for Autocomplete {
     type Element = HtmlDivElement;
-    fn with_element(&self, f: impl FnMut(&HtmlDivElement), g: AccessToken) {
+    fn with_element<T, F: FnMut(&HtmlDivElement) -> T>(&self, f: F, g: AccessToken) -> T {
         self.bar.with_element(f, g)
     }
 }

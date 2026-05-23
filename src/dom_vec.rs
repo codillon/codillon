@@ -41,6 +41,11 @@ impl<Child: Component, Element: AnyElement> DomVec<Child, Element> {
         self.elem.attach_node(self.contents.last().unwrap());
     }
 
+    pub fn get_two_mut(&mut self, idx1: usize, idx2: usize) -> (&mut Child, &mut Child) {
+        let [a, b] = self.contents.get_disjoint_mut([idx1, idx2]).unwrap();
+        (a, b)
+    }
+
     delegate! {
     to self.contents {
         pub fn truncate(&mut self, len: usize);
@@ -99,7 +104,7 @@ impl<Child: Component, Element: AnyElement> Component for DomVec<Child, Element>
 // Accessors for the parent element (only usable by the jet (web support) module).
 impl<Child: Component, Element: AnyElement> WithElement for DomVec<Child, Element> {
     type Element = Element;
-    fn with_element(&self, f: impl FnMut(&Element), g: AccessToken) {
-        self.elem.with_element(f, g);
+    fn with_element<T, F: FnMut(&Element) -> T>(&self, f: F, g: AccessToken) -> T {
+        self.elem.with_element(f, g)
     }
 }

@@ -20,12 +20,34 @@ use web_sys::{
 
 // Traits that give "raw" access to an underlying node or element,
 // only usable from the jet (web support) module.
+#[derive(Copy, Clone)]
 struct _Private();
+#[derive(Copy, Clone)]
 pub struct AccessToken(_Private);
 const TOKEN: AccessToken = AccessToken(_Private());
 
 pub trait WithNode {
-    fn with_node(&self, f: impl FnMut(&web_sys::Node), g: AccessToken);
+    fn with_node<T, F: FnMut(&web_sys::Node) -> T>(&self, f: F, g: AccessToken) -> T;
+
+    fn replace_with(&mut self, other: &mut Self, g: AccessToken) {
+        self.with_node(
+            |n1| {
+                other.with_node(
+                    |n2| {
+                        if let Some(parent) = n1.parent_node() {
+                            parent.replace_child(n2, n1).expect("replace child");
+                        }
+                    },
+                    g,
+                )
+            },
+            g,
+        );
+    }
+
+    fn is_connected(&self) -> bool {
+        self.with_node(|n| n.is_connected(), TOKEN)
+    }
 }
 
 // Any HTML element
@@ -39,12 +61,12 @@ impl<T: AsRef<Element> + AsRef<web_sys::Node>> AnyElement for T {}
 
 pub trait WithElement {
     type Element: AnyElement;
-    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken);
+    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T;
 }
 
 impl<T: WithElement> WithNode for T {
-    fn with_node(&self, mut f: impl FnMut(&web_sys::Node), g: AccessToken) {
-        self.with_element(|elem| f(elem.as_ref()), g);
+    fn with_node<U, F: FnMut(&web_sys::Node) -> U>(&self, mut f: F, g: AccessToken) -> U {
+        self.with_element(|elem| f(elem.as_ref()), g)
     }
 }
 
@@ -90,7 +112,7 @@ impl Default for TextHandle {
 }
 
 impl WithNode for TextHandle {
-    fn with_node(&self, mut f: impl FnMut(&web_sys::Node), _g: AccessToken) {
+    fn with_node<T, F: FnMut(&web_sys::Node) -> T>(&self, mut f: F, _g: AccessToken) -> T {
         f(&self.0)
     }
 }
@@ -293,7 +315,7 @@ where
 
 impl<T: ElementComponent> WithElement for ReactiveComponent<T> {
     type Element = T::Element;
-    fn with_element(&self, f: impl FnMut(&Self::Element), g: AccessToken) {
+    fn with_element<U, F: FnMut(&Self::Element) -> U>(&self, f: F, g: AccessToken) -> U {
         self.component.with_element(f, g)
     }
 }
@@ -307,7 +329,7 @@ pub struct ElementHandle<T: AnyElement> {
 
 impl<T: AnyElement> WithElement for ElementHandle<T> {
     type Element = T;
-    fn with_element(&self, mut f: impl FnMut(&T), _g: AccessToken) {
+    fn with_element<U, F: FnMut(&T) -> U>(&self, mut f: F, _g: AccessToken) -> U {
         f(&self.elem.0)
     }
 }
@@ -403,12 +425,6 @@ impl<T: AnyElement> ElementHandle<T> {
             TOKEN,
         );
     }
-
-    delegate! {
-    to self.elem.element() {
-        pub fn is_connected(&self) -> bool;
-    }
-    }
 }
 
 impl ElementHandle<HtmlInputElement> {
@@ -450,7 +466,7 @@ impl ElementHandle<SvgUseElement> {
 
 impl ElementHandle<SvgTextElement> {
     pub fn compute_text_width(&self) -> Option<f32> {
-        if self.elem.is_connected()
+        if self.is_connected()
             && web_sys::window()
                 .unwrap()
                 .document()
@@ -499,17 +515,6 @@ impl<T: AnyElement> Component for ElementHandle<T> {
 pub struct DocumentHandle<BodyType: ElementComponent<Element = HtmlBodyElement>> {
     document: web_sys::Document,
     body: Option<BodyType>,
-}
-
-impl<BodyType: ElementComponent<Element = HtmlBodyElement>> WithElement
-    for DocumentHandle<BodyType>
-{
-    type Element = BodyType::Element;
-    fn with_element(&self, mut f: impl FnMut(&Self::Element), g: AccessToken) {
-        if let Some(body) = &self.body {
-            body.with_element(|elem| f(elem), g);
-        }
-    }
 }
 
 impl<BodyType: ElementComponent<Element = HtmlBodyElement>> Default for DocumentHandle<BodyType> {
@@ -703,7 +708,7 @@ impl ArrayHandle {
 pub struct NodeRef(web_sys::Node);
 
 impl WithNode for NodeRef {
-    fn with_node(&self, mut f: impl FnMut(&web_sys::Node), _g: AccessToken) {
+    fn with_node<T, F: FnMut(&web_sys::Node) -> T>(&self, mut f: F, _g: AccessToken) -> T {
         f(&self.0)
     }
 }
@@ -714,9 +719,7 @@ impl NodeRef {
     }
 
     pub fn is_same_node<T: WithNode>(&self, other: &T) -> bool {
-        let mut is_same = false;
-        other.with_node(|node| is_same = self.0.is_same_node(Some(node)), TOKEN);
-        is_same
+        other.with_node(|node| self.0.is_same_node(Some(node)), TOKEN)
     }
 }
 
@@ -773,14 +776,14 @@ impl InputEventHandle {
 
 // Compare the position of two nodes in a document
 pub fn compare_document_position(a: &impl WithNode, b: &impl WithNode) -> std::cmp::Ordering {
-    let mut is_same = false;
-    let mut pos: u16 = 0;
-    a.with_node(
+    let (is_same, pos) = a.with_node(
         |a_node| {
             b.with_node(
                 |b_node| {
-                    is_same = a_node.is_same_node(Some(b_node));
-                    pos = a_node.compare_document_position(b_node);
+                    (
+                        a_node.is_same_node(Some(b_node)),
+                        a_node.compare_document_position(b_node),
+                    )
                 },
                 TOKEN,
             )
@@ -986,6 +989,16 @@ impl WindowHandle {
 pub trait Component: WithNode {
     #[cfg(debug_assertions)]
     fn audit(&self);
+
+    fn assign(&mut self, mut other: Self)
+    where
+        Self: Sized,
+    {
+        self.replace_with(&mut other, TOKEN);
+        std::mem::swap(self, &mut other);
+        debug_assert!(self.is_connected());
+        debug_assert!(!other.is_connected());
+    }
 }
 
 // ElementComponent is a trait for a "Component" that is also an HTML Element (e.g. not Text).
