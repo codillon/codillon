@@ -5,14 +5,14 @@ use crate::symbolic::{
     ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
     symbols_resolved,
 };
+use crate::utils::{HelperImportKind, check_import};
 use anyhow::Result;
 use std::collections::HashSet;
-use wast::core::{Limits, MemoryType};
 use wast::{
     Error,
     core::{
-        Export, Global, Imports, InlineExport, InlineImport, Instruction, LocalParser, Memory,
-        Table, ValType,
+        Export, Global, Imports, InlineExport, InlineImport, Instruction, ItemKind, Limits,
+        LocalParser, Memory, MemoryType, Table, ValType,
     },
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
@@ -214,22 +214,28 @@ impl<'a> Parse<'a> for ModulePart {
                     Imports {
                         items:
                             wast::core::ImportItems::Single {
-                                sig:
-                                    wast::core::ItemSig {
-                                        kind:
-                                            wast::core::ItemKind::Func { .. }
-                                            | wast::core::ItemKind::Global(_)
-                                            | wast::core::ItemKind::Memory(MemoryType {
-                                                shared: false,
-                                                limits: Limits { is64: false, .. },
-                                                ..
-                                            }),
-                                        ..
-                                    },
-                                ..
+                                module,
+                                name,
+                                sig: wast::core::ItemSig { ref kind, .. },
                             },
                         ..
-                    } => Ok(imports.into()),
+                    } => match kind {
+                        ItemKind::Func(_) => Ok(imports.into()),
+                        ItemKind::Global(ty) => {
+                            match check_import(module, name, &HelperImportKind::Global(*ty)) {
+                                None => Ok(imports.into()),
+                                Some(error_message) => Err(parser.error(error_message)),
+                            }
+                        }
+                        ItemKind::Memory(ty) => {
+                            match check_import(module, name, &HelperImportKind::Memory(*ty)) {
+                                None => Ok(imports.into()),
+                                Some(error_message) => Err(parser.error(error_message)),
+                            }
+                        }
+                        _ => Err(parser.error("unsupported import kind")),
+                    },
+
                     _ => Err(parser.error("unsupported import kind")),
                 }
             })
@@ -268,16 +274,15 @@ impl<'a> Parse<'a> for ModulePart {
                 Memory {
                     kind:
                         wast::core::MemoryKind::Import {
-                            ty:
-                                MemoryType {
-                                    shared: false,
-                                    limits: Limits { is64: false, .. },
-                                    ..
-                                },
+                            import: InlineImport { module, field },
+                            ty,
                             ..
                         },
                     ..
-                } => Ok(ModulePart::Import),
+                } => match check_import(module, field, &HelperImportKind::Memory(ty)) {
+                    None => Ok(ModulePart::Import),
+                    Some(error_message) => Err(parser.error(error_message)),
+                },
                 Memory {
                     kind:
                         wast::core::MemoryKind::Normal(MemoryType {
@@ -287,7 +292,7 @@ impl<'a> Parse<'a> for ModulePart {
                         }),
                     ..
                 } => Ok(ModulePart::Memory),
-                _ => Err(parser.error("unsupported memory kind")),
+                _ => Err(parser.error("unsupported memory feature")),
             })
         } else if parser.peek2::<kw::table>()? {
             parser.parens(|p| match p.parse::<Table<'a>>()? {
@@ -300,9 +305,13 @@ impl<'a> Parse<'a> for ModulePart {
         } else if parser.peek2::<kw::global>()? {
             parser.parens(|p| match p.parse::<Global<'a>>()? {
                 Global {
-                    kind: wast::core::GlobalKind::Import { .. },
+                    kind: wast::core::GlobalKind::Import(InlineImport { module, field }),
+                    ty,
                     ..
-                } => Ok(ModulePart::Import),
+                } => match check_import(module, field, &HelperImportKind::Global(ty)) {
+                    None => Ok(ModulePart::Import),
+                    Some(error_message) => Err(parser.error(error_message)),
+                },
                 Global {
                     kind: wast::core::GlobalKind::Inline(wast::core::Expression { instrs, .. }),
                     ty:
@@ -536,6 +545,7 @@ impl SyntaxState {
         let mut hit_initial = false;
         let mut has_local = false;
         let mut has_result = false;
+        let mut has_import = false;
         match &info.kind {
             LineKind::Empty | LineKind::Malformed(_) => {}
             LineKind::Instr(_) => {
@@ -568,11 +578,22 @@ impl SyntaxState {
                     self.transit_state_from_module_part(*part)?;
                     callback(self);
 
+                    if matches!(
+                        *self,
+                        SyntaxState::AfterFuncHeader(FuncHeader {
+                            is_import: true,
+                            ..
+                        })
+                    ) {
+                        has_import = true;
+                    }
+
                     if *self == SyntaxState::Initial {
                         hit_initial = true;
-                        if has_result {
+                        if has_result && !has_import {
                             return Err("function with results must end on another line");
                         }
+                        has_import = false;
                     }
                 }
             }
@@ -652,6 +673,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     // and declare module-scope symbolic ids for any surviving lines.
 
     // There are probably still cases that can produce a "bounce."
+    let mut saw_func = false;
     for line_no in 0..lines.len() {
         lines.set_synthetic_before(line_no, SyntheticWasm::default());
         lines.set_active_status(line_no, Active);
@@ -659,6 +681,42 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         lines.set_runtime_error(line_no, None);
 
         let line_kind = lines.info(line_no).kind.stripped_clone();
+
+        // If line will be rejected in second pass, don't let it define a symbol.
+        let orig_state = state;
+
+        if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
+            match state {
+                // Fix #2 (simulation from below): prepend "(func" if an instruction appears at module scope
+                Initial => {
+                    let _ = state.transit_state_from_module_part(ModulePart::LParen);
+                    let _ = state.transit_state_from_module_part(ModulePart::FuncKeyword);
+                }
+                // Fix #3 (simulation from below): prepend "func" if an instruction appears after just "("
+                AfterModuleFieldLParen => {
+                    let _ = state.transit_state_from_module_part(ModulePart::FuncKeyword);
+                }
+                _ => {}
+            }
+        }
+
+        if state
+            .transit_state(lines.info(line_no), |st| match st {
+                SyntaxState::AfterFuncHeader(FuncHeader {
+                    is_import: true, ..
+                }) => saw_func = false,
+                SyntaxState::AfterFuncHeader(_) => saw_func = true,
+                _ => {}
+            })
+            .is_err()
+        {
+            state = orig_state;
+            continue;
+        }
+
+        if saw_func && state == SyntaxState::Initial {
+            before_imports = false;
+        }
 
         // Enforce no imports after other module fields
         if let LineKind::Other(parts) = &line_kind {
@@ -680,32 +738,9 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                     Inactive("imports must appear before other module fields"),
                 );
                 continue;
-            } else if module_field || (parts.contains(&ModulePart::RParen) && !has_import) {
+            } else if module_field {
                 before_imports = false;
             }
-        }
-
-        // If line will be rejected in second pass, don't let it define a symbol.
-        let orig_state = state;
-
-        if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
-            match state {
-                // Fix #2 (simulation from below): prepend "(func" if an instruction appears at module scope
-                Initial => {
-                    let _ = state.transit_state_from_module_part(ModulePart::LParen);
-                    let _ = state.transit_state_from_module_part(ModulePart::FuncKeyword);
-                }
-                // Fix #3 (simulation from below): prepend "func" if an instruction appears after just "("
-                AfterModuleFieldLParen => {
-                    let _ = state.transit_state_from_module_part(ModulePart::FuncKeyword);
-                }
-                _ => {}
-            }
-        }
-
-        if state.transit_state(lines.info(line_no), |_| {}).is_err() {
-            state = orig_state;
-            continue;
         }
 
         // Collect module-level symbols
@@ -1378,6 +1413,63 @@ mod tests {
             fix_syntax(&mut infos6);
             assert!(infos6.lines[0].is_active());
             assert!(!infos6.lines[1].is_active());
+        }
+
+        {
+            // Import with params and results on one line
+            let mut infos =
+                TestLineInfos::new(["(func $x (import \"x\" \"y\") (param i32) (result f64))"]);
+            fix_syntax(&mut infos);
+            assert!(infos.lines[0].is_well_formed());
+        }
+
+        {
+            // Func with params and results on one line
+            let mut infos = TestLineInfos::new(["(func $x (param i32) (result f64))"]);
+            fix_syntax(&mut infos);
+            assert!(!infos.lines[0].is_well_formed());
+        }
+
+        {
+            // Multi-line imported function, then a non-import module field
+            let mut infos = TestLineInfos::new([
+                "(func $x (import \"x\" \"y\") (param i32)",
+                "(result f64))",
+                "(memory 1)",
+            ]);
+            fix_syntax(&mut infos);
+            assert!(infos.lines[0].is_well_formed());
+            assert!(infos.lines[1].is_well_formed());
+            assert!(infos.lines[2].is_well_formed());
+        }
+
+        {
+            // Multi-line imported function, then another import
+            let mut infos = TestLineInfos::new([
+                "(func $x (import \"x\" \"y\") (param i32)",
+                "(result f64))",
+                "(memory (import \"listen\" \"listen_memory\") 1)",
+            ]);
+            fix_syntax(&mut infos);
+            assert!(infos.lines[0].is_well_formed());
+            assert!(infos.lines[1].is_well_formed());
+            assert!(infos.lines[2].is_well_formed());
+        }
+
+        {
+            // Bad global import
+            let mut infos = TestLineInfos::new(["(global (import \"x\" \"y\") i32)"]);
+            fix_syntax(&mut infos);
+            dbg!(&infos.lines[0]);
+            assert!(!infos.lines[0].is_well_formed());
+        }
+
+        {
+            // Bad memory import
+            let mut infos = TestLineInfos::new(["(memory (import \"x\" \"y\") 1)"]);
+            fix_syntax(&mut infos);
+            dbg!(&infos.lines[0]);
+            assert!(!infos.lines[0].is_well_formed());
         }
     }
 }

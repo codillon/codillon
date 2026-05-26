@@ -20,7 +20,10 @@ use wasmparser::{
     Validator, WasmFeatures, WasmModuleResources,
 };
 use wast::{
-    core::Module,
+    core::{
+        GlobalType as TextGlobalType, Limits as TextLimits, MemoryType as TextMemoryType, Module,
+        ValType as TextValType,
+    },
     parser::{self, ParseBuffer},
 };
 
@@ -35,39 +38,37 @@ enum InstrImports {
 }
 impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
-        ("record_step", 1), // indices relative to end of user-provided type section
-        ("record_invalid", 2),
-        ("record_i32", 3),
-        ("record_f32", 4),
-        ("record_i64", 5),
-        ("record_f64", 6),
+        ("record_step", 0), // indices relative to end of user-provided type section
+        ("record_invalid", 1),
+        ("record_i32", 2),
+        ("record_f32", 3),
+        ("record_i64", 4),
+        ("record_f64", 5),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
-        // 0: () -> () (type of func_placeholder)
-        (&[], &[]),
-        // 1: i32 -> i32
+        // 0: i32 -> i32
         (&[EncoderValType::I32], &[EncoderValType::I32]),
-        // 2: i32 -> ()
+        // 1: i32 -> ()
         (&[EncoderValType::I32], &[]),
-        // 3: (i32, i32) -> ()
+        // 2: (i32, i32) -> ()
         (&[EncoderValType::I32, EncoderValType::I32], &[]),
-        // 4: (f32, i32) -> ()
+        // 3: (f32, i32) -> ()
         (&[EncoderValType::F32, EncoderValType::I32], &[]),
-        // 5: (i64, i32) -> ()
+        // 4: (i64, i32) -> ()
         (&[EncoderValType::I64, EncoderValType::I32], &[]),
-        // 6: (f64, i32) -> ()
+        // 5: (f64, i32) -> ()
         (&[EncoderValType::F64, EncoderValType::I32], &[]),
     ];
 }
 
 #[derive(PartialEq, Eq)]
-enum HelperImportKind<'a> {
+pub enum HelperImportKind<'a> {
     Func {
         params: &'a [ValType],
         results: &'a [ValType],
     },
-    Global(wasmparser::GlobalType),
-    Memory(wasmparser::MemoryType),
+    Global(TextGlobalType<'a>),
+    Memory(TextMemoryType),
 }
 
 struct HelperImport<'a> {
@@ -75,6 +76,7 @@ struct HelperImport<'a> {
     kind: HelperImportKind<'a>,
     reason: &'static str,
 }
+
 const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
     (
         "draw",
@@ -126,8 +128,8 @@ const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
         &[
             HelperImport {
                 name: "num_samples",
-                kind: HelperImportKind::Global(wasmparser::GlobalType {
-                    content_type: ValType::I32,
+                kind: HelperImportKind::Global(TextGlobalType {
+                    ty: TextValType::I32,
                     mutable: false,
                     shared: false,
                 }),
@@ -135,11 +137,13 @@ const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
             },
             HelperImport {
                 name: "listen_memory",
-                kind: HelperImportKind::Memory(wasmparser::MemoryType {
-                    memory64: false,
+                kind: HelperImportKind::Memory(TextMemoryType {
+                    limits: TextLimits {
+                        is64: false,
+                        min: 1,
+                        max: None,
+                    },
                     shared: false,
-                    initial: 1,
-                    maximum: None,
                     page_size_log2: None,
                 }),
                 reason: "expected (memory 1)",
@@ -410,68 +414,42 @@ impl<'a> RawModule<'a> {
         wasm_bin: &'a [u8],
     ) -> Result<ValidModule<'a>> {
         let parser = wasmparser::Parser::new(0);
-        let import_lines = find_import_lines(editor);
         let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
+        let import_lines = find_import_lines(editor);
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
 
-        /* Disable unlinkable imports */
+        /* Disable unlinkable function imports (other imports were already syntactically disabled) */
         let mut imports = Vec::new();
-        let placeholder_func_import = wasmparser::Import {
-            module: "codillon_debug",
-            name: "func_placeholder",
-            ty: wasmparser::TypeRef::Func(self.types.len() as u32), // empty type is first added type
-        };
-        let placeholder_global_import = wasmparser::Import {
-            module: "codillon_debug",
-            name: "global_placeholder",
-            ty: wasmparser::TypeRef::Global(wasmparser::GlobalType {
-                content_type: wasmparser::ValType::I32,
-                mutable: false,
-                shared: false,
-            }),
-        };
-        let placeholder_memory_import = wasmparser::Import {
-            module: "codillon_debug",
-            name: "memory_placeholder",
-            ty: wasmparser::TypeRef::Memory(wasmparser::MemoryType {
-                memory64: false,
-                shared: false,
-                initial: 0,
-                maximum: None,
-                page_size_log2: None,
-            }),
-        };
+
         for (import_idx, import @ wasmparser::Import { module, name, ty }) in
             self.imports.into_iter().enumerate()
         {
-            let (kind, placeholder) = match ty {
-                wasmparser::TypeRef::Func(type_idx) => {
-                    let func_type = &self.types[type_idx as usize];
-                    (
-                        &HelperImportKind::Func {
-                            params: func_type.params(),
-                            results: func_type.results(),
-                        },
-                        placeholder_func_import,
-                    )
-                }
-                wasmparser::TypeRef::Global(global_type) => (
-                    &HelperImportKind::Global(global_type),
-                    placeholder_global_import,
-                ),
-                wasmparser::TypeRef::Memory(memory_type) => (
-                    &HelperImportKind::Memory(memory_type),
-                    placeholder_memory_import,
-                ),
-                _ => unreachable!("unsupported import kind (forbidden syntactically)"),
+            let wasmparser::TypeRef::Func(type_idx) = ty else {
+                imports.push(import);
+                continue;
             };
-            match Self::check_import(module, name, kind) {
+
+            let func_type = &self.types[type_idx as usize];
+
+            match check_import(
+                module,
+                name,
+                &HelperImportKind::Func {
+                    params: func_type.params(),
+                    results: func_type.results(),
+                },
+            ) {
                 None => imports.push(import),
                 Some(reason) => {
                     editor.set_invalid(import_lines[import_idx], Some(reason));
-                    imports.push(placeholder);
+
+                    imports.push(wasmparser::Import {
+                        module: "codillon_debug",
+                        name: "func_placeholder",
+                        ty: wasmparser::TypeRef::Func(type_idx),
+                    });
                 }
-            };
+            }
         }
 
         let mut ret = ValidModule {
@@ -772,33 +750,33 @@ impl<'a> RawModule<'a> {
         assert!(&ops_reader.eof());
         Ok(())
     }
+}
 
-    fn check_import(
-        import_module: &str,
-        import_name: &str,
-        import_kind: &HelperImportKind,
-    ) -> Option<String> {
-        // Check if module name exists
-        for (module, components) in HELPER_IMPORTS {
-            if *module == import_module {
-                for HelperImport { name, kind, reason } in *components {
-                    // Check if component name exists
-                    if *name == import_name {
-                        // Check if function type matches
-                        return if import_kind == kind {
-                            None
-                        } else {
-                            Some(reason.to_string())
-                        };
-                    }
+pub fn check_import(
+    import_module: &str,
+    import_name: &str,
+    import_kind: &HelperImportKind,
+) -> Option<String> {
+    // Check if module name exists
+    for (module, components) in HELPER_IMPORTS {
+        if *module == import_module {
+            for HelperImport { name, kind, reason } in *components {
+                // Check if component name exists
+                if *name == import_name {
+                    // Check if function type matches
+                    return if import_kind == kind {
+                        None
+                    } else {
+                        Some(reason.to_string())
+                    };
                 }
-                return Some(format!(
-                    "function ‘{import_name}’ not found in module {module}"
-                ));
             }
+            return Some(format!(
+                "field ‘{import_name}’ not found in module {module}"
+            ));
         }
-        Some(format!("module ‘{import_module}’ not found"))
     }
+    Some(format!("module ‘{import_module}’ not found"))
 }
 
 #[derive(Default)]
@@ -2514,7 +2492,6 @@ pub(crate) mod tests {
     }
 
     const EXPECTED_TYPES: &str = r#"  (type (func))
-  (type (func))
   (type (func (param i32) (result i32)))
   (type (func (param i32)))
   (type (func (param i32 i32)))
@@ -2523,18 +2500,18 @@ pub(crate) mod tests {
   (type (func (param f64 i32)))
   (type (func (param i32)))
 "#;
-    const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 2)))
-  (import "codillon_debug" "record_invalid" (func (type 3)))
-  (import "codillon_debug" "record_i32" (func (type 4)))
-  (import "codillon_debug" "record_f32" (func (type 5)))
-  (import "codillon_debug" "record_i64" (func (type 6)))
-  (import "codillon_debug" "record_f64" (func (type 7)))
+    const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 1)))
+  (import "codillon_debug" "record_invalid" (func (type 2)))
+  (import "codillon_debug" "record_i32" (func (type 3)))
+  (import "codillon_debug" "record_f32" (func (type 4)))
+  (import "codillon_debug" "record_i64" (func (type 5)))
+  (import "codillon_debug" "record_f64" (func (type 6)))
 "#;
 
     const EXPECTED_MAIN: &str = r#"  (export "main" (func 6))
 "#;
 
-    const EXPECTED_STEP: &str = r#"  (func (type 8) (param i32)
+    const EXPECTED_STEP: &str = r#"  (func (type 7) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -2649,7 +2626,7 @@ pub(crate) mod tests {
     call 7
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i64 i32) (result i64)
+                + r#"  (func (type 8) (param i64 i32) (result i64)
     local.get 0
     local.get 1
     call 4
@@ -2744,7 +2721,7 @@ pub(crate) mod tests {
     call 7
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
+                + r#"  (func (type 8) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2769,7 +2746,7 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
-                + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
+                + r#"  (import "codillon_debug" "func_placeholder" (func (type 0)))
   (export "main" (func 7))
   (func (type 0)
     i32.const 6
@@ -2937,7 +2914,7 @@ pub(crate) mod tests {
     call 7
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
+                + r#"  (func (type 8) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2975,7 +2952,7 @@ pub(crate) mod tests {
     unreachable
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 9) (param i32 i32) (result i32)
+                + r#"  (func (type 8) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3000,7 +2977,6 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + r#"  (type (func))
   (type (func (result i32 i32)))
-  (type (func))
   (type (func (param i32) (result i32)))
   (type (func (param i32)))
   (type (func (param i32 i32)))
@@ -3010,12 +2986,12 @@ pub(crate) mod tests {
   (type (func (param i32)))
   (type (func (param i32 i32 i32 i32) (result i32 i32)))
   (type (func (param i32 i32) (result i32)))
-  (import "codillon_debug" "record_step" (func (type 3)))
-  (import "codillon_debug" "record_invalid" (func (type 4)))
-  (import "codillon_debug" "record_i32" (func (type 5)))
-  (import "codillon_debug" "record_f32" (func (type 6)))
-  (import "codillon_debug" "record_i64" (func (type 7)))
-  (import "codillon_debug" "record_f64" (func (type 8)))
+  (import "codillon_debug" "record_step" (func (type 2)))
+  (import "codillon_debug" "record_invalid" (func (type 3)))
+  (import "codillon_debug" "record_i32" (func (type 4)))
+  (import "codillon_debug" "record_f32" (func (type 5)))
+  (import "codillon_debug" "record_i64" (func (type 6)))
+  (import "codillon_debug" "record_f64" (func (type 7)))
   (export "main" (func 6))
   (func (type 0)
     i32.const 0
@@ -3058,7 +3034,7 @@ pub(crate) mod tests {
     i32.const 6
     call 9
   )
-  (func (type 9) (param i32)
+  (func (type 8) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -3066,7 +3042,7 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (type 10) (param i32 i32 i32 i32) (result i32 i32)
+  (func (type 9) (param i32 i32 i32 i32) (result i32 i32)
     local.get 0
     local.get 2
     call 2
@@ -3076,7 +3052,7 @@ pub(crate) mod tests {
     local.get 0
     local.get 1
   )
-  (func (type 11) (param i32 i32) (result i32)
+  (func (type 10) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3134,7 +3110,6 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + r#"  (type (func))
   (type (func (param i32)))
-  (type (func))
   (type (func (param i32) (result i32)))
   (type (func (param i32)))
   (type (func (param i32 i32)))
@@ -3143,12 +3118,12 @@ pub(crate) mod tests {
   (type (func (param f64 i32)))
   (type (func (param i32)))
   (type (func (param i32 i32) (result i32)))
-  (import "codillon_debug" "record_step" (func (type 3)))
-  (import "codillon_debug" "record_invalid" (func (type 4)))
-  (import "codillon_debug" "record_i32" (func (type 5)))
-  (import "codillon_debug" "record_f32" (func (type 6)))
-  (import "codillon_debug" "record_i64" (func (type 7)))
-  (import "codillon_debug" "record_f64" (func (type 8)))
+  (import "codillon_debug" "record_step" (func (type 2)))
+  (import "codillon_debug" "record_invalid" (func (type 3)))
+  (import "codillon_debug" "record_i32" (func (type 4)))
+  (import "codillon_debug" "record_f32" (func (type 5)))
+  (import "codillon_debug" "record_i64" (func (type 6)))
+  (import "codillon_debug" "record_f64" (func (type 7)))
   (export "main" (func 6))
   (func (type 0)
     i32.const 0
@@ -3170,7 +3145,7 @@ pub(crate) mod tests {
     i32.const 3
     call 7
   )
-  (func (type 9) (param i32)
+  (func (type 8) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -3178,7 +3153,7 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (type 10) (param i32 i32) (result i32)
+  (func (type 9) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3199,7 +3174,7 @@ pub(crate) mod tests {
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
-                + r#"  (import "codillon_debug" "func_placeholder" (func (type 1)))
+                + r#"  (import "codillon_debug" "func_placeholder" (func (type 0)))
   (export "main" (func 7))
   (func (type 0)
     i32.const 1
@@ -3400,7 +3375,7 @@ pub(crate) mod tests {
                     .invalid
                     .as_ref()
                     .expect("nonexistent component name should be invalid"),
-                "function ‘not_point’ not found in module draw"
+                "field ‘not_point’ not found in module draw"
             );
         }
 
@@ -3530,14 +3505,14 @@ pub(crate) mod tests {
             editor.push_line("(import \"listen\" \"listen_memory\" (memory 2))");
             let _ = test_editor_flow(&mut editor)?;
             assert_eq!(
-                editor.lines[0].info.invalid.as_deref(),
-                Some("expected (global i32)"),
-                "num_samples with wrong mutability should be invalid"
+                editor.lines[0].info.kind,
+                LineKind::Malformed("expected (global i32)".to_string()),
+                "num_samples with wrong mutability should be rejected syntactically"
             );
             assert_eq!(
-                editor.lines[1].info.invalid.as_deref(),
-                Some("expected (memory 1)"),
-                "listen_memory with wrong size should be invalid"
+                editor.lines[1].info.kind,
+                LineKind::Malformed("expected (memory 1)".to_string()),
+                "listen_memory with wrong size should be rejected syntactically"
             );
         }
 
