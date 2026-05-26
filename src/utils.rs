@@ -223,14 +223,13 @@ impl<'a> From<Aligned<Operator<'a>>> for Aligned<GeneralOperator<'a>> {
 
 const DUMMY_OFFSET: usize = 1; // no need to track offsets, but validator has safety checks against 0
 
-// current features (notable exceptions: SIMD, GC, function references, exceptions)
+// current features (notable exceptions: SIMD, GC, function references, exceptions, memory64)
 const CODILLON_WASM_FEATURES: WasmFeatures = WasmFeatures::WASM1
     .union(WasmFeatures::BULK_MEMORY)
     .union(WasmFeatures::SIGN_EXTENSION)
     .union(WasmFeatures::SATURATING_FLOAT_TO_INT)
     .union(WasmFeatures::MULTI_VALUE)
     .union(WasmFeatures::CUSTOM_PAGE_SIZES)
-    .union(WasmFeatures::MEMORY64)
     .union(WasmFeatures::MULTI_MEMORY)
     .union(WasmFeatures::TAIL_CALL);
 
@@ -2359,7 +2358,7 @@ pub(crate) mod tests {
     fn test_parse_memory_section() -> Result<()> {
         let mut mem_exists = false;
         let test_mem = wasmparser::MemoryType {
-            memory64: true,
+            memory64: false,
             shared: false,
             initial: 3,
             maximum: Some(5),
