@@ -785,12 +785,10 @@ impl Editor {
             self.version += 1;
             self.execute(instrumented_binary, self.version);
             self.previous_instrumented_binary_hash = instrumented_binary_hash;
+        } else if step_count() > 0 {
+            self.update_live_info(step_count(), None, false);
         } else {
-            if step_count() > 0 {
-                self.update_live_info(step_count(), None, false);
-            } else {
-                self.image_mut().set_arrow_location(false, None);
-            }
+            self.image_mut().set_arrow_location(false, None);
         }
 
         self.schedule_save(); // schedule save to local storage
