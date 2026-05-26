@@ -7,6 +7,7 @@ use crate::symbolic::{
 };
 use anyhow::Result;
 use std::collections::HashSet;
+use wast::core::{Limits, MemoryType};
 use wast::{
     Error,
     core::{
@@ -218,7 +219,11 @@ impl<'a> Parse<'a> for ModulePart {
                                         kind:
                                             wast::core::ItemKind::Func { .. }
                                             | wast::core::ItemKind::Global(_)
-                                            | wast::core::ItemKind::Memory(_),
+                                            | wast::core::ItemKind::Memory(MemoryType {
+                                                shared: false,
+                                                limits: Limits { is64: false, .. },
+                                                ..
+                                            }),
                                         ..
                                     },
                                 ..
@@ -261,10 +266,28 @@ impl<'a> Parse<'a> for ModulePart {
         } else if parser.peek2::<kw::memory>()? {
             parser.parens(|p| match p.parse::<Memory<'a>>()? {
                 Memory {
-                    kind: wast::core::MemoryKind::Import { .. },
+                    kind:
+                        wast::core::MemoryKind::Import {
+                            ty:
+                                MemoryType {
+                                    shared: false,
+                                    limits: Limits { is64: false, .. },
+                                    ..
+                                },
+                            ..
+                        },
                     ..
                 } => Ok(ModulePart::Import),
-                _ => Ok(ModulePart::Memory),
+                Memory {
+                    kind:
+                        wast::core::MemoryKind::Normal(MemoryType {
+                            shared: false,
+                            limits: Limits { is64: false, .. },
+                            ..
+                        }),
+                    ..
+                } => Ok(ModulePart::Memory),
+                _ => Err(parser.error("unsupported memory kind")),
             })
         } else if parser.peek2::<kw::table>()? {
             parser.parens(|p| match p.parse::<Table<'a>>()? {
