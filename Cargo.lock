@@ -265,6 +265,7 @@ dependencies = [
  "palette",
  "pretty_assertions",
  "regex",
+ "smallvec",
  "str_indices",
  "thousands",
  "wasm-bindgen",

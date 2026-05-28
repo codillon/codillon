@@ -16,6 +16,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
 use regex::Regex;
+use smallvec::SmallVec;
 use std::cell::Cell;
 use thousands::{Separable, SeparatorPolicy};
 use wasm_bindgen::{JsCast, prelude::*};
@@ -204,17 +205,17 @@ fn error_string() -> Option<String> {
 #[derive(Default, Debug)]
 struct ExecutionStep {
     line_num: u32,
-    slot_assignments: Vec<(u32, WasmValue)>, // slot idx, value
-    graphics_ops: Vec<Action>,               // XXX todo: memory
-                                             // XXX todo: clear any func/frame on entry
-                                             // XXX todo: save any func on call/call_indirect, restore after
+    slot_assignments: SmallVec<[(u32, WasmValue); 1]>, // slot idx, value (SmallVec stores in-line if <=1 result)
+    graphics_op: Option<Action>,                       // XXX todo: memory
+                                                       // XXX todo: clear any func/frame on entry
+                                                       // XXX todo: save any func on call/call_indirect, restore after
 }
 
 impl ExecutionStep {
     fn reset(&mut self) {
         self.line_num = 0;
         self.slot_assignments.clear();
-        self.graphics_ops.clear();
+        self.graphics_op = None;
     }
 }
 
@@ -251,7 +252,7 @@ impl ExecutionState {
                 for (slot_idx, value) in &s.slot_assignments {
                     self.slots[*slot_idx as usize] = Some(*value);
                 }
-                canvas.render(&s.graphics_ops);
+                canvas.render(&s.graphics_op);
             });
         }
         self.step = target_step;
@@ -339,27 +340,34 @@ fn make_imports() -> Result<Object, JsValue> {
 }
 
 fn create_graphics_helpers(draw: &Object) {
+    fn set_op(graphics: &mut Option<Action>, act: Action) {
+        debug_assert!(graphics.is_none());
+        *graphics = Some(act);
+    }
+
     let draw_point = Closure::wrap(Box::new(move |x: f64, y: f64| {
-        with_current_step_mut(|step| step.graphics_ops.push(Action::Point(x, y)))
+        with_current_step_mut(|step| set_op(&mut step.graphics_op, Action::Point(x, y)))
     }) as Box<dyn Fn(f64, f64)>);
     register_closure(draw, "point", draw_point);
     let clear_canvas = Closure::wrap(Box::new(move || {
-        with_current_step_mut(|step| step.graphics_ops.push(Action::Clear))
+        with_current_step_mut(|step| set_op(&mut step.graphics_op, Action::Clear))
     }) as Box<dyn Fn()>);
     register_closure(draw, "clear", clear_canvas);
     let set_color = Closure::wrap(Box::new(move |r: i32, g: i32, b: i32| {
-        with_current_step_mut(|step| step.graphics_ops.push(Action::Color(r, g, b)))
+        with_current_step_mut(|step| set_op(&mut step.graphics_op, Action::Color(r, g, b)))
     }) as Box<dyn Fn(i32, i32, i32)>);
     register_closure(draw, "set_color", set_color);
     let set_extent = Closure::wrap(Box::new(move |xmin: f64, xmax: f64, ymin: f64, ymax: f64| {
         with_current_step_mut(|step| {
-            step.graphics_ops
-                .push(Action::Extent(xmin, xmax, ymin, ymax))
+            set_op(
+                &mut step.graphics_op,
+                Action::Extent(xmin, xmax, ymin, ymax),
+            )
         })
     }) as Box<dyn Fn(f64, f64, f64, f64)>);
     register_closure(draw, "set_extent", set_extent);
     let set_radius = Closure::wrap(Box::new(move |radius: f64| {
-        with_current_step_mut(|step| step.graphics_ops.push(Action::Radius(radius)))
+        with_current_step_mut(|step| set_op(&mut step.graphics_op, Action::Radius(radius)))
     }) as Box<dyn Fn(f64)>);
     register_closure(draw, "set_radius", set_radius);
 }
