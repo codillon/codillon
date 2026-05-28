@@ -48,6 +48,39 @@ div.textentry:focus {
 
 .line {
     color: gray;
+    position: relative;
+}
+
+.line button {
+    display: none;
+}
+
+.line button.play::before {
+    color: #008105;
+    content: "\25B6";
+}
+
+.line button.stop::before {
+    color: darkred;
+    content: "\25FC";
+}
+
+.line button.run-button {
+    display: block;
+    position: absolute;
+    top: 5px;
+    left: 20px;
+    height: 25px;
+    width: 25px;
+    margin: 10px;
+    padding: 0;
+    background-color: #fff;
+    border: 1px solid darkred;
+    cursor: pointer;
+}
+
+.line button.run-button:active {
+    transform: scale(.9);
 }
 
 .meta-line {
