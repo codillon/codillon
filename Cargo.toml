@@ -25,6 +25,7 @@ regex = "1.12.3"
 humantime = "2.3.0"
 palette = "0.7.6"
 thousands = "0.2.0"
+smallvec = "1.15.1"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

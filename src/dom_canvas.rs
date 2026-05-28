@@ -37,20 +37,18 @@ impl DomCanvas {
     }
 
     pub fn reset(&mut self) {
-        self.render(&[
-            Action::Clear,
-            Action::Color(0, 0, 0),
-            Action::Radius(3.0),
-            Action::Extent(-1.0, 1.0, -1.0, 1.0),
-        ]);
+        self.render(&Some(Action::Clear));
+        self.render(&Some(Action::Color(0, 0, 0)));
+        self.render(&Some(Action::Radius(3.0)));
+        self.render(&Some(Action::Extent(-1.0, 1.0, -1.0, 1.0)));
     }
 
-    pub fn render(&mut self, actions: &[Action]) {
+    pub fn render(&mut self, action: &Option<Action>) {
         const TAU: f64 = std::f64::consts::PI * 2.0;
         let mut extent = self.extent;
         let mut point_radius = self.point_radius;
         use Action::*;
-        for action in actions {
+        if let Some(action) = action {
             match *action {
                 Clear => self.context.clear_rect(0.0, 0.0, WIDTH, HEIGHT),
                 Point(x, y) => {
