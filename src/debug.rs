@@ -21,7 +21,7 @@ use std::cell::Cell;
 use thousands::{Separable, SeparatorPolicy};
 use wasm_bindgen::{JsCast, prelude::*};
 
-const MAX_STEP_COUNT: usize = 100_000;
+pub const MAX_STEP_COUNT: usize = 100_000;
 
 // Debug state stored in Wasm memory
 thread_local! {
