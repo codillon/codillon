@@ -11,7 +11,7 @@
 
 use crate::{
     dom_canvas::{Action, DomCanvas},
-    utils::FmtError,
+    utils::{FmtError, MemoryOp, StaticMemoryAccess},
 };
 use anyhow::{Context, Result, bail};
 use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
@@ -31,7 +31,12 @@ thread_local! {
     static STEPS: Box<[CodillonCell<ExecutionStep>]> = (0..MAX_STEP_COUNT)
                 .map(|_| CodillonCell::new(ExecutionStep::default()))
                 .collect();
+    static MEMORY_OPS: CodillonCell<Vec<StaticMemoryAccess>> = CodillonCell::new(Vec::new());
     static INSTRUMENTATION_IMPORTS: Object = make_imports().expect("instrumentation");
+}
+
+pub fn set_memory_ops(ops: Vec<StaticMemoryAccess>) {
+    MEMORY_OPS.with(|cell| cell.set(ops));
 }
 
 // When a user Wasm module gets close to stack exhaustion, the browser can trap at any point
@@ -203,12 +208,6 @@ fn error_string() -> Option<String> {
 }
 
 #[derive(Debug, Copy, Clone)]
-pub enum MemoryOp {
-    Load,
-    Store,
-}
-
-#[derive(Debug, Copy, Clone)]
 pub struct MemoryAccess {
     pub op: MemoryOp,
     pub mem_idx: u32,     // memory index
@@ -222,9 +221,9 @@ struct ExecutionStep {
     line_num: u32,
     slot_assignments: SmallVec<[(u32, WasmValue); 1]>, // slot idx, value (SmallVec stores in-line if <=1 result)
     graphics_op: Option<Action>,
-    memory_access: Option<MemoryAccess>,
-    // XXX todo: clear any func/frame on entry
-    // XXX todo: save any func on call/call_indirect, restore after
+    memory_access: Option<u32>, // index into MEMORY_OPS
+                                // XXX todo: clear any func/frame on entry
+                                // XXX todo: save any func on call/call_indirect, restore after
 }
 
 impl ExecutionStep {
@@ -241,7 +240,6 @@ pub struct ExecutionState {
     pub step: usize,
     pub slots: Vec<Option<WasmValue>>,
     pub status: Option<(usize, TerminationType, Option<String>)>,
-    pub memory_access: Option<MemoryAccess>,
 }
 
 impl ExecutionState {
@@ -283,17 +281,6 @@ impl ExecutionState {
             },
             error_string(),
         ));
-
-        self.memory_access = with_completed_step(target_step, |s| s.memory_access);
-        if let Some(ma) = &self.memory_access {
-            web_sys::console::log_1(
-                &format!(
-                    "{:?} mem[{}] addr={} bytes={} value={:?}",
-                    ma.op, ma.mem_idx, ma.addr, ma.byte_count, ma.value
-                )
-                .into(),
-            );
-        }
     }
 }
 
@@ -401,34 +388,8 @@ fn create_graphics_helpers(draw: &Object) {
     register_closure(draw, "set_radius", set_radius);
 }
 
-fn record_memory_access(
-    is_load: i32,
-    mem_idx: u32,
-    addr: u64,
-    byte_count: u8,
-    value_bits: i64,
-    is_float: i32,
-) {
-    let value = match (byte_count, is_float) {
-        (1 | 2 | 4, 0) => WasmValue::I32(value_bits as i32),
-        (8, 0) => WasmValue::I64(value_bits),
-        (4, 1) => WasmValue::F32(f32::from_bits(value_bits as u32)),
-        (8, 1) => WasmValue::F64(f64::from_bits(value_bits as u64)),
-        _ => unreachable!(),
-    };
-    with_current_step_mut(|step| {
-        step.memory_access = Some(MemoryAccess {
-            op: if is_load != 0 {
-                MemoryOp::Load
-            } else {
-                MemoryOp::Store
-            },
-            mem_idx,
-            addr,
-            byte_count,
-            value,
-        });
-    });
+fn record_memory_access(index: u32) {
+    with_current_step_mut(|step| step.memory_access = Some(index));
 }
 
 fn create_closure_record_operations(obj: &Object) {
@@ -455,23 +416,9 @@ fn create_closure_record_operations(obj: &Object) {
     );
     register_closure(obj, "record_f64", record_f64);
 
-    let record_memory = Closure::wrap(Box::new(
-        move |is_load: i32,
-              mem_idx: u32,
-              addr: i64,
-              byte_count: i32,
-              value_bits: i64,
-              is_float: i32| {
-            record_memory_access(
-                is_load,
-                mem_idx,
-                addr as u64,
-                byte_count as u8,
-                value_bits,
-                is_float,
-            )
-        },
-    ) as Box<dyn Fn(i32, u32, i64, i32, i64, i32)>);
+    let record_memory = Closure::wrap(
+        Box::new(move |index: i32| record_memory_access(index as u32)) as Box<dyn Fn(i32)>,
+    );
     register_closure(obj, "record_memory", record_memory);
 }
 
