@@ -11,7 +11,7 @@
 
 use crate::{
     dom_canvas::{Action, DomCanvas},
-    utils::FmtError,
+    utils::{FmtError, StaticMemoryAccess},
 };
 use anyhow::{Context, Result, bail};
 use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
@@ -206,9 +206,10 @@ fn error_string() -> Option<String> {
 struct ExecutionStep {
     line_num: u32,
     slot_assignments: SmallVec<[(u32, WasmValue); 1]>, // slot idx, value (SmallVec stores in-line if <=1 result)
-    graphics_op: Option<Action>,                       // XXX todo: memory
-                                                       // XXX todo: clear any func/frame on entry
-                                                       // XXX todo: save any func on call/call_indirect, restore after
+    graphics_op: Option<Action>,
+    memory_access: Option<usize>, // index into static memory lookup table
+                                  // XXX todo: clear any func/frame on entry
+                                  // XXX todo: save any func on call/call_indirect, restore after
 }
 
 impl ExecutionStep {
@@ -216,6 +217,7 @@ impl ExecutionStep {
         self.line_num = 0;
         self.slot_assignments.clear();
         self.graphics_op = None;
+        self.memory_access = None;
     }
 }
 
@@ -224,6 +226,7 @@ pub struct ExecutionState {
     pub step: usize,
     pub slots: Vec<Option<WasmValue>>,
     pub status: Option<(usize, TerminationType, Option<String>)>,
+    pub memory_ops: Vec<StaticMemoryAccess>,
 }
 
 impl ExecutionState {
@@ -265,6 +268,34 @@ impl ExecutionState {
             },
             error_string(),
         ));
+
+        // Reconstruct memory access
+        // TODO remove log message when it's visualized
+        if let Some(idx) = with_completed_step(target_step, |s| s.memory_access)
+            && let Some(mo) = self.memory_ops.get(idx)
+        {
+            let addr_operand = self.slots.get(mo.addr_slot).and_then(|s| *s).and_then(|v| {
+                if let WasmValue::I32(a) = v {
+                    Some(a as u32 as u64)
+                } else {
+                    None
+                }
+            });
+            let value = self.slots.get(mo.value_slot).and_then(|s| *s);
+            if let (Some(addr_operand), Some(value)) = (addr_operand, value) {
+                web_sys::console::log_1(
+                    &format!(
+                        "{:?} mem[{}]: addr={} ({} bytes) {:?}",
+                        mo.op,
+                        mo.mem_idx,
+                        addr_operand + mo.offset,
+                        mo.byte_count,
+                        value
+                    )
+                    .into(),
+                );
+            }
+        }
     }
 }
 
@@ -372,6 +403,10 @@ fn create_graphics_helpers(draw: &Object) {
     register_closure(draw, "set_radius", set_radius);
 }
 
+fn record_memory_access(index: usize) {
+    with_current_step_mut(|step| step.memory_access = Some(index));
+}
+
 fn create_closure_record_operations(obj: &Object) {
     let record = |value: WasmValue, slot: u32| {
         with_current_step_mut(|step| step.slot_assignments.push((slot, value)))
@@ -395,6 +430,12 @@ fn create_closure_record_operations(obj: &Object) {
         Box::new(move |value: f64, slot: u32| record(value.into(), slot)) as Box<dyn Fn(f64, u32)>,
     );
     register_closure(obj, "record_f64", record_f64);
+
+    let record_memory =
+        Closure::wrap(
+            Box::new(move |index: i32| record_memory_access(index as usize)) as Box<dyn Fn(i32)>,
+        );
+    register_closure(obj, "record_memory", record_memory);
 }
 
 pub async fn run_binary(binary: &[u8]) -> Result<()> {

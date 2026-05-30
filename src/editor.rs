@@ -779,7 +779,10 @@ impl Editor {
         self.update_displayed_types(&validized, &types)?;
 
         // instrumentation
-        let instrumented_binary = &validized.build_instrumented_binary(&types)?;
+        let (instrumented_binary_owned, memory_ops) =
+            validized.build_instrumented_binary(&types)?;
+        let instrumented_binary = &instrumented_binary_owned;
+        self.execution_state.memory_ops = memory_ops;
         let instrumented_binary_hash = Self::hash_binary(instrumented_binary);
         if self.previous_instrumented_binary_hash != instrumented_binary_hash {
             self.version += 1;

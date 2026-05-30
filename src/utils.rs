@@ -35,6 +35,7 @@ enum InstrImports {
     RecordF32,
     RecordI64,
     RecordF64,
+    RecordMemory,
 }
 impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
@@ -44,6 +45,7 @@ impl InstrImports {
         ("record_f32", 3),
         ("record_i64", 4),
         ("record_f64", 5),
+        ("record_memory", 6),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: i32 -> i32
@@ -58,7 +60,26 @@ impl InstrImports {
         (&[EncoderValType::I64, EncoderValType::I32], &[]),
         // 5: (f64, i32) -> ()
         (&[EncoderValType::F64, EncoderValType::I32], &[]),
+        // 6: (mem_op index: i32) -> ()
+        (&[EncoderValType::I32], &[]),
     ];
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum MemoryOp {
+    Load,
+    Store,
+}
+
+// Compile-time descriptor for a memory instruction
+#[derive(Debug, Copy, Clone)]
+pub struct StaticMemoryAccess {
+    pub op: MemoryOp,
+    pub mem_idx: u32,      // memory index
+    pub addr_slot: usize,  // slot idx for address
+    pub offset: u64,       // concrete addr = slots[addr_slot] + offset
+    pub byte_count: u8,    // can be 1, 2, 4, or 8
+    pub value_slot: usize, // slot idx for value
 }
 
 #[derive(PartialEq, Eq)]
@@ -964,9 +985,13 @@ impl<'a> ValidModule<'a> {
         Ok(ret)
     }
 
-    pub fn build_instrumented_binary(self, types: &TypedModule) -> Result<Vec<u8>> {
+    pub fn build_instrumented_binary(
+        self,
+        types: &TypedModule,
+    ) -> Result<(Vec<u8>, Vec<StaticMemoryAccess>)> {
         use wasm_encoder::*;
         let mut module = Module::default();
+        let mut memory_ops: Vec<StaticMemoryAccess> = Vec::new();
 
         /* Make import section (with instrumentation functions prepended) */
         let (import_section, num_func_imports) = {
@@ -1104,10 +1129,11 @@ impl<'a> ValidModule<'a> {
             let mut bounds_check_to_func_idx = IndexMap::new();
             for func in &self.functions {
                 for op in &func.operators {
-                    if let Some((mem_idx, _, _, ty)) = bounds_check_info(&op.inner.op)
+                    if let Some((mem_idx, _, _, is_load, val_type)) = memory_op_info(&op.inner.op)
                         && shadow_memory_indices.contains(&(mem_idx as usize))
-                        && !bounds_check_to_func_idx.contains_key(&ty)
+                        && !bounds_check_to_func_idx.contains_key(&(!is_load).then_some(val_type))
                     {
+                        let ty = (!is_load).then_some(val_type);
                         let (params, results) = match ty {
                             None => (
                                 vec![EncoderValType::I32, EncoderValType::I64], // offset, limit
@@ -1206,7 +1232,7 @@ impl<'a> ValidModule<'a> {
 
             // First in code section: the original functions
             for func_idx in 0..self.functions.len() {
-                let function = self.build_function(
+                let (function, func_mem_ops) = self.build_function(
                     func_idx,
                     types,
                     &result_types_to_func_idx,
@@ -1215,6 +1241,7 @@ impl<'a> ValidModule<'a> {
                     &bounds_check_to_func_idx,
                 )?;
                 code_section.function(&function);
+                memory_ops.extend(func_mem_ops);
             }
 
             // Next in code section: the "step" function.
@@ -1249,7 +1276,7 @@ impl<'a> ValidModule<'a> {
         /* XXX data section: skip for now */
 
         let wasm = module.finish();
-        Ok(wasm)
+        Ok((wasm, memory_ops))
     }
 
     fn build_function(
@@ -1260,11 +1287,12 @@ impl<'a> ValidModule<'a> {
         step_function_idx: u32,
         shadow_memory_indices: &[usize],
         bounds_check_to_func_idx: &IndexMap<Option<EncoderValType>, u32>,
-    ) -> Result<wasm_encoder::Function> {
+    ) -> Result<(wasm_encoder::Function, Vec<StaticMemoryAccess>)> {
         use wasm_encoder::Instruction::*;
         let orig_function = &self.functions[func_idx];
         let typed_function = &types.funcs[func_idx];
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32; // also idx of step function
+        let mut memory_ops: Vec<StaticMemoryAccess> = Vec::new();
         let mut new_function = wasm_encoder::Function::new_with_locals_types(
             orig_function
                 .locals
@@ -1308,6 +1336,38 @@ impl<'a> ValidModule<'a> {
             f.instruction(&I32Const((*slot_idx).try_into().expect("slot -> i32"))); // slot
             f.instruction(&Call(rec_function as u32));
             Ok(())
+        };
+
+        let mut memory_record = |f: &mut wasm_encoder::Function,
+                                 mem_idx: u32,
+                                 offset: u64,
+                                 byte_count: u8,
+                                 is_load: bool,
+                                 op_type: &OperatorType| {
+            let input0 = op_type.inputs.first().and_then(|s| s.as_ref());
+            let input1 = op_type.inputs.get(1).and_then(|s| s.as_ref());
+            let (addr_slot, value_slot) = match (is_load, input0, input1) {
+                (true, Some(SlotUse(a)), _) => (*a, op_type.outputs[0].0),
+                (false, Some(SlotUse(a)), Some(SlotUse(v))) => (*a, *v),
+                _ => return, /* don't record memory footprint in unreachable code */
+            };
+            // Build static lookup table for memory ops
+            let index = memory_ops.len() as i32;
+            memory_ops.push(StaticMemoryAccess {
+                op: if is_load {
+                    MemoryOp::Load
+                } else {
+                    MemoryOp::Store
+                },
+                mem_idx,
+                addr_slot,
+                offset,
+                byte_count,
+                value_slot,
+            });
+            // Wasm instr at runtime: record memory op # just happened
+            f.instruction(&I32Const(index));
+            f.instruction(&Call(InstrImports::RecordMemory as u32));
         };
 
         let step_debug = |f: &mut wasm_encoder::Function, line_number: usize| {
@@ -1373,8 +1433,8 @@ impl<'a> ValidModule<'a> {
             }
 
             // bounds checking for load and store operations for memories with pagesize 1
-            if let Some((mem_idx, offset, width, ty)) =
-                bounds_check_info(&codillon_operator.inner.op)
+            if let Some((mem_idx, offset, width, is_load, val_type)) =
+                memory_op_info(&codillon_operator.inner.op)
                 && let Some(shadow_pos) = shadow_memory_indices
                     .iter()
                     .position(|&i| i == mem_idx as usize)
@@ -1384,7 +1444,9 @@ impl<'a> ValidModule<'a> {
                 new_function.instruction(&GlobalGet(shadow_global_idx));
                 new_function.instruction(&I64Const(total_offset));
                 new_function.instruction(&I64Sub); // limit = size - (offset + width)
-                new_function.instruction(&Call(bounds_check_to_func_idx[&ty]));
+                new_function.instruction(&Call(
+                    bounds_check_to_func_idx[&(!is_load).then_some(val_type)],
+                ));
             }
 
             if i + 1 == orig_function.operators.len() {
@@ -1419,7 +1481,7 @@ impl<'a> ValidModule<'a> {
             // record result operands
             transparent_record_results(&mut new_function, &op_type.outputs);
 
-            // did this operator change a global or local (XXX or memory?)
+            // did this operator change a global, local, or memory
             match op {
                 GlobalSet(idx) => {
                     new_function.instruction(&GlobalGet(idx));
@@ -1435,10 +1497,16 @@ impl<'a> ValidModule<'a> {
                         .expect("valid local idx");
                     primitive_record(&mut new_function, local_type)?;
                 }
-                _ => {}
+                _ => {
+                    if let Some((mem_idx, offset, width, is_load, _)) =
+                        memory_op_info(&codillon_operator.inner.op)
+                    {
+                        memory_record(&mut new_function, mem_idx, offset, width, is_load, op_type);
+                    }
+                }
             }
         }
-        Ok(new_function)
+        Ok((new_function, memory_ops))
     }
 
     fn dynamically_generate_function(
@@ -1502,30 +1570,44 @@ impl<'a> ValidModule<'a> {
     }
 }
 
-fn bounds_check_info(op: &Operator<'_>) -> Option<(u32, u64, i32, Option<EncoderValType>)> {
+/// Returns (mem_idx, offset, width, is_load, val_type) for a load/store instruction
+fn memory_op_info(op: &Operator<'_>) -> Option<(u32, u64, u8, bool, EncoderValType)> {
     use Operator::*;
     match op {
-        I32Load8S { memarg }
-        | I32Load8U { memarg }
-        | I64Load8S { memarg }
-        | I64Load8U { memarg } => Some((memarg.memory, memarg.offset, 1, None)),
-        I32Load16S { memarg }
-        | I32Load16U { memarg }
-        | I64Load16S { memarg }
-        | I64Load16U { memarg } => Some((memarg.memory, memarg.offset, 2, None)),
-        I32Load { memarg } | F32Load { memarg } | I64Load32S { memarg } | I64Load32U { memarg } => {
-            Some((memarg.memory, memarg.offset, 4, None))
+        I32Load8S { memarg } | I32Load8U { memarg } => {
+            Some((memarg.memory, memarg.offset, 1, true, EncoderValType::I32))
         }
-        I64Load { memarg } | F64Load { memarg } => Some((memarg.memory, memarg.offset, 8, None)),
-        I32Store8 { memarg } => Some((memarg.memory, memarg.offset, 1, Some(EncoderValType::I32))),
-        I32Store16 { memarg } => Some((memarg.memory, memarg.offset, 2, Some(EncoderValType::I32))),
-        I32Store { memarg } => Some((memarg.memory, memarg.offset, 4, Some(EncoderValType::I32))),
-        I64Store8 { memarg } => Some((memarg.memory, memarg.offset, 1, Some(EncoderValType::I64))),
-        I64Store16 { memarg } => Some((memarg.memory, memarg.offset, 2, Some(EncoderValType::I64))),
-        I64Store32 { memarg } => Some((memarg.memory, memarg.offset, 4, Some(EncoderValType::I64))),
-        I64Store { memarg } => Some((memarg.memory, memarg.offset, 8, Some(EncoderValType::I64))),
-        F32Store { memarg } => Some((memarg.memory, memarg.offset, 4, Some(EncoderValType::F32))),
-        F64Store { memarg } => Some((memarg.memory, memarg.offset, 8, Some(EncoderValType::F64))),
+        I64Load8S { memarg } | I64Load8U { memarg } => {
+            Some((memarg.memory, memarg.offset, 1, true, EncoderValType::I64))
+        }
+        I32Load16S { memarg } | I32Load16U { memarg } => {
+            Some((memarg.memory, memarg.offset, 2, true, EncoderValType::I32))
+        }
+        I64Load16S { memarg } | I64Load16U { memarg } => {
+            Some((memarg.memory, memarg.offset, 2, true, EncoderValType::I64))
+        }
+        I32Load { memarg } => Some((memarg.memory, memarg.offset, 4, true, EncoderValType::I32)),
+        F32Load { memarg } => Some((memarg.memory, memarg.offset, 4, true, EncoderValType::F32)),
+        I64Load32S { memarg } | I64Load32U { memarg } => {
+            Some((memarg.memory, memarg.offset, 4, true, EncoderValType::I64))
+        }
+        I64Load { memarg } => Some((memarg.memory, memarg.offset, 8, true, EncoderValType::I64)),
+        F64Load { memarg } => Some((memarg.memory, memarg.offset, 8, true, EncoderValType::F64)),
+        I32Store8 { memarg } => Some((memarg.memory, memarg.offset, 1, false, EncoderValType::I32)),
+        I64Store8 { memarg } => Some((memarg.memory, memarg.offset, 1, false, EncoderValType::I64)),
+        I32Store16 { memarg } => {
+            Some((memarg.memory, memarg.offset, 2, false, EncoderValType::I32))
+        }
+        I64Store16 { memarg } => {
+            Some((memarg.memory, memarg.offset, 2, false, EncoderValType::I64))
+        }
+        I32Store { memarg } => Some((memarg.memory, memarg.offset, 4, false, EncoderValType::I32)),
+        F32Store { memarg } => Some((memarg.memory, memarg.offset, 4, false, EncoderValType::F32)),
+        I64Store32 { memarg } => {
+            Some((memarg.memory, memarg.offset, 4, false, EncoderValType::I64))
+        }
+        I64Store { memarg } => Some((memarg.memory, memarg.offset, 8, false, EncoderValType::I64)),
+        F64Store { memarg } => Some((memarg.memory, memarg.offset, 8, false, EncoderValType::F64)),
         _ => None,
     }
 }
@@ -2492,7 +2574,7 @@ pub(crate) mod tests {
     fn test_parse_memory_section() -> Result<()> {
         fn test_mem(valid_module: ValidModule, mem_value: wasmparser::MemoryType) -> Result<()> {
             let mut mem_exists = false;
-            let wasm_bin = valid_module.build_instrumented_binary(&TypedModule {
+            let (wasm_bin, _) = valid_module.build_instrumented_binary(&TypedModule {
                 slots: vec![],
                 globals: vec![],
                 funcs: vec![],
@@ -2655,7 +2737,7 @@ pub(crate) mod tests {
 
         indent_and_frame(editor, &validized, &types);
 
-        let runnable = validized
+        let (runnable, _) = validized
             .build_instrumented_binary(&types)
             .context("build_executable_binary")?;
 
@@ -2678,6 +2760,7 @@ pub(crate) mod tests {
   (type (func (param i64 i32)))
   (type (func (param f64 i32)))
   (type (func (param i32)))
+  (type (func (param i32)))
 "#;
     const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 1)))
   (import "codillon_debug" "record_invalid" (func (type 2)))
@@ -2685,12 +2768,13 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 4)))
   (import "codillon_debug" "record_i64" (func (type 5)))
   (import "codillon_debug" "record_f64" (func (type 6)))
+  (import "codillon_debug" "record_memory" (func (type 7)))
 "#;
 
-    const EXPECTED_MAIN: &str = r#"  (export "main" (func 6))
+    const EXPECTED_MAIN: &str = r#"  (export "main" (func 7))
 "#;
 
-    const EXPECTED_STEP: &str = r#"  (func (type 7) (param i32)
+    const EXPECTED_STEP: &str = r#"  (func (type 8) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -2699,7 +2783,7 @@ pub(crate) mod tests {
     end
   )
 "#;
-    const EXPECTED_RECORD_I32: &str = r#"  (func (type 8) (param i32 i32) (result i32)
+    const EXPECTED_RECORD_I32: &str = r#"  (func (type 9) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -2721,12 +2805,59 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 0
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
+            assert_eq!(expected, test_editor_flow(&mut editor)?);
+        }
+
+        // instrumentation for memory track
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 1)");
+            editor.push_line("(func");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.load");
+            editor.push_line("drop");
+            editor.push_line(")");
+            let expected = String::from("(module\n")
+                + EXPECTED_TYPES
+                + "  (type (func (param i32 i32) (result i32)))\n"
+                + EXPECTED_IMPORTS
+                + "  (memory 1)\n"
+                + EXPECTED_MAIN
+                + r#"  (func (type 0)
+    i32.const 1
+    call 8
+    i32.const 2
+    call 8
+    i32.const 0
+    i32.const 0
+    call 9
+    i32.const 3
+    call 8
+    i32.load
+    i32.const 1
+    call 9
+    i32.const 0
+    call 6
+    i32.const 4
+    call 8
+    drop
+    i32.const 5
+    call 8
+  )
+"# + EXPECTED_STEP
+                + r#"  (func (type 9) (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    call 2
+    local.get 0
+  )
+"# + ")\n";
             assert_eq!(expected, test_editor_flow(&mut editor)?);
         }
 
@@ -2740,9 +2871,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2759,9 +2890,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2778,9 +2909,9 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2799,20 +2930,20 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
-    i32.const 0
-    call 7
-    i64.const 17
+    call 8
     i32.const 0
     call 8
+    i64.const 17
+    i32.const 0
+    call 9
     i32.const 1
-    call 7
+    call 8
     drop
     i32.const 2
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
-                + r#"  (func (type 8) (param i64 i32) (result i64)
+                + r#"  (func (type 9) (param i64 i32) (result i64)
     local.get 0
     local.get 1
     call 4
@@ -2825,15 +2956,15 @@ pub(crate) mod tests {
 
         // well-formed block
         const JUST_BLOCK_END: &str = r#"    i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     block ;; label = @1
       i32.const 2
-      call 7
+      call 8
     end
     i32.const 3
-    call 7
+    call 8
   )
 "#;
         {
@@ -2886,25 +3017,25 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 137
     i32.const 0
-    call 8
+    call 9
     i32.const 2
-    call 7
+    call 8
     i32.const 2
     call 1
     unreachable
     i32.add
     i32.const 3
-    call 8
+    call 9
     i32.const 3
-    call 7
+    call 8
     drop
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + EXPECTED_RECORD_I32
@@ -2927,12 +3058,12 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 0)))
-  (export "main" (func 7))
+  (export "main" (func 8))
   (func (type 0)
     i32.const 6
-    call 8
+    call 9
     i32.const 6
-    call 8
+    call 9
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2977,21 +3108,21 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     block ;; label = @1
       i32.const 2
-      call 7
+      call 8
       loop ;; label = @2
         i32.const 4
-        call 7
+        call 8
       end
       i32.const 5
-      call 7
+      call 8
     end
     i32.const 6
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3010,15 +3141,15 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 1
     call 1
     unreachable
     nop
     i32.const 2
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3040,21 +3171,21 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 1
-    call 7
+    call 8
     i32.const 2
-    call 7
+    call 8
     i32.const 2
     call 1
     unreachable
     nop
     i32.const 3
-    call 7
+    call 8
     i32.const 3
     call 1
     unreachable
     drop
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3075,23 +3206,23 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 0
-    call 7
+    call 8
     loop ;; label = @1
       i32.const 1
-      call 7
+      call 8
       i32.const 5
       i32.const 0
-      call 8
+      call 9
       i32.const 2
-      call 7
+      call 8
       br 0 (;@1;)
       i32.const 3
-      call 7
+      call 8
     end
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + EXPECTED_RECORD_I32
@@ -3113,14 +3244,14 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 4
     i32.const 0
-    call 8
+    call 9
     i32.const 2
-    call 7
+    call 8
     i32.const 2
     call 1
     unreachable
@@ -3154,49 +3285,50 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 5)))
   (import "codillon_debug" "record_i64" (func (type 6)))
   (import "codillon_debug" "record_f64" (func (type 7)))
-  (export "main" (func 6))
+  (import "codillon_debug" "record_memory" (func (type 8)))
+  (export "main" (func 7))
   (func (type 0)
     i32.const 0
-    call 8
-    i32.const 1
-    call 8
-    call 7
-    i32.const 1
-    call 8
-    i32.const 0
+    call 9
     i32.const 1
     call 9
-    i32.const 2
     call 8
+    i32.const 1
+    call 9
+    i32.const 0
+    i32.const 1
+    call 10
+    i32.const 2
+    call 9
     i32.add
     i32.const 2
-    call 10
+    call 11
     i32.const 3
-    call 8
+    call 9
     i32.const 3
     call 1
     unreachable
   )
   (func (type 1) (result i32 i32)
     i32.const 4
-    call 8
+    call 9
     i32.const 5
-    call 8
+    call 9
     i32.const 9
     i32.const 3
-    call 10
-    i32.const 6
-    call 8
-    i32.const 10
-    i32.const 4
-    call 10
-    i32.const 7
-    call 8
-    i32.const 5
+    call 11
     i32.const 6
     call 9
+    i32.const 10
+    i32.const 4
+    call 11
+    i32.const 7
+    call 9
+    i32.const 5
+    i32.const 6
+    call 10
   )
-  (func (type 8) (param i32)
+  (func (type 9) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -3204,7 +3336,7 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (type 9) (param i32 i32 i32 i32) (result i32 i32)
+  (func (type 10) (param i32 i32 i32 i32) (result i32 i32)
     local.get 0
     local.get 2
     call 2
@@ -3214,7 +3346,7 @@ pub(crate) mod tests {
     local.get 0
     local.get 1
   )
-  (func (type 10) (param i32 i32) (result i32)
+  (func (type 11) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3256,9 +3388,9 @@ pub(crate) mod tests {
     i32.const 3
     call 5
     i32.const 0
-    call 7
+    call 8
     i32.const 4
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3284,28 +3416,29 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 5)))
   (import "codillon_debug" "record_i64" (func (type 6)))
   (import "codillon_debug" "record_f64" (func (type 7)))
-  (export "main" (func 6))
+  (import "codillon_debug" "record_memory" (func (type 8)))
+  (export "main" (func 7))
   (func (type 0)
     i32.const 0
-    call 7
+    call 8
     i32.const 1
-    call 7
+    call 8
     i32.const 1
     call 1
     unreachable
     block (type 1) (param i32) ;; label = @1
       i32.const 1
-      call 8
+      call 9
       i32.const 2
-      call 7
+      call 8
       i32.const 2
       call 1
       unreachable
     end
     i32.const 3
-    call 7
+    call 8
   )
-  (func (type 8) (param i32)
+  (func (type 9) (param i32)
     local.get 0
     call 0
     i32.eqz
@@ -3313,7 +3446,7 @@ pub(crate) mod tests {
       unreachable
     end
   )
-  (func (type 9) (param i32 i32) (result i32)
+  (func (type 10) (param i32 i32) (result i32)
     local.get 0
     local.get 1
     call 2
@@ -3339,17 +3472,17 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 0)))
-  (export "main" (func 7))
+  (export "main" (func 8))
   (func (type 0)
     i32.const 1
-    call 8
+    call 9
     i32.const 2
-    call 8
-    call 6
+    call 9
+    call 7
     i32.const 2
-    call 8
+    call 9
     i32.const 3
-    call 8
+    call 9
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3717,32 +3850,34 @@ pub(crate) mod tests {
 "# + EXPECTED_IMPORTS
                 + r#"  (memory 1)
   (global (mut i64) i64.const 11)
-  (export "main" (func 6))
+  (export "main" (func 7))
   (func (type 0) (result i32)
     i32.const 1
-    call 7
-    i32.const 3
-    call 7
-    i32.const 0
-    i32.const 0
     call 8
+    i32.const 3
+    call 8
+    i32.const 0
+    i32.const 0
+    call 9
     i32.const 4
-    call 7
+    call 8
     global.get 0
     i64.const 11
     i64.sub
-    call 9
+    call 10
     i32.load offset=7
     i32.const 1
-    call 8
+    call 9
+    i32.const 0
+    call 6
     i32.const 5
-    call 7
-    i32.const 2
     call 8
+    i32.const 2
+    call 9
   )
 "# + EXPECTED_STEP
                 + EXPECTED_RECORD_I32
-                + r#"  (func (type 9) (param i32 i64) (result i32)
+                + r#"  (func (type 10) (param i32 i64) (result i32)
     local.get 0
     i64.extend_i32_u
     local.get 1
@@ -3782,39 +3917,41 @@ pub(crate) mod tests {
 "# + EXPECTED_IMPORTS
                 + r#"  (memory 65536)
   (global (mut i64) i64.const 4294967295)
-  (export "main" (func 6))
+  (export "main" (func 7))
   (func (type 0)
     i32.const 1
-    call 7
+    call 8
     i32.const 2
-    call 7
+    call 8
     i32.const -10
     i32.const 0
-    call 8
+    call 9
     i32.const 3
-    call 7
+    call 8
     f64.const 0x1.cp+2 (;=7;)
     i32.const 1
-    call 9
+    call 10
     i32.const 4
-    call 7
+    call 8
     global.get 0
     i64.const 9
     i64.sub
-    call 10
+    call 11
     f64.store offset=1
+    i32.const 0
+    call 6
     i32.const 5
-    call 7
+    call 8
   )
 "# + EXPECTED_STEP
                 + EXPECTED_RECORD_I32
-                + r#"  (func (type 9) (param f64 i32) (result f64)
+                + r#"  (func (type 10) (param f64 i32) (result f64)
     local.get 0
     local.get 1
     call 5
     local.get 0
   )
-  (func (type 10) (param i32 f64 i64) (result i32 f64)
+  (func (type 11) (param i32 f64 i64) (result i32 f64)
     local.get 0
     i64.extend_i32_u
     local.get 2
