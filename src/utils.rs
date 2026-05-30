@@ -2759,7 +2759,7 @@ pub(crate) mod tests {
   (type (func (param f32 i32)))
   (type (func (param i64 i32)))
   (type (func (param f64 i32)))
-  (type (func (param i32 i32 i32 i64 i32 i32)))
+  (type (func (param i32)))
   (type (func (param i32)))
 "#;
     const EXPECTED_IMPORTS: &str = r#"  (import "codillon_debug" "record_step" (func (type 1)))
@@ -2842,12 +2842,7 @@ pub(crate) mod tests {
     i32.load
     i32.const 1
     call 9
-    i32.const 1
     i32.const 0
-    i32.const 0
-    i64.const 0
-    i32.const 4
-    i32.const 1
     call 6
     i32.const 4
     call 8
@@ -3873,12 +3868,7 @@ pub(crate) mod tests {
     i32.load offset=7
     i32.const 1
     call 9
-    i32.const 1
     i32.const 0
-    i32.const 0
-    i64.const 7
-    i32.const 4
-    i32.const 1
     call 6
     i32.const 5
     call 8
@@ -3949,11 +3939,6 @@ pub(crate) mod tests {
     call 11
     f64.store offset=1
     i32.const 0
-    i32.const 0
-    i32.const 0
-    i64.const 1
-    i32.const 8
-    i32.const 1
     call 6
     i32.const 5
     call 8
