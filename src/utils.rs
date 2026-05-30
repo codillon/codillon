@@ -75,11 +75,11 @@ pub enum MemoryOp {
 #[derive(Debug, Copy, Clone)]
 pub struct StaticMemoryAccess {
     pub op: MemoryOp,
-    pub mem_idx: u32,    // memory index
-    pub addr_slot: u32,  // slot idx for address
-    pub offset: u64,     // concrete addr = slots[addr_slot] + offset
-    pub byte_count: u8,  // can be 1, 2, 4, or 8
-    pub value_slot: u32, // slot idx for value
+    pub mem_idx: u32,      // memory index
+    pub addr_slot: usize,  // slot idx for address
+    pub offset: u64,       // concrete addr = slots[addr_slot] + offset
+    pub byte_count: u8,    // can be 1, 2, 4, or 8
+    pub value_slot: usize, // slot idx for value
 }
 
 #[derive(PartialEq, Eq)]
@@ -1347,8 +1347,8 @@ impl<'a> ValidModule<'a> {
             let input0 = op_type.inputs.first().and_then(|s| s.as_ref());
             let input1 = op_type.inputs.get(1).and_then(|s| s.as_ref());
             let (addr_slot, value_slot) = match (is_load, input0, input1) {
-                (true, Some(SlotUse(a)), _) => (*a as u32, op_type.outputs[0].0 as u32),
-                (false, Some(SlotUse(a)), Some(SlotUse(v))) => (*a as u32, *v as u32),
+                (true, Some(SlotUse(a)), _) => (*a, op_type.outputs[0].0),
+                (false, Some(SlotUse(a)), Some(SlotUse(v))) => (*a, *v),
                 _ => return, /* don't record memory footprint in unreachable code */
             };
             // Build static lookup table for memory ops

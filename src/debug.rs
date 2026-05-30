@@ -207,9 +207,9 @@ struct ExecutionStep {
     line_num: u32,
     slot_assignments: SmallVec<[(u32, WasmValue); 1]>, // slot idx, value (SmallVec stores in-line if <=1 result)
     graphics_op: Option<Action>,
-    memory_access: Option<u32>, // index into MEMORY_OPS
-                                // XXX todo: clear any func/frame on entry
-                                // XXX todo: save any func on call/call_indirect, restore after
+    memory_access: Option<usize>, // index into static memory lookup table
+                                  // XXX todo: clear any func/frame on entry
+                                  // XXX todo: save any func on call/call_indirect, restore after
 }
 
 impl ExecutionStep {
@@ -268,6 +268,34 @@ impl ExecutionState {
             },
             error_string(),
         ));
+
+        // Reconstruct memory access
+        // TODO remove log message when it's visualized
+        if let Some(idx) = with_completed_step(target_step, |s| s.memory_access)
+            && let Some(mo) = self.memory_ops.get(idx)
+        {
+            let addr_operand = self.slots.get(mo.addr_slot).and_then(|s| *s).and_then(|v| {
+                if let WasmValue::I32(a) = v {
+                    Some(a as u32 as u64)
+                } else {
+                    None
+                }
+            });
+            let value = self.slots.get(mo.value_slot).and_then(|s| *s);
+            if let (Some(addr_operand), Some(value)) = (addr_operand, value) {
+                web_sys::console::log_1(
+                    &format!(
+                        "{:?} mem[{}]: addr={} ({} bytes) {:?}",
+                        mo.op,
+                        mo.mem_idx,
+                        addr_operand + mo.offset,
+                        mo.byte_count,
+                        value
+                    )
+                    .into(),
+                );
+            }
+        }
     }
 }
 
@@ -375,7 +403,7 @@ fn create_graphics_helpers(draw: &Object) {
     register_closure(draw, "set_radius", set_radius);
 }
 
-fn record_memory_access(index: u32) {
+fn record_memory_access(index: usize) {
     with_current_step_mut(|step| step.memory_access = Some(index));
 }
 
@@ -403,9 +431,10 @@ fn create_closure_record_operations(obj: &Object) {
     );
     register_closure(obj, "record_f64", record_f64);
 
-    let record_memory = Closure::wrap(
-        Box::new(move |index: i32| record_memory_access(index as u32)) as Box<dyn Fn(i32)>,
-    );
+    let record_memory =
+        Closure::wrap(
+            Box::new(move |index: i32| record_memory_access(index as usize)) as Box<dyn Fn(i32)>,
+        );
     register_closure(obj, "record_memory", record_memory);
 }
 
