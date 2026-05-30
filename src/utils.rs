@@ -60,15 +60,15 @@ impl InstrImports {
         (&[EncoderValType::I64, EncoderValType::I32], &[]),
         // 5: (f64, i32) -> ()
         (&[EncoderValType::F64, EncoderValType::I32], &[]),
-        // 6: (is_load: i32, mem_idx: i32, addr_slot: i32, offset: i64,
-        //     byte_count: i32, value_slot: i32) -> ()
+        // 6: (is_load: i32, mem_idx: i32, addr: i64, byte_count: i32,
+        //     value_bits: i64, is_float: i32) -> ()
         (
             &[
                 EncoderValType::I32,
                 EncoderValType::I32,
-                EncoderValType::I32,
                 EncoderValType::I64,
                 EncoderValType::I32,
+                EncoderValType::I64,
                 EncoderValType::I32,
             ],
             &[],
@@ -1119,10 +1119,11 @@ impl<'a> ValidModule<'a> {
             let mut bounds_check_to_func_idx = IndexMap::new();
             for func in &self.functions {
                 for op in &func.operators {
-                    if let Some((mem_idx, _, _, ty)) = bounds_check_info(&op.inner.op)
+                    if let Some((mem_idx, _, _, is_load, val_type)) = memory_op_info(&op.inner.op)
                         && shadow_memory_indices.contains(&(mem_idx as usize))
-                        && !bounds_check_to_func_idx.contains_key(&ty)
+                        && !bounds_check_to_func_idx.contains_key(&(!is_load).then_some(val_type))
                     {
+                        let ty = (!is_load).then_some(val_type);
                         let (params, results) = match ty {
                             None => (
                                 vec![EncoderValType::I32, EncoderValType::I64], // offset, limit
@@ -1280,13 +1281,16 @@ impl<'a> ValidModule<'a> {
         let orig_function = &self.functions[func_idx];
         let typed_function = &types.funcs[func_idx];
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32; // also idx of step function
-        let mut new_function = wasm_encoder::Function::new_with_locals_types(
-            orig_function
-                .locals
-                .iter()
-                .map(|ty| RoundtripReencoder.val_type(ty.inner).fmt_err())
-                .collect::<Result<Vec<_>>>()?,
-        );
+        let mut locals: Vec<EncoderValType> = orig_function
+            .locals
+            .iter()
+            .map(|ty| RoundtripReencoder.val_type(ty.inner).fmt_err())
+            .collect::<Result<Vec<_>>>()?;
+        locals.push(EncoderValType::I32); // tmp_addr
+        locals.push(EncoderValType::I64); // tmp_bits
+        let mut new_function = wasm_encoder::Function::new_with_locals_types(locals);
+        let tmp_addr = (typed_function.params.len() + orig_function.locals.len()) as u32;
+        let tmp_bits = tmp_addr + 1;
 
         let transparent_record_results =
             |f: &mut wasm_encoder::Function, results: &Vec<SlotUse>| {
@@ -1329,22 +1333,38 @@ impl<'a> ValidModule<'a> {
                              mem_idx: u32,
                              offset: u64,
                              byte_count: u8,
-                             op_type: &OperatorType| {
-            let is_load = !op_type.outputs.is_empty();
-            let input0 = op_type.inputs.first().and_then(|s| s.as_ref());
-            let input1 = op_type.inputs.get(1).and_then(|s| s.as_ref());
-            let (addr, value) = match (is_load, input0, input1) {
-                (true, Some(SlotUse(a)), _) => (*a, op_type.outputs[0].0),
-                (false, Some(SlotUse(a)), Some(SlotUse(v))) => (*a, *v),
-                _ => return, /* don't record memory footprint in unreachable code */
-            };
+                             is_load: bool,
+                             val_type: EncoderValType,
+                             op: &wasm_encoder::Instruction<'_>| {
+            let is_float = matches!(val_type, EncoderValType::F32 | EncoderValType::F64) as i32;
+            if is_load {
+                // stack: [..., addr]
+                f.instruction(&LocalTee(tmp_addr)); // save addr, keep on stack
+                f.instruction(op); // pre-read: stack: [..., value]
+                emit_to_bits(f, val_type); // stack: [..., bits]
+                f.instruction(&LocalSet(tmp_bits)); // stack: [...]
+            } else {
+                // stack: [..., addr, value]
+                emit_to_bits(f, val_type); // stack: [..., addr, bits]
+                f.instruction(&LocalSet(tmp_bits)); // stack: [..., addr]
+                f.instruction(&LocalTee(tmp_addr)); // stack: [..., addr]
+            }
             f.instruction(&I32Const(is_load as i32));
             f.instruction(&I32Const(mem_idx as i32));
-            f.instruction(&I32Const(addr.try_into().expect("slot -> i32")));
+            f.instruction(&LocalGet(tmp_addr));
+            f.instruction(&I64ExtendI32U);
             f.instruction(&I64Const(offset as i64));
+            f.instruction(&I64Add); // byte_addr = addr_operand + offset
             f.instruction(&I32Const(byte_count as i32));
-            f.instruction(&I32Const(value.try_into().expect("slot -> i32")));
+            f.instruction(&LocalGet(tmp_bits));
+            f.instruction(&I32Const(is_float));
             f.instruction(&Call(InstrImports::RecordMemory as u32));
+            // restore stack for actual op:
+            f.instruction(&LocalGet(tmp_addr));
+            if !is_load {
+                f.instruction(&LocalGet(tmp_bits));
+                emit_from_bits(f, val_type); // restore value for store
+            }
         };
 
         let step_debug = |f: &mut wasm_encoder::Function, line_number: usize| {
@@ -1410,8 +1430,8 @@ impl<'a> ValidModule<'a> {
             }
 
             // bounds checking for load and store operations for memories with pagesize 1
-            if let Some((mem_idx, offset, width, ty)) =
-                bounds_check_info(&codillon_operator.inner.op)
+            if let Some((mem_idx, offset, width, is_load, val_type)) =
+                memory_op_info(&codillon_operator.inner.op)
                 && let Some(shadow_pos) = shadow_memory_indices
                     .iter()
                     .position(|&i| i == mem_idx as usize)
@@ -1421,7 +1441,25 @@ impl<'a> ValidModule<'a> {
                 new_function.instruction(&GlobalGet(shadow_global_idx));
                 new_function.instruction(&I64Const(total_offset));
                 new_function.instruction(&I64Sub); // limit = size - (offset + width)
-                new_function.instruction(&Call(bounds_check_to_func_idx[&ty]));
+                new_function.instruction(&Call(
+                    bounds_check_to_func_idx[&(!is_load).then_some(val_type)],
+                ));
+            }
+
+            // dynamic memory recording for all memory ops
+            if let Some((mem_idx, offset, width, is_load, val_type)) =
+                memory_op_info(&codillon_operator.inner.op)
+                && !codillon_operator.inner.untyped
+            {
+                memory_record(
+                    &mut new_function,
+                    mem_idx,
+                    offset,
+                    width,
+                    is_load,
+                    val_type,
+                    &op,
+                );
             }
 
             if i + 1 == orig_function.operators.len() {
@@ -1471,25 +1509,6 @@ impl<'a> ValidModule<'a> {
                         .nth(idx as usize)
                         .expect("valid local idx");
                     primitive_record(&mut new_function, local_type)?;
-                }
-
-                I32Load8S(m) | I32Load8U(m) | I64Load8S(m) | I64Load8U(m) | I32Store8(m)
-                | I64Store8(m) => {
-                    memory_record(&mut new_function, m.memory_index, m.offset, 1, op_type)
-                }
-
-                I32Load16S(m) | I32Load16U(m) | I64Load16S(m) | I64Load16U(m) | I32Store16(m)
-                | I64Store16(m) => {
-                    memory_record(&mut new_function, m.memory_index, m.offset, 2, op_type)
-                }
-
-                I32Load(m) | F32Load(m) | I32Store(m) | F32Store(m) | I64Load32S(m)
-                | I64Load32U(m) | I64Store32(m) => {
-                    memory_record(&mut new_function, m.memory_index, m.offset, 4, op_type)
-                }
-
-                I64Load(m) | F64Load(m) | I64Store(m) | F64Store(m) => {
-                    memory_record(&mut new_function, m.memory_index, m.offset, 8, op_type)
                 }
                 _ => {}
             }
@@ -1558,31 +1577,81 @@ impl<'a> ValidModule<'a> {
     }
 }
 
-fn bounds_check_info(op: &Operator<'_>) -> Option<(u32, u64, i32, Option<EncoderValType>)> {
+/// Returns (mem_idx, offset, width, is_load, val_type) for a load/store instruction
+fn memory_op_info(op: &Operator<'_>) -> Option<(u32, u64, u8, bool, EncoderValType)> {
     use Operator::*;
     match op {
-        I32Load8S { memarg }
-        | I32Load8U { memarg }
-        | I64Load8S { memarg }
-        | I64Load8U { memarg } => Some((memarg.memory, memarg.offset, 1, None)),
-        I32Load16S { memarg }
-        | I32Load16U { memarg }
-        | I64Load16S { memarg }
-        | I64Load16U { memarg } => Some((memarg.memory, memarg.offset, 2, None)),
-        I32Load { memarg } | F32Load { memarg } | I64Load32S { memarg } | I64Load32U { memarg } => {
-            Some((memarg.memory, memarg.offset, 4, None))
+        I32Load8S { memarg } | I32Load8U { memarg } => {
+            Some((memarg.memory, memarg.offset, 1, true, EncoderValType::I32))
         }
-        I64Load { memarg } | F64Load { memarg } => Some((memarg.memory, memarg.offset, 8, None)),
-        I32Store8 { memarg } => Some((memarg.memory, memarg.offset, 1, Some(EncoderValType::I32))),
-        I32Store16 { memarg } => Some((memarg.memory, memarg.offset, 2, Some(EncoderValType::I32))),
-        I32Store { memarg } => Some((memarg.memory, memarg.offset, 4, Some(EncoderValType::I32))),
-        I64Store8 { memarg } => Some((memarg.memory, memarg.offset, 1, Some(EncoderValType::I64))),
-        I64Store16 { memarg } => Some((memarg.memory, memarg.offset, 2, Some(EncoderValType::I64))),
-        I64Store32 { memarg } => Some((memarg.memory, memarg.offset, 4, Some(EncoderValType::I64))),
-        I64Store { memarg } => Some((memarg.memory, memarg.offset, 8, Some(EncoderValType::I64))),
-        F32Store { memarg } => Some((memarg.memory, memarg.offset, 4, Some(EncoderValType::F32))),
-        F64Store { memarg } => Some((memarg.memory, memarg.offset, 8, Some(EncoderValType::F64))),
+        I64Load8S { memarg } | I64Load8U { memarg } => {
+            Some((memarg.memory, memarg.offset, 1, true, EncoderValType::I64))
+        }
+        I32Load16S { memarg } | I32Load16U { memarg } => {
+            Some((memarg.memory, memarg.offset, 2, true, EncoderValType::I32))
+        }
+        I64Load16S { memarg } | I64Load16U { memarg } => {
+            Some((memarg.memory, memarg.offset, 2, true, EncoderValType::I64))
+        }
+        I32Load { memarg } => Some((memarg.memory, memarg.offset, 4, true, EncoderValType::I32)),
+        F32Load { memarg } => Some((memarg.memory, memarg.offset, 4, true, EncoderValType::F32)),
+        I64Load32S { memarg } | I64Load32U { memarg } => {
+            Some((memarg.memory, memarg.offset, 4, true, EncoderValType::I64))
+        }
+        I64Load { memarg } => Some((memarg.memory, memarg.offset, 8, true, EncoderValType::I64)),
+        F64Load { memarg } => Some((memarg.memory, memarg.offset, 8, true, EncoderValType::F64)),
+        I32Store8 { memarg } => Some((memarg.memory, memarg.offset, 1, false, EncoderValType::I32)),
+        I64Store8 { memarg } => Some((memarg.memory, memarg.offset, 1, false, EncoderValType::I64)),
+        I32Store16 { memarg } => {
+            Some((memarg.memory, memarg.offset, 2, false, EncoderValType::I32))
+        }
+        I64Store16 { memarg } => {
+            Some((memarg.memory, memarg.offset, 2, false, EncoderValType::I64))
+        }
+        I32Store { memarg } => Some((memarg.memory, memarg.offset, 4, false, EncoderValType::I32)),
+        F32Store { memarg } => Some((memarg.memory, memarg.offset, 4, false, EncoderValType::F32)),
+        I64Store32 { memarg } => {
+            Some((memarg.memory, memarg.offset, 4, false, EncoderValType::I64))
+        }
+        I64Store { memarg } => Some((memarg.memory, memarg.offset, 8, false, EncoderValType::I64)),
+        F64Store { memarg } => Some((memarg.memory, memarg.offset, 8, false, EncoderValType::F64)),
         _ => None,
+    }
+}
+
+fn emit_to_bits(f: &mut wasm_encoder::Function, val_type: EncoderValType) {
+    use wasm_encoder::Instruction::*;
+    match val_type {
+        EncoderValType::I32 => {
+            f.instruction(&I64ExtendI32U);
+        }
+        EncoderValType::I64 => {}
+        EncoderValType::F32 => {
+            f.instruction(&I32ReinterpretF32);
+            f.instruction(&I64ExtendI32U);
+        }
+        EncoderValType::F64 => {
+            f.instruction(&I64ReinterpretF64);
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn emit_from_bits(f: &mut wasm_encoder::Function, val_type: EncoderValType) {
+    use wasm_encoder::Instruction::*;
+    match val_type {
+        EncoderValType::I32 => {
+            f.instruction(&I32WrapI64);
+        }
+        EncoderValType::I64 => {}
+        EncoderValType::F32 => {
+            f.instruction(&I32WrapI64);
+            f.instruction(&F32ReinterpretI32);
+        }
+        EncoderValType::F64 => {
+            f.instruction(&F64ReinterpretI64);
+        }
+        _ => unreachable!(),
     }
 }
 

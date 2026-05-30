@@ -211,11 +211,10 @@ pub enum MemoryOp {
 #[derive(Debug, Copy, Clone)]
 pub struct MemoryAccess {
     pub op: MemoryOp,
-    pub mem_idx: u32,    // memory index
-    pub addr_slot: u32,  // slot idx for address
-    pub offset: u64,     // concrete addr = slots[addr_slot] + offset
-    pub byte_count: u8,  // can be 1, 2, 4, or 8
-    pub value_slot: u32, // slot idx for value (only for store)
+    pub mem_idx: u32,     // memory index
+    pub addr: u64,        // concrete addr = addr operand + offset
+    pub byte_count: u8,   // can be 1, 2, 4, or 8
+    pub value: WasmValue, // actual load/store value
 }
 
 #[derive(Default, Debug)]
@@ -242,6 +241,7 @@ pub struct ExecutionState {
     pub step: usize,
     pub slots: Vec<Option<WasmValue>>,
     pub status: Option<(usize, TerminationType, Option<String>)>,
+    pub memory_access: Option<MemoryAccess>,
 }
 
 impl ExecutionState {
@@ -283,6 +283,17 @@ impl ExecutionState {
             },
             error_string(),
         ));
+
+        self.memory_access = with_completed_step(target_step, |s| s.memory_access);
+        if let Some(ma) = &self.memory_access {
+            web_sys::console::log_1(
+                &format!(
+                    "{:?} mem[{}] addr={} bytes={} value={:?}",
+                    ma.op, ma.mem_idx, ma.addr, ma.byte_count, ma.value
+                )
+                .into(),
+            );
+        }
     }
 }
 
@@ -393,11 +404,18 @@ fn create_graphics_helpers(draw: &Object) {
 fn record_memory_access(
     is_load: i32,
     mem_idx: u32,
-    addr_slot: u32,
-    offset: u64,
+    addr: u64,
     byte_count: u8,
-    value_slot: u32,
+    value_bits: i64,
+    is_float: i32,
 ) {
+    let value = match (byte_count, is_float) {
+        (1 | 2 | 4, 0) => WasmValue::I32(value_bits as i32),
+        (8, 0) => WasmValue::I64(value_bits),
+        (4, 1) => WasmValue::F32(f32::from_bits(value_bits as u32)),
+        (8, 1) => WasmValue::F64(f64::from_bits(value_bits as u64)),
+        _ => unreachable!(),
+    };
     with_current_step_mut(|step| {
         step.memory_access = Some(MemoryAccess {
             op: if is_load != 0 {
@@ -406,10 +424,9 @@ fn record_memory_access(
                 MemoryOp::Store
             },
             mem_idx,
-            addr_slot,
-            offset,
+            addr,
             byte_count,
-            value_slot,
+            value,
         });
     });
 }
@@ -441,20 +458,20 @@ fn create_closure_record_operations(obj: &Object) {
     let record_memory = Closure::wrap(Box::new(
         move |is_load: i32,
               mem_idx: u32,
-              addr_slot: u32,
-              offset: i64,
+              addr: i64,
               byte_count: i32,
-              value_slot: u32| {
+              value_bits: i64,
+              is_float: i32| {
             record_memory_access(
                 is_load,
                 mem_idx,
-                addr_slot,
-                offset as u64,
+                addr as u64,
                 byte_count as u8,
-                value_slot,
+                value_bits,
+                is_float,
             )
         },
-    ) as Box<dyn Fn(i32, u32, u32, i64, i32, u32)>);
+    ) as Box<dyn Fn(i32, u32, i64, i32, i64, i32)>);
     register_closure(obj, "record_memory", record_memory);
 }
 
