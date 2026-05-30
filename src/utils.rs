@@ -991,6 +991,7 @@ impl<'a> ValidModule<'a> {
     ) -> Result<(Vec<u8>, Vec<StaticMemoryAccess>)> {
         use wasm_encoder::*;
         let mut module = Module::default();
+        let mut memory_ops: Vec<StaticMemoryAccess> = Vec::new();
 
         /* Make import section (with instrumentation functions prepended) */
         let (import_section, num_func_imports) = {
@@ -1132,22 +1133,24 @@ impl<'a> ValidModule<'a> {
                         && shadow_memory_indices.contains(&(mem_idx as usize))
                         && !bounds_check_to_func_idx.contains_key(&(!is_load).then_some(val_type))
                     {
-                        let store_ty = (!is_load).then_some(val_type);
-                        let (params, results) = match store_ty {
+                        let ty = (!is_load).then_some(val_type);
+                        let (params, results) = match ty {
                             None => (
                                 vec![EncoderValType::I32, EncoderValType::I64], // offset, limit
                                 vec![EncoderValType::I32],                      // offset
                             ),
-                            Some(ty) => (
-                                vec![EncoderValType::I32, ty, EncoderValType::I64], // offset, value, limit
-                                vec![EncoderValType::I32, ty],                      // offset, value
-                            ),
+                            Some(ty) => {
+                                (
+                                    vec![EncoderValType::I32, ty, EncoderValType::I64], // offset, value, limit
+                                    vec![EncoderValType::I32, ty], // offset, value
+                                )
+                            }
                         };
                         debug_assert_eq!(type_section.len(), next_type_idx);
                         type_section.ty().function(params, results);
                         debug_assert_eq!(num_func_imports + function_section.len(), next_func_idx);
                         function_section.function(next_type_idx);
-                        bounds_check_to_func_idx.insert(store_ty, next_func_idx);
+                        bounds_check_to_func_idx.insert(ty, next_func_idx);
                         next_type_idx += 1;
                         next_func_idx += 1;
                     }
@@ -1224,22 +1227,21 @@ impl<'a> ValidModule<'a> {
         /* XXX datacount section: skip for now */
 
         /* Code section */
-        let mut memory_ops: Vec<StaticMemoryAccess> = Vec::new();
         {
             let mut code_section = CodeSection::new();
 
             // First in code section: the original functions
             for func_idx in 0..self.functions.len() {
-                let function = self.build_function(
+                let (function, func_mem_ops) = self.build_function(
                     func_idx,
                     types,
                     &result_types_to_func_idx,
                     step_function_idx,
                     &shadow_memory_indices,
                     &bounds_check_to_func_idx,
-                    &mut memory_ops,
                 )?;
                 code_section.function(&function);
+                memory_ops.extend(func_mem_ops);
             }
 
             // Next in code section: the "step" function.
@@ -1285,12 +1287,12 @@ impl<'a> ValidModule<'a> {
         step_function_idx: u32,
         shadow_memory_indices: &[usize],
         bounds_check_to_func_idx: &IndexMap<Option<EncoderValType>, u32>,
-        memory_ops: &mut Vec<StaticMemoryAccess>,
-    ) -> Result<wasm_encoder::Function> {
+    ) -> Result<(wasm_encoder::Function, Vec<StaticMemoryAccess>)> {
         use wasm_encoder::Instruction::*;
         let orig_function = &self.functions[func_idx];
         let typed_function = &types.funcs[func_idx];
         let num_instr_imports = InstrImports::TYPE_INDICES.len() as u32; // also idx of step function
+        let mut memory_ops: Vec<StaticMemoryAccess> = Vec::new();
         let mut new_function = wasm_encoder::Function::new_with_locals_types(
             orig_function
                 .locals
@@ -1504,7 +1506,7 @@ impl<'a> ValidModule<'a> {
                 }
             }
         }
-        Ok(new_function)
+        Ok((new_function, memory_ops))
     }
 
     fn dynamically_generate_function(

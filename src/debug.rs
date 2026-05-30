@@ -11,7 +11,7 @@
 
 use crate::{
     dom_canvas::{Action, DomCanvas},
-    utils::{FmtError, MemoryOp, StaticMemoryAccess},
+    utils::{FmtError, StaticMemoryAccess},
 };
 use anyhow::{Context, Result, bail};
 use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
@@ -31,12 +31,7 @@ thread_local! {
     static STEPS: Box<[CodillonCell<ExecutionStep>]> = (0..MAX_STEP_COUNT)
                 .map(|_| CodillonCell::new(ExecutionStep::default()))
                 .collect();
-    static MEMORY_OPS: CodillonCell<Vec<StaticMemoryAccess>> = CodillonCell::new(Vec::new());
     static INSTRUMENTATION_IMPORTS: Object = make_imports().expect("instrumentation");
-}
-
-pub fn set_memory_ops(ops: Vec<StaticMemoryAccess>) {
-    MEMORY_OPS.with(|cell| cell.set(ops));
 }
 
 // When a user Wasm module gets close to stack exhaustion, the browser can trap at any point
@@ -207,15 +202,6 @@ fn error_string() -> Option<String> {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub struct MemoryAccess {
-    pub op: MemoryOp,
-    pub mem_idx: u32,     // memory index
-    pub addr: u64,        // concrete addr = addr operand + offset
-    pub byte_count: u8,   // can be 1, 2, 4, or 8
-    pub value: WasmValue, // actual load/store value
-}
-
 #[derive(Default, Debug)]
 struct ExecutionStep {
     line_num: u32,
@@ -240,6 +226,7 @@ pub struct ExecutionState {
     pub step: usize,
     pub slots: Vec<Option<WasmValue>>,
     pub status: Option<(usize, TerminationType, Option<String>)>,
+    pub memory_ops: Vec<StaticMemoryAccess>,
 }
 
 impl ExecutionState {

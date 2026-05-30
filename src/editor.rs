@@ -782,7 +782,7 @@ impl Editor {
         let (instrumented_binary_owned, memory_ops) =
             validized.build_instrumented_binary(&types)?;
         let instrumented_binary = &instrumented_binary_owned;
-        crate::debug::set_memory_ops(memory_ops);
+        self.execution_state.memory_ops = memory_ops;
         let instrumented_binary_hash = Self::hash_binary(instrumented_binary);
         if self.previous_instrumented_binary_hash != instrumented_binary_hash {
             self.version += 1;
