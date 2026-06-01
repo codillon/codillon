@@ -3,7 +3,7 @@
 use crate::{
     action_history::{ActionHistory, Edit},
     autocomplete::Autocomplete,
-    debug::{ExecutionState, TerminationType, run_binary, step_count, termination_type},
+    debug::{ExecutionState, RUN_LOG, TerminationType, run_binary},
     dom_canvas::DomCanvas,
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -273,7 +273,7 @@ impl Editor {
             self.slider_mut().inner_mut().build_ticks(
                 step_count - 1,
                 current_step,
-                &termination_type(),
+                &RUN_LOG.with(|r| r.termination_type()),
             )
         } else {
             self.slider_mut().inner_mut().hide();
@@ -295,8 +295,13 @@ impl Editor {
         };
 
         // compute the state for the desired step
-        self.execution_state
-            .goto_step(current_step, get_mut!(self.component, canvas));
+        RUN_LOG.with(|log| {
+            self.execution_state.goto_step(
+                log,
+                current_step,
+                Some(get_mut!(self.component, canvas)),
+            )
+        });
 
         for (slot_idx, value) in self.execution_state.slots.iter().enumerate() {
             let where_written = &self.slot_connections[slot_idx].written;
@@ -364,8 +369,9 @@ impl Editor {
                 }
 
                 let mut slider_step = ed.current_step();
+                let step_count = RUN_LOG.with(|r| r.step_count());
                 // Move slider to the end if binary changed and it's in the middle
-                if step_count() == 0 {
+                if step_count == 0 {
                     ed.slider_mut().inner_mut().hide();
                     ed.image_mut().set_arrow_location(false, None);
                     break;
@@ -373,15 +379,15 @@ impl Editor {
 
                 if ed.slider().inner().is_visible() {
                     if slider_step != 0 {
-                        slider_step = step_count() - 1;
+                        slider_step = step_count - 1;
                     }
                 } else {
-                    slider_step = step_count() - 1;
+                    slider_step = step_count - 1;
                 }
 
                 let slot_count = ed.slot_connections.len();
                 ed.execution_state.reset(slot_count);
-                ed.update_live_info(step_count(), Some(slider_step), true);
+                ed.update_live_info(step_count, Some(slider_step), true);
                 ed.slider_mut()
                     .inner_mut()
                     .set_value_as_number(slider_step as f64);
@@ -781,12 +787,13 @@ impl Editor {
         // instrumentation
         let instrumented_binary = &validized.build_instrumented_binary(&types)?;
         let instrumented_binary_hash = Self::hash_binary(instrumented_binary);
+        let step_count = RUN_LOG.with(|r| r.step_count());
         if self.previous_instrumented_binary_hash != instrumented_binary_hash {
             self.version += 1;
             self.execute(instrumented_binary, self.version);
             self.previous_instrumented_binary_hash = instrumented_binary_hash;
-        } else if step_count() > 0 {
-            self.update_live_info(step_count(), None, false);
+        } else if step_count > 0 {
+            self.update_live_info(step_count, None, false);
         } else {
             self.image_mut().set_arrow_location(false, None);
         }
@@ -1227,8 +1234,10 @@ impl Editor {
             .set_handler(move |accepted| e.borrow_mut().accept_autocomplete(accepted).unwrap());
 
         let e = self.holder();
-        self.slider_mut()
-            .set_oninput(move |_| e.borrow_mut().update_live_info(step_count(), None, false));
+        self.slider_mut().set_oninput(move |_| {
+            e.borrow_mut()
+                .update_live_info(RUN_LOG.with(|r| r.step_count()), None, false)
+        });
 
         let e = self.holder();
         self.slider_mut()
