@@ -4010,6 +4010,55 @@ pub(crate) mod tests {
                 test_execution(&binary, &[], &mut [])?
             );
         }
+
+        {
+            // Bounds check success (default pagesize)
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 1)");
+            editor.push_line("(func");
+            editor.push_line("i32.const 65534");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.store16");
+            editor.push_line(")");
+            let (_text, binary) = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                TerminationType::Success,
+                test_execution(&binary, &[], &mut [])?
+            );
+        }
+
+        {
+            // Bounds check success (default pagesize)
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 1)");
+            editor.push_line("(func");
+            editor.push_line("i32.const 65535");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.store8");
+            editor.push_line(")");
+            let (_text, binary) = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                TerminationType::Success,
+                test_execution(&binary, &[], &mut [])?
+            );
+        }
+
+        {
+            // Bounds check failure (default pagesize)
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 1)");
+            editor.push_line("(func");
+            editor.push_line("i32.const 65535");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.store16");
+            editor.push_line(")");
+            let (_text, binary) = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                TerminationType::Error,
+                test_execution(&binary, &[], &mut [])?
+            );
+        }
+
         Ok(())
     }
 
