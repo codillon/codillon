@@ -11,9 +11,10 @@
 
 use crate::{
     dom_canvas::{Action, DomCanvas},
-    utils::FmtError,
+    utils::{FmtError, SlotConnections, SlotUse},
 };
 use anyhow::{Context, Result, bail};
+use arrayvec::ArrayVec;
 use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
 use regex::Regex;
 use smallvec::SmallVec;
@@ -137,6 +138,10 @@ impl RunLog {
 
     pub fn record_slot(&self, val: impl Into<WasmValue>, slot: u32) {
         self.with_current_step_mut(|step| step.slot_assignments.push((slot, val.into())));
+    }
+
+    pub fn call_frame_op(&self, op: CallFrameOp) {
+        self.with_current_step_mut(|step| step.call_frame_ops.push(op));
     }
 
     pub fn finish(&self, result: Result<(), String>) -> Result<()> {
@@ -305,13 +310,21 @@ pub enum TerminationType {
     Success,
 }
 
+#[derive(Debug)]
+pub enum CallFrameOp {
+    EnterFunc(u32), // local func idx (not including imports)
+    BeforeCall,
+    AfterCall(u32),
+    BeforeTailCall,
+    EnterBlock(u32), // block id
+}
+
 #[derive(Default, Debug)]
 struct ExecutionStep {
     line_num: u32,
     slot_assignments: SmallVec<[(u32, WasmValue); 1]>, // slot idx, value (SmallVec stores in-line if <=1 result)
     graphics_op: Option<Action>,                       // XXX todo: memory
-                                                       // XXX todo: clear any func/frame on entry
-                                                       // XXX todo: save any func on call/call_indirect, restore after
+    call_frame_ops: ArrayVec<CallFrameOp, 2>,
 }
 
 impl ExecutionStep {
@@ -319,6 +332,7 @@ impl ExecutionStep {
         self.line_num = 0;
         self.slot_assignments.clear();
         self.graphics_op = None;
+        self.call_frame_ops.clear();
     }
 }
 
@@ -332,47 +346,83 @@ pub struct ExecutionStatus {
     pub error: Option<String>,
 }
 
+#[derive(Copy, Clone)]
+pub struct SlotContents {
+    // a Wasm ValType, possibly from an old loop iteration or stack frame
+    pub val: WasmValue,
+    pub old: bool,
+}
+
 #[derive(Default)]
 pub struct ExecutionState {
-    pub step: usize,
-    pub slots: Vec<Option<WasmValue>>,
+    pub next_step: usize,
+    pub slots: Vec<SmallVec<[Option<SlotContents>; 1]>>,
     pub status: ExecutionStatus,
+    cur_func: Option<u32>,
+    call_stack: Vec<(u32, usize)>, // func_idx, height
 }
 
 impl ExecutionState {
-    pub fn reset(&mut self, slot_count: usize) {
-        self.step = 0;
+    pub fn reset(&mut self, cx: &SlotConnections) {
+        self.next_step = 0;
         self.status = Default::default();
-        self.slots.resize(slot_count, None);
-        for slot in self.slots.iter_mut() {
-            *slot = None;
+        self.cur_func = None;
+        self.call_stack.clear();
+        self.slots.resize(cx.connections.len(), SmallVec::new());
+        let SlotUse(first_function_slot) = if let Some(idx) = cx.first_slot_of_func.first() {
+            *idx
+        } else {
+            SlotUse(self.slots.len())
+        };
+        for (idx, slot) in self.slots.iter_mut().enumerate() {
+            if idx < first_function_slot {
+                *slot = smallvec::smallvec![None];
+            } else {
+                slot.clear();
+            }
         }
     }
 
-    pub fn goto_step(&mut self, log: &RunLog, target: usize, mut canvas: Option<&mut DomCanvas>) {
-        if self.step > target || self.step == 0 {
+    pub fn slot_contents(&self, slot_idx: usize) -> Option<SlotContents> {
+        *self.slots[slot_idx].last().unwrap()
+    }
+
+    pub fn goto_step(
+        &mut self,
+        log: &RunLog,
+        connections: &SlotConnections,
+        target: usize,
+        mut canvas: Option<&mut DomCanvas>,
+    ) {
+        if self.next_step > target || self.next_step == 0 {
             // XXX save checkpoints?
-            self.reset(self.slots.len());
+            self.reset(connections);
             if let Some(canvas) = canvas.as_mut() {
                 canvas.reset()
             };
-            self.step = 0;
         }
         if log.step_count() == 0 {
             return;
         }
         assert!(target < log.step_count());
-        for step in self.step..=target {
-            log.with_completed_step(step, |s| {
+        while self.next_step <= target {
+            log.with_completed_step(self.next_step, |s| {
+                for op in &s.call_frame_ops {
+                    self.handle_call_frame_op(op, connections);
+                }
+
                 for (slot_idx, value) in &s.slot_assignments {
-                    self.slots[*slot_idx as usize] = Some(*value);
+                    *self.slots[*slot_idx as usize].last_mut().unwrap() = Some(SlotContents {
+                        val: *value,
+                        old: false,
+                    });
                 }
                 if let Some(canvas) = canvas.as_mut() {
                     canvas.render(&s.graphics_op)
                 }
             });
+            self.next_step += 1;
         }
-        self.step = target;
         log.with_completed_step(target, |s| {
             // top bit: whether arrow should be offset for an "after call" step
             self.status.line_num = Some((s.line_num & 0x7fff_ffff) as usize);
@@ -384,6 +434,83 @@ impl ExecutionState {
             TerminationType::Running
         };
         self.status.error = log.error_string();
+        if self.status.termination == TerminationType::Success {
+            debug_assert!(self.call_stack.is_empty());
+        }
+    }
+
+    // This is more complicated than would be nice. Part of the goal is to avoid
+    // materializing a general call stack; we want to show the most useful "slot" values
+    // at any given time.
+
+    fn handle_call_frame_op(&mut self, op: &CallFrameOp, connections: &SlotConnections) {
+        match op {
+            // When re-entering a function: preserve the old slot values, but mark them "old" (grayed out).
+            CallFrameOp::EnterFunc(func_idx) => {
+                self.cur_func = Some(*func_idx);
+                if let Some((lower, upper)) = connections.slot_range(*func_idx) {
+                    for slot_idx in lower..upper {
+                        let old = self.slots[slot_idx]
+                            .last()
+                            .copied()
+                            .flatten()
+                            .map(|SlotContents { val, .. }| SlotContents { val, old: true });
+                        self.slots[slot_idx].push(old);
+                    }
+                }
+            }
+            // Before a call or call_indirect: store the current depth of this function's slots
+            // so they can be restored to this call frame on return.
+            CallFrameOp::BeforeCall => {
+                if let Some((lower, _upper)) = connections.slot_range(self.cur_func.unwrap()) {
+                    self.call_stack
+                        .push((self.cur_func.unwrap(), self.slots[lower].len()));
+                }
+            }
+            // Before a tail call: just copy our slots to the previous call frame of this function
+            // if there is one. (The goal is to avoid unbounded stack growth.)
+            CallFrameOp::BeforeTailCall => {
+                if let Some((lower, upper)) = connections.slot_range(self.cur_func.unwrap()) {
+                    let first_slot_len = self.slots[lower].len();
+                    if first_slot_len > 1 {
+                        for slot_idx in lower..upper {
+                            let cur = self.slots[slot_idx].pop().unwrap();
+                            *self.slots[slot_idx].last_mut().unwrap() = cur;
+                        }
+                    }
+                }
+            }
+            // After a call or call_indirect: restore the previous depth of this function's slots.
+            CallFrameOp::AfterCall(func_idx) => {
+                self.cur_func = Some(*func_idx);
+
+                if let Some((lower, upper)) = connections.slot_range(*func_idx) {
+                    let (orig_func, target_height) = self.call_stack.pop().unwrap();
+                    assert_eq!(orig_func, *func_idx);
+                    let first_slot_len = self.slots[lower].len();
+                    debug_assert!(first_slot_len >= target_height);
+
+                    for slot_idx in lower..upper {
+                        debug_assert_eq!(self.slots[slot_idx].len(), first_slot_len);
+                        self.slots[slot_idx].truncate(target_height);
+                    }
+                }
+            }
+            // When entering a loop (this is only called for loops but would work fine
+            // on any kind of block, but wouldn't do anything useful): mark the previous
+            // contents of the slots as "old".
+            CallFrameOp::EnterBlock(block_idx) => {
+                let (SlotUse(lower), SlotUse(upper)) = connections.blocks[*block_idx as usize];
+                for slot_idx in lower..upper {
+                    let cur_but_old = self.slots[slot_idx]
+                        .last()
+                        .copied()
+                        .flatten()
+                        .map(|SlotContents { val, .. }| SlotContents { val, old: true });
+                    *self.slots[slot_idx].last_mut().unwrap() = cur_but_old;
+                }
+            }
+        }
     }
 }
 
@@ -417,6 +544,7 @@ fn make_imports() -> Result<Object, JsValue> {
         register_closure(&codillon_debug, "func_placeholder", func_placeholder);
 
         create_closure_record_operations(&codillon_debug);
+        create_closure_frame_operations(&codillon_debug);
 
         Reflect::set(&imports, &"codillon_debug".into(), &codillon_debug)?;
     }
@@ -470,6 +598,31 @@ fn create_closure_record_operations(obj: &Object) {
     let record_f64: ScopedClosure<'_, dyn Fn(f64, u32)> =
         Closure::new(|value, slot| RUN_LOG.with(|r| r.record_slot(value, slot)));
     register_closure(obj, "record_f64", record_f64);
+}
+
+fn create_closure_frame_operations(obj: &Object) {
+    let enter_func: ScopedClosure<'_, dyn Fn(u32)> = Closure::new(|func_idx| {
+        RUN_LOG.with(|r| r.call_frame_op(CallFrameOp::EnterFunc(func_idx)))
+    });
+    register_closure(obj, "enter_func", enter_func);
+
+    let before_call: ScopedClosure<'_, dyn Fn()> =
+        Closure::new(|| RUN_LOG.with(|r| r.call_frame_op(CallFrameOp::BeforeCall)));
+    register_closure(obj, "before_call", before_call);
+
+    let after_call: ScopedClosure<'_, dyn Fn(u32)> = Closure::new(|func_idx| {
+        RUN_LOG.with(|r| r.call_frame_op(CallFrameOp::AfterCall(func_idx)))
+    });
+    register_closure(obj, "after_call", after_call);
+
+    let before_tail_call: ScopedClosure<'_, dyn Fn()> =
+        Closure::new(|| RUN_LOG.with(|r| r.call_frame_op(CallFrameOp::BeforeTailCall)));
+    register_closure(obj, "before_tail_call", before_tail_call);
+
+    let enter_block: ScopedClosure<'_, dyn Fn(u32)> = Closure::new(|block_idx| {
+        RUN_LOG.with(|r| r.call_frame_op(CallFrameOp::EnterBlock(block_idx)))
+    });
+    register_closure(obj, "enter_block", enter_block);
 }
 
 pub async fn run_binary(binary: &[u8]) -> Result<()> {

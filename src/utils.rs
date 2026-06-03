@@ -35,6 +35,11 @@ enum InstrImports {
     RecordF32,
     RecordI64,
     RecordF64,
+    EnterFunc,
+    BeforeCall,
+    AfterCall,
+    BeforeTailCall,
+    EnterBlock,
 }
 impl InstrImports {
     const TYPE_INDICES: &'static [(&'static str, u32)] = &[
@@ -44,6 +49,11 @@ impl InstrImports {
         ("record_f32", 3),
         ("record_i64", 4),
         ("record_f64", 5),
+        ("enter_func", 6),
+        ("before_call", 1),
+        ("after_call", 6),
+        ("before_tail_call", 1),
+        ("enter_block", 6),
     ];
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: i32 -> i32
@@ -58,6 +68,8 @@ impl InstrImports {
         (&[EncoderValType::I64, EncoderValType::I32], &[]),
         // 5: (f64, i32) -> ()
         (&[EncoderValType::F64, EncoderValType::I32], &[]),
+        // 6: i32 -> ()
+        (&[EncoderValType::I32], &[]),
     ];
 }
 
@@ -882,6 +894,12 @@ impl SimulatedStack {
     }
 }
 
+struct FunctionHelperInfo {
+    result_types_to_func_idx: IndexMap<Vec<ValType>, u32>,
+    shadow_memory_indices: Vec<usize>,
+    bounds_check_to_func_idx: IndexMap<Option<EncoderValType>, u32>,
+}
+
 impl<'a> ValidModule<'a> {
     /// Computes the param and result types for each operator in the module.
     ///
@@ -890,6 +908,7 @@ impl<'a> ValidModule<'a> {
         let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
         let mut ret = TypedModule {
             slots: Vec::new(),
+            blocks: Vec::new(),
             globals: Vec::with_capacity(self.globals.len()),
             funcs: Vec::with_capacity(self.functions.len()),
         };
@@ -915,8 +934,12 @@ impl<'a> ValidModule<'a> {
             if let ValidPayload::Func(func, _) = validator.payload(&payload?)? {
                 let valid_func = funcs_iter.next().expect("not enough funcs in ValidModule");
                 let mut validator = func.into_validator(allocs);
-                let types =
-                    Self::function_into_types_table(&mut validator, valid_func, &mut ret.slots)?;
+                let types = Self::function_into_types_table(
+                    &mut validator,
+                    valid_func,
+                    &mut ret.slots,
+                    &mut ret.blocks,
+                )?;
                 ret.funcs.push(types);
                 allocs = validator.into_allocations();
             }
@@ -929,8 +952,10 @@ impl<'a> ValidModule<'a> {
         func_validator: &mut wasmparser::FuncValidator<wasmparser::ValidatorResources>,
         valid_func: &ValidFunction<'_>,
         slots: &mut Vec<Slot>,
+        blocks: &mut Vec<(SlotUse, SlotUse)>,
     ) -> Result<TypedFunction> {
         let mut ret = TypedFunction {
+            first_slot: SlotUse(slots.len()),
             params: Vec::with_capacity(valid_func.params.len()),
             locals: Vec::with_capacity(valid_func.locals.len()),
             ops: Vec::with_capacity(valid_func.operators.len()),
@@ -950,16 +975,29 @@ impl<'a> ValidModule<'a> {
         }
 
         let mut stack = SimulatedStack::default();
+        let mut frame_stack = Vec::new();
 
         for op in &valid_func.operators {
             for pre in &op.inner.prepended {
                 stack.op(pre, func_validator, slots, false)?;
             }
 
-            let operator_ty = stack.op(&op.inner.op, func_validator, slots, op.inner.untyped)?;
+            if matches!(
+                &op.inner.op,
+                Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. }
+            ) {
+                frame_stack.push(slots.len());
+            }
 
+            let operator_ty = stack.op(&op.inner.op, func_validator, slots, op.inner.untyped)?;
             ret.ops.push(operator_ty);
+
+            if op.inner.op == Operator::End && op.inner.info != OpInfo::FuncEnd {
+                blocks.push((SlotUse(frame_stack.pop().unwrap()), SlotUse(slots.len())));
+            }
         }
+
+        debug_assert!(frame_stack.is_empty());
 
         Ok(ret)
     }
@@ -1032,10 +1070,9 @@ impl<'a> ValidModule<'a> {
                 type_section.ty().function(p.to_vec(), r.to_vec());
             }
 
-            // Next in type section: the type of the "step" function (N.B. not the same as the record_step import)
-            let step_function_type_idx = type_section.len();
-            type_section.ty().function([EncoderValType::I32], []);
-            let num_inserted_types = 1;
+            // The type of the "step" function (N.B. not the same as the record_step import) is i32 -> ();
+            // this is now one of the "primitive" instrumentation function types.
+            let step_function_type_idx = type_section.len() - 1;
 
             // Next in type section will be the "transparent" instrumention function types (below)
 
@@ -1066,8 +1103,8 @@ impl<'a> ValidModule<'a> {
                 num_func_imports + self.functions.len() as u32 + num_inserted_functions;
 
             debug_assert_eq!(
-                next_type_idx,
-                InstrImports::FUNC_SIGS.len() as u32 + num_inserted_types + self.types.len() as u32
+                next_type_idx as usize,
+                InstrImports::FUNC_SIGS.len() + self.types.len()
             );
             debug_assert_eq!(next_type_idx, type_section.len());
             debug_assert_eq!(next_func_idx, num_func_imports + function_section.len());
@@ -1204,15 +1241,22 @@ impl<'a> ValidModule<'a> {
         {
             let mut code_section = CodeSection::new();
 
+            let mut block_count = 0;
+
+            let info = FunctionHelperInfo {
+                result_types_to_func_idx,
+                shadow_memory_indices,
+                bounds_check_to_func_idx,
+            };
+
             // First in code section: the original functions
             for func_idx in 0..self.functions.len() {
                 let function = self.build_function(
                     func_idx,
                     types,
-                    &result_types_to_func_idx,
                     step_function_idx,
-                    &shadow_memory_indices,
-                    &bounds_check_to_func_idx,
+                    &mut block_count,
+                    &info,
                 )?;
                 code_section.function(&function);
             }
@@ -1233,13 +1277,13 @@ impl<'a> ValidModule<'a> {
             }
 
             // Next in code section: the "transparent" (dynamically generated) instrumentation functions
-            for result_type in result_types_to_func_idx.keys() {
+            for result_type in info.result_types_to_func_idx.keys() {
                 // iterated in same order as inserted
                 self.dynamically_generate_function(result_type, &mut code_section)?;
             }
 
             // Last in code section: the dynamically generated memory bounds check functions
-            for ty in bounds_check_to_func_idx.keys() {
+            for ty in info.bounds_check_to_func_idx.keys() {
                 self.dynamically_generate_bounds_check_function(*ty, &mut code_section)?;
             }
 
@@ -1256,10 +1300,9 @@ impl<'a> ValidModule<'a> {
         &self,
         func_idx: usize,
         types: &TypedModule,
-        result_types_to_func_idx: &IndexMap<Vec<ValType>, u32>,
         step_function_idx: u32,
-        shadow_memory_indices: &[usize],
-        bounds_check_to_func_idx: &IndexMap<Option<EncoderValType>, u32>,
+        block_count: &mut usize,
+        info: &FunctionHelperInfo,
     ) -> Result<wasm_encoder::Function> {
         use wasm_encoder::Instruction::*;
         let orig_function = &self.functions[func_idx];
@@ -1286,7 +1329,7 @@ impl<'a> ValidModule<'a> {
                     f.instruction(&I32Const((*slot_idx).try_into().expect("slot -> i32")));
                 }
                 f.instruction(&Call(
-                    result_types_to_func_idx[&results
+                    info.result_types_to_func_idx[&results
                         .iter()
                         .filter_map(|SlotUse(slot_idx)| types.slots[*slot_idx].ty)
                         .collect::<Vec<_>>()],
@@ -1327,6 +1370,10 @@ impl<'a> ValidModule<'a> {
             ));
             primitive_record(&mut new_function, global)?;
         }
+
+        // Signal function entry
+        new_function.instruction(&I32Const(func_idx.try_into().expect("func idx -> u32")));
+        new_function.instruction(&Call(InstrImports::EnterFunc as u32));
 
         // Record values of params and locals
         for (param_idx, param) in typed_function.params.iter().enumerate() {
@@ -1373,10 +1420,22 @@ impl<'a> ValidModule<'a> {
                 }
             }
 
+            // signal function call or block entry
+            match op {
+                Call(_) | CallIndirect { .. } => {
+                    new_function.instruction(&Call(InstrImports::BeforeCall as u32));
+                }
+                ReturnCall(_) | ReturnCallIndirect { .. } => {
+                    new_function.instruction(&Call(InstrImports::BeforeTailCall as u32));
+                }
+                _ => (),
+            }
+
             // bounds checking for load and store operations for memories with pagesize 1
             if let Some((mem_idx, offset, width, ty)) =
                 bounds_check_info(&codillon_operator.inner.op)
-                && let Some(shadow_pos) = shadow_memory_indices
+                && let Some(shadow_pos) = info
+                    .shadow_memory_indices
                     .iter()
                     .position(|&i| i == mem_idx as usize)
             {
@@ -1385,7 +1444,7 @@ impl<'a> ValidModule<'a> {
                 new_function.instruction(&GlobalGet(shadow_global_idx));
                 new_function.instruction(&I64Const(total_offset));
                 new_function.instruction(&I64Sub); // limit = size - (offset + width)
-                new_function.instruction(&Call(bounds_check_to_func_idx[&ty]));
+                new_function.instruction(&Call(info.bounds_check_to_func_idx[&ty]));
             }
 
             if i + 1 == orig_function.operators.len() {
@@ -1402,7 +1461,7 @@ impl<'a> ValidModule<'a> {
 
             // Deny memory.grow requests for memories with pagesize 1
             if let MemoryGrow(mem_index) = op
-                && shadow_memory_indices.contains(&(mem_index as usize))
+                && info.shadow_memory_indices.contains(&(mem_index as usize))
             {
                 // Discard argument and return -1
                 new_function.instruction(&Drop);
@@ -1415,13 +1474,30 @@ impl<'a> ValidModule<'a> {
             // record result operands
             transparent_record_results(&mut new_function, &op_type.outputs);
 
-            if matches!(op, Call(_) | CallIndirect { .. }) {
-                // special handling: step this twice so pointer can return to the callsite after complete
-                step_debug(&mut new_function, codillon_operator.line_idx, true);
-            }
-
-            // did this operator change a global or local (XXX or memory?)
             match op {
+                // signal back from function call
+                Call(_) | CallIndirect { .. } => {
+                    new_function
+                        .instruction(&I32Const(func_idx.try_into().expect("func idx -> u32")));
+                    new_function.instruction(&Call(InstrImports::AfterCall as u32));
+
+                    // special handling: step this twice so pointer can return to the callsite after complete
+                    step_debug(&mut new_function, codillon_operator.line_idx, true);
+                }
+
+                // clear slots belonging to a loop on (re-)entry
+                Loop(_) => {
+                    new_function.instruction(&I32Const(
+                        (*block_count).try_into().expect("block idx -> i32"),
+                    ));
+                    new_function.instruction(&Call(InstrImports::EnterBlock as u32));
+                    *block_count += 1;
+                }
+
+                // track other kinds of blocks (but no need to clear slots)
+                Block(_) | If(_) => *block_count += 1,
+
+                // did this operator change a global or local (XXX or memory?)
                 GlobalSet(idx) => {
                     new_function.instruction(&GlobalGet(idx));
                     primitive_record(&mut new_function, &types.globals[idx as usize])?;
@@ -1538,7 +1614,7 @@ pub struct Slot {
 }
 
 // A SlotUse represents any input from, or output to, a slot (identified by its global index).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub struct SlotUse(pub usize);
 
 // An Expression represents a collection of Slots that are initiatialized on entry and restored on exit.
@@ -1554,6 +1630,7 @@ pub struct OperatorType {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypedFunction {
+    pub first_slot: SlotUse,
     pub params: Vec<SlotUse>,
     pub locals: Vec<SlotUse>,
     pub ops: Vec<OperatorType>,
@@ -1562,6 +1639,7 @@ pub struct TypedFunction {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypedModule {
     pub slots: Vec<Slot>,
+    pub blocks: Vec<(SlotUse, SlotUse)>,
     pub globals: Vec<SlotUse>,
     pub funcs: Vec<TypedFunction>,
 }
@@ -1578,7 +1656,28 @@ pub struct SlotConnection {
     pub read: Option<Coordinate>,
 }
 
-pub type SlotConnections = Vec<SlotConnection>; // same index space as Slot #
+#[derive(Default)]
+pub struct SlotConnections {
+    pub connections: Vec<SlotConnection>, // same index space as Slot #
+    pub first_slot_of_func: Vec<SlotUse>, // indexed by "local" function idx (not including func imports)
+    pub blocks: Vec<(SlotUse, SlotUse)>,
+}
+
+impl SlotConnections {
+    pub fn slot_range(&self, local_func_idx: u32) -> Option<(usize, usize)> {
+        let lower_limit = self.first_slot_of_func[local_func_idx as usize];
+        let upper_limit = self
+            .first_slot_of_func
+            .get(local_func_idx as usize + 1)
+            .copied()
+            .unwrap_or(SlotUse(self.connections.len()));
+        if lower_limit.0 != upper_limit.0 {
+            Some((lower_limit.0, upper_limit.0))
+        } else {
+            None
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct SlotInfo {
@@ -1593,26 +1692,32 @@ pub struct AnnotatedOperatorType {
 }
 
 pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnections {
-    let mut cx = vec![
-        SlotConnection {
-            written: None,
-            read: None
-        };
-        tys.slots.len()
-    ];
+    let mut cx = SlotConnections {
+        connections: vec![
+            SlotConnection {
+                written: None,
+                read: None
+            };
+            tys.slots.len()
+        ],
+        first_slot_of_func: Vec::with_capacity(tys.funcs.len()),
+        blocks: tys.blocks.clone(),
+    };
 
     // locate globals
     for (Aligned { position_id, .. }, SlotUse(slot_idx)) in zip_eq(&module.globals, &tys.globals) {
-        cx[*slot_idx].written = Some(Coordinate {
+        cx.connections[*slot_idx].written = Some(Coordinate {
             position_id: *position_id,
             operand_num: 0,
         });
     }
 
     for (func, func_tys) in zip_eq(&module.functions, &tys.funcs) {
+        cx.first_slot_of_func.push(func_tys.first_slot);
+
         // locate params
         for (operand_num, SlotUse(slot_idx)) in func_tys.params.iter().enumerate() {
-            cx[*slot_idx].read = Some(Coordinate {
+            cx.connections[*slot_idx].read = Some(Coordinate {
                 position_id: func.positions.0,
                 operand_num,
             });
@@ -1629,7 +1734,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
                 local_counter.0 = Some(*position_id);
                 local_counter.1 = 0;
             }
-            cx[*slot_idx].written = Some(Coordinate {
+            cx.connections[*slot_idx].written = Some(Coordinate {
                 position_id: *position_id,
                 operand_num: local_counter.1,
             });
@@ -1639,7 +1744,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
             zip_eq(&func.operators, &func_tys.ops)
         {
             for (operand_num, SlotUse(idx)) in outputs.iter().enumerate() {
-                cx[*idx].written = Some(Coordinate {
+                cx.connections[*idx].written = Some(Coordinate {
                     position_id: *position_id,
                     operand_num,
                 });
@@ -1647,7 +1752,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
 
             for (operand_num, maybe_slot) in inputs.iter().enumerate() {
                 if let Some(SlotUse(idx)) = maybe_slot {
-                    cx[*idx].read = Some(Coordinate {
+                    cx.connections[*idx].read = Some(Coordinate {
                         position_id: *position_id,
                         operand_num,
                     });
@@ -1991,7 +2096,9 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::debug::{ExecutionState, RunLog, TerminationType, WasmValue};
+    use crate::debug::{
+        CallFrameOp, ExecutionState, RunLog, SlotContents, TerminationType, WasmValue,
+    };
     use regex::Regex;
     use wasmparser::{BlockType, FuncType};
 
@@ -2081,6 +2188,8 @@ pub(crate) mod tests {
                 for op in func.operators {
                     valid.operators.push(op.into());
                 }
+                assert_eq!(valid.operators.last().unwrap().inner.op, Operator::End);
+                valid.operators.last_mut().unwrap().inner.info = OpInfo::FuncEnd;
                 ret.functions.push(valid);
             }
 
@@ -2090,8 +2199,10 @@ pub(crate) mod tests {
         //block instruction with params and results
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
+            blocks: vec![(SlotUse(2), SlotUse(6))],
             globals: vec![],
             funcs: vec![TypedFunction {
+                first_slot: SlotUse(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![
@@ -2169,8 +2280,10 @@ pub(crate) mod tests {
         //if else with params and results
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32)],
+            blocks: vec![(SlotUse(1), SlotUse(4))],
             globals: vec![],
             funcs: vec![TypedFunction {
+                first_slot: SlotUse(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![
@@ -2253,8 +2366,10 @@ pub(crate) mod tests {
         //loop with param and return
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
+            blocks: vec![(SlotUse(1), SlotUse(6))],
             globals: vec![],
             funcs: vec![TypedFunction {
+                first_slot: SlotUse(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![
@@ -2343,8 +2458,10 @@ pub(crate) mod tests {
         //nested block and if
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
+            blocks: vec![(SlotUse(2), SlotUse(5)), (SlotUse(1), SlotUse(6))],
             globals: vec![],
             funcs: vec![TypedFunction {
+                first_slot: SlotUse(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![
@@ -2441,8 +2558,10 @@ pub(crate) mod tests {
         //empty block
         let output = TypedModule {
             slots: vec![],
+            blocks: vec![(SlotUse(0), SlotUse(0))],
             globals: vec![],
             funcs: vec![TypedFunction {
+                first_slot: SlotUse(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![ins(vec![]), ins(vec![]), ins(vec![])],
@@ -2496,6 +2615,7 @@ pub(crate) mod tests {
             let mut mem_exists = false;
             let wasm_bin = valid_module.build_instrumented_binary(&TypedModule {
                 slots: vec![],
+                blocks: vec![],
                 globals: vec![],
                 funcs: vec![],
             })?;
@@ -2722,6 +2842,25 @@ pub(crate) mod tests {
         linker.func_wrap("codillon_debug", "record_f64", |ctx: Ctx<'_>, v: f64, s| {
             ctx.data().record_slot(v, s)
         })?;
+        linker.func_wrap("codillon_debug", "enter_func", |ctx: Ctx<'_>, func_idx| {
+            ctx.data().call_frame_op(CallFrameOp::EnterFunc(func_idx));
+        })?;
+        linker.func_wrap("codillon_debug", "before_call", |ctx: Ctx<'_>| {
+            ctx.data().call_frame_op(CallFrameOp::BeforeCall);
+        })?;
+        linker.func_wrap("codillon_debug", "after_call", |ctx: Ctx<'_>, func_idx| {
+            ctx.data().call_frame_op(CallFrameOp::AfterCall(func_idx));
+        })?;
+        linker.func_wrap("codillon_debug", "before_tail_call", |ctx: Ctx<'_>| {
+            ctx.data().call_frame_op(CallFrameOp::BeforeTailCall);
+        })?;
+        linker.func_wrap(
+            "codillon_debug",
+            "enter_block",
+            |ctx: Ctx<'_>, block_idx| {
+                ctx.data().call_frame_op(CallFrameOp::EnterBlock(block_idx));
+            },
+        )?;
 
         let instance = linker.instantiate(&mut store, &module)?;
         let main = instance.get_func(&mut store, "main").expect("main export");
@@ -2746,9 +2885,14 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 4)))
   (import "codillon_debug" "record_i64" (func (type 5)))
   (import "codillon_debug" "record_f64" (func (type 6)))
+  (import "codillon_debug" "enter_func" (func (type 7)))
+  (import "codillon_debug" "before_call" (func (type 2)))
+  (import "codillon_debug" "after_call" (func (type 7)))
+  (import "codillon_debug" "before_tail_call" (func (type 2)))
+  (import "codillon_debug" "enter_block" (func (type 7)))
 "#;
 
-    const EXPECTED_MAIN: &str = r#"  (export "main" (func 6))
+    const EXPECTED_MAIN: &str = r#"  (export "main" (func 11))
 "#;
 
     const EXPECTED_STEP: &str = r#"  (func (type 7) (param i32)
@@ -2782,9 +2926,11 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 6
     i32.const 0
-    call 7
+    call 12
+    i32.const 0
+    call 12
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2805,9 +2951,11 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 6
+    i32.const 0
+    call 12
     i32.const 1
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2826,10 +2974,12 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 6
     i32.const 1
-    call 7
+    call 12
     i32.const 1
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2849,9 +2999,11 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 6
+    i32.const 0
+    call 12
     i32.const 1
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -2873,17 +3025,19 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 6
     i32.const 0
-    call 7
+    call 12
+    i32.const 0
+    call 12
     i64.const 17
     i32.const 0
-    call 8
+    call 13
     i32.const 1
-    call 7
+    call 12
     drop
     i32.const 2
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + r#"  (func (type 8) (param i64 i32) (result i64)
@@ -2902,15 +3056,17 @@ pub(crate) mod tests {
 
         // well-formed block
         const JUST_BLOCK_END: &str = r#"    i32.const 0
-    call 7
+    call 6
+    i32.const 0
+    call 12
     i32.const 1
-    call 7
+    call 12
     block ;; label = @1
       i32.const 2
-      call 7
+      call 12
     end
     i32.const 3
-    call 7
+    call 12
   )
 "#;
         {
@@ -2969,25 +3125,27 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 6
+    i32.const 0
+    call 12
     i32.const 1
-    call 7
+    call 12
     i32.const 137
     i32.const 0
-    call 8
+    call 13
     i32.const 2
-    call 7
+    call 12
     i32.const 2
     call 1
     unreachable
     i32.add
     i32.const 3
-    call 8
+    call 13
     i32.const 3
-    call 7
+    call 12
     drop
     i32.const 4
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + EXPECTED_RECORD_I32
@@ -3013,12 +3171,14 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 0)))
-  (export "main" (func 7))
+  (export "main" (func 12))
   (func (type 0)
+    i32.const 0
+    call 6
     i32.const 6
-    call 8
+    call 13
     i32.const 6
-    call 8
+    call 13
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3069,21 +3229,25 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 6
+    i32.const 0
+    call 12
     i32.const 1
-    call 7
+    call 12
     block ;; label = @1
       i32.const 2
-      call 7
+      call 12
       loop ;; label = @2
+        i32.const 1
+        call 10
         i32.const 4
-        call 7
+        call 12
       end
       i32.const 5
-      call 7
+      call 12
     end
     i32.const 6
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3105,15 +3269,17 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 6
+    i32.const 0
+    call 12
     i32.const 1
-    call 7
+    call 12
     i32.const 1
     call 1
     unreachable
     nop
     i32.const 2
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3137,22 +3303,24 @@ pub(crate) mod tests {
                 + "  (memory 0)\n"
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
+    i32.const 0
+    call 6
     i32.const 1
-    call 7
+    call 12
     i32.const 2
-    call 7
+    call 12
     i32.const 2
     call 1
     unreachable
     nop
     i32.const 3
-    call 7
+    call 12
     i32.const 3
     call 1
     unreachable
     drop
     i32.const 4
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3176,23 +3344,27 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 6
     i32.const 0
-    call 7
+    call 12
+    i32.const 0
+    call 12
     loop ;; label = @1
+      i32.const 0
+      call 10
       i32.const 1
-      call 7
+      call 12
       i32.const 5
       i32.const 0
-      call 8
+      call 13
       i32.const 2
-      call 7
+      call 12
       br 0 (;@1;)
       i32.const 3
-      call 7
+      call 12
     end
     i32.const 4
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + EXPECTED_RECORD_I32
@@ -3217,14 +3389,16 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     i32.const 0
-    call 7
+    call 6
+    i32.const 0
+    call 12
     i32.const 1
-    call 7
+    call 12
     i32.const 4
     i32.const 0
-    call 8
+    call 13
     i32.const 2
-    call 7
+    call 12
     i32.const 2
     call 1
     unreachable
@@ -3261,47 +3435,59 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 5)))
   (import "codillon_debug" "record_i64" (func (type 6)))
   (import "codillon_debug" "record_f64" (func (type 7)))
-  (export "main" (func 6))
+  (import "codillon_debug" "enter_func" (func (type 8)))
+  (import "codillon_debug" "before_call" (func (type 3)))
+  (import "codillon_debug" "after_call" (func (type 8)))
+  (import "codillon_debug" "before_tail_call" (func (type 3)))
+  (import "codillon_debug" "enter_block" (func (type 8)))
+  (export "main" (func 11))
   (func (type 0)
     i32.const 0
-    call 8
+    call 6
+    i32.const 0
+    call 13
     i32.const 1
-    call 8
+    call 13
     call 7
+    call 12
     i32.const 0
     i32.const 1
-    call 9
+    call 14
+    i32.const 0
+    call 8
     i32.const -2147483647
-    call 8
+    call 13
     i32.const 2
-    call 8
+    call 13
     i32.add
     i32.const 2
-    call 10
+    call 15
     i32.const 3
-    call 8
+    call 13
     i32.const 3
     call 1
     unreachable
   )
   (func (type 1) (result i32 i32)
+    i32.const 1
+    call 6
     i32.const 4
-    call 8
+    call 13
     i32.const 5
-    call 8
+    call 13
     i32.const 9
     i32.const 3
-    call 10
+    call 15
     i32.const 6
-    call 8
+    call 13
     i32.const 10
     i32.const 4
-    call 10
+    call 15
     i32.const 7
-    call 8
+    call 13
     i32.const 5
     i32.const 6
-    call 9
+    call 14
   )
   (func (type 8) (param i32)
     local.get 0
@@ -3353,6 +3539,8 @@ pub(crate) mod tests {
                 + EXPECTED_MAIN
                 + r#"  (func (type 0)
     (local i32 i32 i32 f64)
+    i32.const 0
+    call 6
     local.get 0
     i32.const 0
     call 2
@@ -3366,9 +3554,9 @@ pub(crate) mod tests {
     i32.const 3
     call 5
     i32.const 0
-    call 7
+    call 12
     i32.const 4
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3397,26 +3585,33 @@ pub(crate) mod tests {
   (import "codillon_debug" "record_f32" (func (type 5)))
   (import "codillon_debug" "record_i64" (func (type 6)))
   (import "codillon_debug" "record_f64" (func (type 7)))
-  (export "main" (func 6))
+  (import "codillon_debug" "enter_func" (func (type 8)))
+  (import "codillon_debug" "before_call" (func (type 3)))
+  (import "codillon_debug" "after_call" (func (type 8)))
+  (import "codillon_debug" "before_tail_call" (func (type 3)))
+  (import "codillon_debug" "enter_block" (func (type 8)))
+  (export "main" (func 11))
   (func (type 0)
     i32.const 0
-    call 7
+    call 6
+    i32.const 0
+    call 12
     i32.const 1
-    call 7
+    call 12
     i32.const 1
     call 1
     unreachable
     block (type 1) (param i32) ;; label = @1
       i32.const 1
-      call 8
+      call 13
       i32.const 2
-      call 7
+      call 12
       i32.const 2
       call 1
       unreachable
     end
     i32.const 3
-    call 7
+    call 12
   )
   (func (type 8) (param i32)
     local.get 0
@@ -3455,17 +3650,22 @@ pub(crate) mod tests {
                 + EXPECTED_TYPES
                 + EXPECTED_IMPORTS
                 + r#"  (import "codillon_debug" "func_placeholder" (func (type 0)))
-  (export "main" (func 7))
+  (export "main" (func 12))
   (func (type 0)
-    i32.const 1
-    call 8
-    i32.const 2
-    call 8
+    i32.const 0
     call 6
+    i32.const 1
+    call 13
+    i32.const 2
+    call 13
+    call 7
+    call 11
+    i32.const 0
+    call 8
     i32.const -2147483646
-    call 8
+    call 13
     i32.const 3
-    call 8
+    call 13
   )
 "# + EXPECTED_STEP
                 + ")\n";
@@ -3840,28 +4040,30 @@ pub(crate) mod tests {
 "# + EXPECTED_IMPORTS
                 + r#"  (memory 1)
   (global (mut i64) i64.const 11)
-  (export "main" (func 6))
+  (export "main" (func 11))
   (func (type 0) (result i32)
+    i32.const 0
+    call 6
     i32.const 1
-    call 7
+    call 12
     i32.const 3
-    call 7
+    call 12
     i32.const 0
     i32.const 0
-    call 8
+    call 13
     i32.const 4
-    call 7
+    call 12
     global.get 0
     i64.const 11
     i64.sub
-    call 9
+    call 14
     i32.load offset=7
     i32.const 1
-    call 8
+    call 13
     i32.const 5
-    call 7
+    call 12
     i32.const 2
-    call 8
+    call 13
   )
 "# + EXPECTED_STEP
                 + EXPECTED_RECORD_I32
@@ -3910,29 +4112,31 @@ pub(crate) mod tests {
 "# + EXPECTED_IMPORTS
                 + r#"  (memory 65536)
   (global (mut i64) i64.const 4294967295)
-  (export "main" (func 6))
+  (export "main" (func 11))
   (func (type 0)
+    i32.const 0
+    call 6
     i32.const 1
-    call 7
+    call 12
     i32.const 2
-    call 7
+    call 12
     i32.const -10
     i32.const 0
-    call 8
+    call 13
     i32.const 3
-    call 7
+    call 12
     f64.const 0x1.cp+2 (;=7;)
     i32.const 1
-    call 9
+    call 14
     i32.const 4
-    call 7
+    call 12
     global.get 0
     i64.const 9
     i64.sub
-    call 10
+    call 15
     f64.store offset=1
     i32.const 5
-    call 7
+    call 12
   )
 "# + EXPECTED_STEP
                 + EXPECTED_RECORD_I32
@@ -4032,6 +4236,11 @@ pub(crate) mod tests {
             assert_eq!(TerminationType::TooManySteps, log.termination_type());
         }
 
+        // helper for SlotContents -> WasmValue to match previous API
+        fn c2v(c: Option<SlotContents>) -> Option<WasmValue> {
+            c.map(|x| x.val)
+        }
+
         // Test basic "slot" assignments
         {
             let mut editor = FakeTextBuffer::default();
@@ -4052,25 +4261,25 @@ pub(crate) mod tests {
             assert_eq!(6, log.step_count());
 
             let mut state = ExecutionState::default();
-            state.reset(connections.len());
+            state.reset(&connections);
 
-            state.goto_step(&log, 5, None);
-            assert_eq!(state.step, 5);
-            assert_eq!(connections.len(), 3);
+            state.goto_step(&log, &connections, 5, None);
+            assert_eq!(state.next_step, 6);
+            assert_eq!(connections.connections.len(), 3);
             assert_eq!(state.slots.len(), 3);
-            assert_eq!(state.slots[0], Some(WasmValue::I32(5)));
-            assert_eq!(state.slots[1], Some(WasmValue::I32(9)));
-            assert_eq!(state.slots[2], Some(WasmValue::I32(14)));
+            assert_eq!(c2v(state.slot_contents(0)), Some(WasmValue::I32(5)));
+            assert_eq!(c2v(state.slot_contents(1)), Some(WasmValue::I32(9)));
+            assert_eq!(c2v(state.slot_contents(2)), Some(WasmValue::I32(14)));
             assert_eq!(state.status.line_num, Some(5));
             assert_eq!(state.status.termination, TerminationType::Success);
 
-            state.goto_step(&log, 2, None);
-            assert_eq!(state.step, 2);
-            assert_eq!(connections.len(), 3);
+            state.goto_step(&log, &connections, 2, None);
+            assert_eq!(state.next_step, 3);
+            assert_eq!(connections.connections.len(), 3);
             assert_eq!(state.slots.len(), 3);
-            assert_eq!(state.slots[0], Some(WasmValue::I32(5)));
-            assert_eq!(state.slots[1], None);
-            assert_eq!(state.slots[2], None);
+            assert_eq!(c2v(state.slot_contents(0)), Some(WasmValue::I32(5)));
+            assert_eq!(c2v(state.slot_contents(1)), None);
+            assert_eq!(c2v(state.slot_contents(2)), None);
             assert_eq!(state.status.line_num, Some(2));
             assert_eq!(state.status.termination, TerminationType::Running);
         }
@@ -4093,15 +4302,57 @@ pub(crate) mod tests {
             assert_eq!(6, log.step_count());
 
             let mut state = ExecutionState::default();
-            state.reset(connections.len());
+            state.reset(&connections);
 
-            state.goto_step(&log, 4, None);
-            assert_eq!(state.step, 4);
-            assert_eq!(connections.len(), 0);
+            state.goto_step(&log, &connections, 4, None);
+            assert_eq!(state.next_step, 5);
+            assert_eq!(connections.connections.len(), 0);
             assert_eq!(state.slots.len(), 0);
             assert_eq!(state.status.line_num, Some(1));
             assert_eq!(state.status.below_line, true);
             assert_eq!(state.status.termination, TerminationType::Running);
+        }
+
+        // Test recursive call
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("i32.const 2");
+            editor.push_line("call $x");
+            editor.push_line(")");
+            editor.push_line("(func $x (param $n i32)");
+            editor.push_line("local.get $n");
+            editor.push_line("i32.eqz");
+            editor.push_line("br_if 0");
+            editor.push_line("local.get $n");
+            editor.push_line("i32.const 1");
+            editor.push_line("i32.sub");
+            editor.push_line("call $x");
+            editor.push_line(")");
+
+            let EditorOutput {
+                binary,
+                connections,
+                ..
+            } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(TerminationType::Success, log.termination_type());
+            assert_eq!(29, log.step_count());
+
+            let mut state = ExecutionState::default();
+            state.reset(&connections);
+
+            state.goto_step(&log, &connections, 22, None);
+            assert_eq!(state.next_step, 23);
+            assert_eq!(c2v(state.slot_contents(2)), Some(0.into())); // param of $x function
+
+            state.goto_step(&log, &connections, 23, None);
+            assert_eq!(state.next_step, 24);
+            assert_eq!(c2v(state.slot_contents(2)), Some(1.into())); // param of $x function after stack unwinds
+
+            state.goto_step(&log, &connections, 25, None);
+            assert_eq!(state.next_step, 26);
+            assert_eq!(c2v(state.slot_contents(2)), Some(2.into())); // param of $x function after stack unwinds again
         }
 
         Ok(())
