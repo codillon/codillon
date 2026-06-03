@@ -1140,8 +1140,8 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
         }
     }
 
-    pub fn set_arrow_location(&mut self, smooth: bool, loc: Option<(usize, usize)>) {
-        let Some((line_idx, indent)) = loc else {
+    pub fn set_arrow_location(&mut self, smooth: bool, loc: Option<(usize, bool, usize)>) {
+        let Some((line_idx, below_line, indent)) = loc else {
             self.arrow_mut().get_mut().1.0.remove_attribute("href");
             return;
         };
@@ -1151,10 +1151,11 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
             .1
             .0
             .set_attribute("href", "#arrow");
+        let below_line_offset = if below_line { LINE_SPACING / 2 } else { 0 };
         self.arrow_mut().goto(
             smooth,
             X_OFFSET_PX + indent * INDENT_PX - 4,
-            line_idx * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX,
+            line_idx * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX + below_line_offset,
         );
     }
 

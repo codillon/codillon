@@ -1310,9 +1310,10 @@ impl<'a> ValidModule<'a> {
             Ok(())
         };
 
-        let step_debug = |f: &mut wasm_encoder::Function, line_number: usize| {
+        let step_debug = |f: &mut wasm_encoder::Function, line_number: usize, below: bool| {
             // Step before each operator evaluation
-            f.instruction(&I32Const(line_number.try_into().expect("line_no -> i32")));
+            let idx = line_number as i32 | if below { 1 << 31 } else { 0 };
+            f.instruction(&I32Const(idx));
             f.instruction(&Call(step_function_idx));
         };
 
@@ -1338,11 +1339,11 @@ impl<'a> ValidModule<'a> {
             primitive_record(&mut new_function, local)?;
         }
 
-        step_debug(&mut new_function, orig_function.lines.0);
+        step_debug(&mut new_function, orig_function.lines.0, false);
 
         // Record all operators, translating func idxes as necessary
         for (i, codillon_operator) in orig_function.operators.iter().enumerate() {
-            step_debug(&mut new_function, codillon_operator.line_idx);
+            step_debug(&mut new_function, codillon_operator.line_idx, false);
 
             let mut op = RoundtripReencoder.instruction(codillon_operator.inner.op.clone())?;
             let op_type = &typed_function.ops[i];
@@ -1411,13 +1412,13 @@ impl<'a> ValidModule<'a> {
                 new_function.instruction(&op);
             }
 
-            if matches!(op, Call(_) | CallIndirect { .. }) {
-                // special handling: step this twice so pointer can return to the callsite after complete
-                step_debug(&mut new_function, codillon_operator.line_idx);
-            }
-
             // record result operands
             transparent_record_results(&mut new_function, &op_type.outputs);
+
+            if matches!(op, Call(_) | CallIndirect { .. }) {
+                // special handling: step this twice so pointer can return to the callsite after complete
+                step_debug(&mut new_function, codillon_operator.line_idx, true);
+            }
 
             // did this operator change a global or local (XXX or memory?)
             match op {
@@ -3267,11 +3268,11 @@ pub(crate) mod tests {
     i32.const 1
     call 8
     call 7
-    i32.const 1
-    call 8
     i32.const 0
     i32.const 1
     call 9
+    i32.const -2147483647
+    call 8
     i32.const 2
     call 8
     i32.add
@@ -3461,7 +3462,7 @@ pub(crate) mod tests {
     i32.const 2
     call 8
     call 6
-    i32.const 2
+    i32.const -2147483646
     call 8
     i32.const 3
     call 8
@@ -4052,14 +4053,55 @@ pub(crate) mod tests {
 
             let mut state = ExecutionState::default();
             state.reset(connections.len());
-            state.goto_step(&log, 5, None);
 
+            state.goto_step(&log, 5, None);
             assert_eq!(state.step, 5);
             assert_eq!(connections.len(), 3);
             assert_eq!(state.slots.len(), 3);
             assert_eq!(state.slots[0], Some(WasmValue::I32(5)));
             assert_eq!(state.slots[1], Some(WasmValue::I32(9)));
             assert_eq!(state.slots[2], Some(WasmValue::I32(14)));
+            assert_eq!(state.status.line_num, Some(5));
+            assert_eq!(state.status.termination, TerminationType::Success);
+
+            state.goto_step(&log, 2, None);
+            assert_eq!(state.step, 2);
+            assert_eq!(connections.len(), 3);
+            assert_eq!(state.slots.len(), 3);
+            assert_eq!(state.slots[0], Some(WasmValue::I32(5)));
+            assert_eq!(state.slots[1], None);
+            assert_eq!(state.slots[2], None);
+            assert_eq!(state.status.line_num, Some(2));
+            assert_eq!(state.status.termination, TerminationType::Running);
+        }
+
+        // Test calls
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("call $x");
+            editor.push_line(")");
+            editor.push_line("(func $x)");
+
+            let EditorOutput {
+                binary,
+                connections,
+                ..
+            } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(TerminationType::Success, log.termination_type());
+            assert_eq!(6, log.step_count());
+
+            let mut state = ExecutionState::default();
+            state.reset(connections.len());
+
+            state.goto_step(&log, 4, None);
+            assert_eq!(state.step, 4);
+            assert_eq!(connections.len(), 0);
+            assert_eq!(state.slots.len(), 0);
+            assert_eq!(state.status.line_num, Some(1));
+            assert_eq!(state.status.below_line, true);
+            assert_eq!(state.status.termination, TerminationType::Running);
         }
 
         Ok(())

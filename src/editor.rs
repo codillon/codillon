@@ -3,7 +3,7 @@
 use crate::{
     action_history::{ActionHistory, Edit},
     autocomplete::Autocomplete,
-    debug::{ExecutionState, RUN_LOG, TerminationType, run_binary},
+    debug::{ExecutionState, ExecutionStatus, RUN_LOG, TerminationType, run_binary},
     dom_canvas::DomCanvas,
     dom_struct::DomStruct,
     dom_vec::DomVec,
@@ -281,10 +281,17 @@ impl Editor {
 
         fn find_error(state: &ExecutionState) -> Option<(usize, &str)> {
             Some(match &state.status {
-                Some((line_no, TerminationType::Error, Some(msg))) => (*line_no, msg),
-                Some((line_no, TerminationType::HitBadImport, _)) => {
-                    (*line_no, "called unknown import")
-                }
+                ExecutionStatus {
+                    line_num: Some(line_num),
+                    termination: TerminationType::Error,
+                    error: Some(msg),
+                    ..
+                } => (*line_num, msg),
+                ExecutionStatus {
+                    line_num: Some(line_num),
+                    termination: TerminationType::HitBadImport,
+                    ..
+                } => (*line_num, "called unknown import"),
                 _ => return None,
             })
         }
@@ -316,11 +323,17 @@ impl Editor {
         }
 
         if step_count > 1
-            && let Some((line_no, _, _)) = &self.execution_state.status
-            && let Some(indent) = &self.text()[*line_no].info().indent.clone()
+            && let ExecutionStatus {
+                line_num: Some(line_num),
+                below_line,
+                ..
+            } = &self.execution_state.status
+            && let Some(indent) = &self.text()[*line_num].info().indent.clone()
         {
-            get_mut!(self.component, image)
-                .set_arrow_location(!source_changed, Some((*line_no, *indent as usize)));
+            get_mut!(self.component, image).set_arrow_location(
+                !source_changed,
+                Some((*line_num, *below_line, *indent as usize)),
+            );
             if self.scroll_on_next_input {
                 get_mut!(self.component, image).scroll_to_arrow();
                 self.scroll_on_next_input = false;
