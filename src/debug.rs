@@ -322,17 +322,27 @@ impl ExecutionStep {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default)]
+pub struct ExecutionStatus {
+    pub line_num: Option<usize>,
+    pub below_line: bool,
+    // after returning from a call (the second step at the same line_num),
+    // the arrow is offset to show call has completed (result slots are already written)
+    pub termination: TerminationType,
+    pub error: Option<String>,
+}
+
+#[derive(Default)]
 pub struct ExecutionState {
     pub step: usize,
     pub slots: Vec<Option<WasmValue>>,
-    pub status: Option<(usize, TerminationType, Option<String>)>,
+    pub status: ExecutionStatus,
 }
 
 impl ExecutionState {
     pub fn reset(&mut self, slot_count: usize) {
         self.step = 0;
-        self.status = None;
+        self.status = Default::default();
         self.slots.resize(slot_count, None);
         for slot in self.slots.iter_mut() {
             *slot = None;
@@ -363,15 +373,17 @@ impl ExecutionState {
             });
         }
         self.step = target;
-        self.status = Some((
-            log.with_completed_step(target, |s| s.line_num as usize),
-            if target + 1 == log.step_count() {
-                log.termination_type()
-            } else {
-                TerminationType::Running
-            },
-            log.error_string(),
-        ));
+        log.with_completed_step(target, |s| {
+            // top bit: whether arrow should be offset for an "after call" step
+            self.status.line_num = Some((s.line_num & 0x7fff_ffff) as usize);
+            self.status.below_line = s.line_num & 0x8000_0000 != 0;
+        });
+        self.status.termination = if target + 1 == log.step_count() {
+            log.termination_type()
+        } else {
+            TerminationType::Running
+        };
+        self.status.error = log.error_string();
     }
 }
 
