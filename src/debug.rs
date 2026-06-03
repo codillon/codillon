@@ -23,14 +23,162 @@ use wasm_bindgen::{JsCast, prelude::*};
 
 const MAX_STEP_COUNT: usize = 100_000;
 
+pub struct RunLog {
+    termination: Cell<TerminationType>,
+    error_str: CodillonCell<String>,
+    step_count: Cell<usize>,
+    steps: Box<[CodillonCell<ExecutionStep>]>,
+}
+
+impl Default for RunLog {
+    fn default() -> Self {
+        Self {
+            termination: Cell::new(Default::default()),
+            error_str: CodillonCell::new(Default::default()),
+            step_count: Cell::new(0),
+            steps: (0..MAX_STEP_COUNT)
+                .map(|_| CodillonCell::new(ExecutionStep::default()))
+                .collect(),
+        }
+    }
+}
+
+impl RunLog {
+    pub fn termination_type(&self) -> TerminationType {
+        self.termination.get()
+    }
+
+    pub fn set_termination_type(&self, tt: TerminationType) {
+        self.termination.set(tt)
+    }
+
+    pub fn step_count(&self) -> usize {
+        self.step_count.get()
+    }
+
+    fn reset(&self) {
+        self.termination.set(Default::default());
+        self.error_str.set(String::new());
+        self.step_count.set(0);
+        self.with_current_step_mut(|step| step.reset());
+    }
+
+    fn with_current_step_mut<T, F>(&self, func: F) -> T
+    where
+        F: FnOnce(&mut ExecutionStep) -> T,
+    {
+        self.steps[self.step_count.get()].with_mut(|step| func(step))
+    }
+
+    fn commit_step(&self) {
+        debug_assert!(self.step_count.get() < MAX_STEP_COUNT);
+        self.step_count.set(self.step_count.get() + 1);
+        self.with_current_step_mut(|step| step.reset());
+    }
+
+    fn with_completed_step<T, F>(&self, idx: usize, func: F) -> T
+    where
+        F: FnOnce(&ExecutionStep) -> T,
+    {
+        debug_assert!(idx < MAX_STEP_COUNT);
+        debug_assert!(idx < self.step_count());
+        self.steps[idx].with(|step| func(step))
+    }
+
+    fn error_string(&self) -> Option<String> {
+        if self.termination_type() == TerminationType::Error {
+            self.error_str.with(|err| Some(err.clone()))
+        } else {
+            None
+        }
+    }
+
+    fn set_error_string(&self, s: String) {
+        self.error_str.set(s)
+    }
+
+    pub fn wasm_step(&self, line_num: u32) -> bool {
+        use TerminationType::*;
+        if self.termination_type() == HitBadImport && self.step_count() > 0 {
+            self.with_completed_step(self.step_count() - 1, |completed| {
+                self.with_current_step_mut(|current| {
+                    current.line_num = completed.line_num;
+                })
+            });
+        } else {
+            self.with_current_step_mut(|step| step.line_num = line_num);
+        }
+
+        self.commit_step();
+
+        match self.termination_type() {
+            Running => (),
+            TooManySteps => panic!("execution unexpectedly continued after TooManySteps"),
+            HitInvalid | HitBadImport => return false,
+            Error => panic!("execution unexpectedly continued after Error"),
+            Success => panic!("execution unexpectedly continued after Success"),
+        }
+
+        // Signal halt
+        if self.step_count() >= MAX_STEP_COUNT - 1 {
+            self.set_termination_type(TerminationType::TooManySteps);
+            return false;
+        }
+
+        true
+    }
+
+    pub fn graphics_op(&self, act: Action) {
+        self.with_current_step_mut(|step| {
+            debug_assert!(step.graphics_op.is_none());
+            step.graphics_op = Some(act);
+        });
+    }
+
+    pub fn record_slot(&self, val: impl Into<WasmValue>, slot: u32) {
+        self.with_current_step_mut(|step| step.slot_assignments.push((slot, val.into())));
+    }
+
+    pub fn finish(&self, result: Result<(), String>) -> Result<()> {
+        match result {
+            Ok(()) => match self.termination_type() {
+                TerminationType::Running => self.set_termination_type(TerminationType::Success),
+                TerminationType::TooManySteps
+                | TerminationType::HitInvalid
+                | TerminationType::HitBadImport
+                | TerminationType::Success
+                | TerminationType::Error => {
+                    unreachable!("success after other result");
+                }
+            },
+            Err(err) => match self.termination_type() {
+                TerminationType::Running => {
+                    if self.step_count() > 0 {
+                        self.with_completed_step(self.step_count() - 1, |completed| {
+                            self.with_current_step_mut(|current| {
+                                current.line_num = completed.line_num;
+                            })
+                        });
+                    }
+                    self.commit_step();
+                    self.set_termination_type(TerminationType::Error);
+                    self.set_error_string(err);
+                }
+                TerminationType::HitInvalid
+                | TerminationType::HitBadImport
+                | TerminationType::TooManySteps => {} // error is expected
+                TerminationType::Success | TerminationType::Error => {
+                    unreachable!("error after other result");
+                }
+            },
+        }
+        Ok(())
+    }
+}
+
 // Debug state stored in Wasm memory
 thread_local! {
-    static TERMINATION: Cell<TerminationType> = Cell::new(Default::default());
-    static ERROR_STR: CodillonCell<String> = CodillonCell::new(Default::default());
-    static STEP_COUNT: Cell<usize> = const { Cell::new(0) };
-    static STEPS: Box<[CodillonCell<ExecutionStep>]> = (0..MAX_STEP_COUNT)
-                .map(|_| CodillonCell::new(ExecutionStep::default()))
-                .collect();
+    pub static RUN_LOG: RunLog = Default::default();
     static INSTRUMENTATION_IMPORTS: Object = make_imports().expect("instrumentation");
 }
 
@@ -100,7 +248,7 @@ impl<T: Default> CodillonCell<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WasmValue {
     I32(i32),
     I64(i64),
@@ -157,51 +305,6 @@ pub enum TerminationType {
     Success,
 }
 
-fn reset_debug_state() {
-    TERMINATION.set(Default::default());
-    ERROR_STR.with(|e| e.set(String::new()));
-    STEP_COUNT.set(0);
-    with_current_step_mut(|step| step.reset());
-}
-
-fn commit_step() {
-    assert!(STEP_COUNT.get() < MAX_STEP_COUNT);
-    STEP_COUNT.set(STEP_COUNT.get() + 1);
-    with_current_step_mut(|step| step.reset());
-}
-
-pub fn termination_type() -> TerminationType {
-    TERMINATION.get()
-}
-
-pub fn step_count() -> usize {
-    STEP_COUNT.get()
-}
-
-fn with_completed_step<T, F>(idx: usize, func: F) -> T
-where
-    F: FnOnce(&ExecutionStep) -> T,
-{
-    assert!(idx < MAX_STEP_COUNT);
-    assert!(idx < step_count());
-    STEPS.with(|step_cell| step_cell[idx].with(|step| func(step)))
-}
-
-fn with_current_step_mut<T, F>(func: F) -> T
-where
-    F: FnOnce(&mut ExecutionStep) -> T,
-{
-    STEPS.with(|step_cell| step_cell[step_count()].with_mut(|step| func(step)))
-}
-
-fn error_string() -> Option<String> {
-    if termination_type() == TerminationType::Error {
-        ERROR_STR.with(|e| e.with(|err| Some(err.clone())))
-    } else {
-        None
-    }
-}
-
 #[derive(Default, Debug)]
 struct ExecutionStep {
     line_num: u32,
@@ -236,34 +339,38 @@ impl ExecutionState {
         }
     }
 
-    pub fn goto_step(&mut self, target_step: usize, canvas: &mut DomCanvas) {
-        if self.step > target_step || self.step == 0 {
+    pub fn goto_step(&mut self, log: &RunLog, target: usize, mut canvas: Option<&mut DomCanvas>) {
+        if self.step > target || self.step == 0 {
             // XXX save checkpoints?
             self.reset(self.slots.len());
-            canvas.reset();
+            if let Some(canvas) = canvas.as_mut() {
+                canvas.reset()
+            };
             self.step = 0;
         }
-        if step_count() == 0 {
+        if log.step_count() == 0 {
             return;
         }
-        assert!(target_step < step_count());
-        for step in self.step..=target_step {
-            with_completed_step(step, |s| {
+        assert!(target < log.step_count());
+        for step in self.step..=target {
+            log.with_completed_step(step, |s| {
                 for (slot_idx, value) in &s.slot_assignments {
                     self.slots[*slot_idx as usize] = Some(*value);
                 }
-                canvas.render(&s.graphics_op);
+                if let Some(canvas) = canvas.as_mut() {
+                    canvas.render(&s.graphics_op)
+                }
             });
         }
-        self.step = target_step;
+        self.step = target;
         self.status = Some((
-            with_completed_step(target_step, |s| s.line_num as usize),
-            if target_step + 1 == step_count() {
-                termination_type()
+            log.with_completed_step(target, |s| s.line_num as usize),
+            if target + 1 == log.step_count() {
+                log.termination_type()
             } else {
                 TerminationType::Running
             },
-            error_string(),
+            log.error_string(),
         ));
     }
 }
@@ -279,56 +386,28 @@ where
 // Constructs the instrumentation functions for import
 fn make_imports() -> Result<Object, JsValue> {
     let imports = Object::new();
-    let debug_numbers = Object::new();
 
-    // Updating the debug state at every step. Returns whether execution should continue.
-    let step_closure = Closure::wrap(Box::new(move |line_num: u32| -> bool {
-        use TerminationType::*;
-        if termination_type() == HitBadImport && step_count() > 0 {
-            with_completed_step(step_count() - 1, |completed| {
-                with_current_step_mut(|current| {
-                    current.line_num = completed.line_num;
-                })
-            });
-        } else {
-            with_current_step_mut(|step| step.line_num = line_num);
-        }
+    {
+        let codillon_debug = Object::new();
 
-        commit_step();
+        // Updating the debug state at every step. Returns whether execution should continue.
+        let step_closure: ScopedClosure<'_, dyn Fn(u32) -> bool> =
+            Closure::new(|line_num: u32| RUN_LOG.with(|r| r.wasm_step(line_num)));
+        register_closure(&codillon_debug, "record_step", step_closure);
 
-        match termination_type() {
-            Running => (),
-            TooManySteps => panic!("execution unexpectedly continued after TooManySteps"),
-            HitInvalid | HitBadImport => return false,
-            Error => panic!("execution unexpectedly continued after Error"),
-            Success => panic!("execution unexpectedly continued after Success"),
-        }
+        let record_invalid: ScopedClosure<'_, dyn Fn()> =
+            Closure::new(|| RUN_LOG.with(|r| r.set_termination_type(TerminationType::HitInvalid)));
+        register_closure(&codillon_debug, "record_invalid", record_invalid);
 
-        // Signal halt
-        if step_count() >= MAX_STEP_COUNT - 1 {
-            TERMINATION.set(TerminationType::TooManySteps);
-            return false;
-        }
+        let func_placeholder: ScopedClosure<'_, dyn Fn()> = Closure::new(|| {
+            RUN_LOG.with(|r| r.set_termination_type(TerminationType::HitBadImport))
+        });
+        register_closure(&codillon_debug, "func_placeholder", func_placeholder);
 
-        true
-    }) as Box<dyn Fn(u32) -> bool>);
-    register_closure(&debug_numbers, "record_step", step_closure);
+        create_closure_record_operations(&codillon_debug);
 
-    let record_invalid =
-        Closure::wrap(
-            Box::new(move || TERMINATION.set(TerminationType::HitInvalid)) as Box<dyn Fn()>,
-        );
-    register_closure(&debug_numbers, "record_invalid", record_invalid);
-
-    let func_placeholder =
-        Closure::wrap(
-            Box::new(move || TERMINATION.set(TerminationType::HitBadImport)) as Box<dyn Fn()>,
-        );
-    register_closure(&debug_numbers, "func_placeholder", func_placeholder);
-
-    create_closure_record_operations(&debug_numbers);
-
-    Reflect::set(&imports, &"codillon_debug".into(), &debug_numbers)?;
+        Reflect::set(&imports, &"codillon_debug".into(), &codillon_debug)?;
+    }
 
     {
         let draw = Object::new();
@@ -340,66 +419,50 @@ fn make_imports() -> Result<Object, JsValue> {
 }
 
 fn create_graphics_helpers(draw: &Object) {
-    fn set_op(graphics: &mut Option<Action>, act: Action) {
-        debug_assert!(graphics.is_none());
-        *graphics = Some(act);
-    }
-
-    let draw_point = Closure::wrap(Box::new(move |x: f64, y: f64| {
-        with_current_step_mut(|step| set_op(&mut step.graphics_op, Action::Point(x, y)))
-    }) as Box<dyn Fn(f64, f64)>);
+    let draw_point: ScopedClosure<'_, dyn Fn(f64, f64)> =
+        Closure::new(|x, y| RUN_LOG.with(|r| r.graphics_op(Action::Point(x, y))));
     register_closure(draw, "point", draw_point);
-    let clear_canvas = Closure::wrap(Box::new(move || {
-        with_current_step_mut(|step| set_op(&mut step.graphics_op, Action::Clear))
-    }) as Box<dyn Fn()>);
+
+    let clear_canvas: ScopedClosure<'_, dyn Fn()> =
+        Closure::new(|| RUN_LOG.with(|r| r.graphics_op(Action::Clear)));
     register_closure(draw, "clear", clear_canvas);
-    let set_color = Closure::wrap(Box::new(move |r: i32, g: i32, b: i32| {
-        with_current_step_mut(|step| set_op(&mut step.graphics_op, Action::Color(r, g, b)))
-    }) as Box<dyn Fn(i32, i32, i32)>);
+
+    let set_color: ScopedClosure<'_, dyn Fn(i32, i32, i32)> =
+        Closure::new(|r, g, b| RUN_LOG.with(|log| log.graphics_op(Action::Color(r, g, b))));
     register_closure(draw, "set_color", set_color);
-    let set_extent = Closure::wrap(Box::new(move |xmin: f64, xmax: f64, ymin: f64, ymax: f64| {
-        with_current_step_mut(|step| {
-            set_op(
-                &mut step.graphics_op,
-                Action::Extent(xmin, xmax, ymin, ymax),
-            )
-        })
-    }) as Box<dyn Fn(f64, f64, f64, f64)>);
+
+    let set_extent: ScopedClosure<'_, dyn Fn(f64, f64, f64, f64)> =
+        Closure::new(|xmin, xmax, ymin, ymax| {
+            RUN_LOG.with(|r| r.graphics_op(Action::Extent(xmin, xmax, ymin, ymax)))
+        });
     register_closure(draw, "set_extent", set_extent);
-    let set_radius = Closure::wrap(Box::new(move |radius: f64| {
-        with_current_step_mut(|step| set_op(&mut step.graphics_op, Action::Radius(radius)))
-    }) as Box<dyn Fn(f64)>);
+
+    let set_radius: ScopedClosure<'_, dyn Fn(f64)> =
+        Closure::new(|radius| RUN_LOG.with(|r| r.graphics_op(Action::Radius(radius))));
     register_closure(draw, "set_radius", set_radius);
 }
 
 fn create_closure_record_operations(obj: &Object) {
-    let record = |value: WasmValue, slot: u32| {
-        with_current_step_mut(|step| step.slot_assignments.push((slot, value)))
-    };
-    let record_i32 = Closure::wrap(
-        Box::new(move |value: i32, slot: u32| record(value.into(), slot)) as Box<dyn Fn(i32, u32)>,
-    );
+    let record_i32: ScopedClosure<'_, dyn Fn(i32, u32)> =
+        Closure::new(|value, slot| RUN_LOG.with(|r| r.record_slot(value, slot)));
     register_closure(obj, "record_i32", record_i32);
 
-    let record_f32 = Closure::wrap(
-        Box::new(move |value: f32, slot: u32| record(value.into(), slot)) as Box<dyn Fn(f32, u32)>,
-    );
+    let record_f32: ScopedClosure<'_, dyn Fn(f32, u32)> =
+        Closure::new(|value, slot| RUN_LOG.with(|r| r.record_slot(value, slot)));
     register_closure(obj, "record_f32", record_f32);
 
-    let record_i64 = Closure::wrap(
-        Box::new(move |value: i64, slot: u32| record(value.into(), slot)) as Box<dyn Fn(i64, u32)>,
-    );
+    let record_i64: ScopedClosure<'_, dyn Fn(i64, u32)> =
+        Closure::new(|value, slot| RUN_LOG.with(|r| r.record_slot(value, slot)));
     register_closure(obj, "record_i64", record_i64);
 
-    let record_f64 = Closure::wrap(
-        Box::new(move |value: f64, slot: u32| record(value.into(), slot)) as Box<dyn Fn(f64, u32)>,
-    );
+    let record_f64: ScopedClosure<'_, dyn Fn(f64, u32)> =
+        Closure::new(|value, slot| RUN_LOG.with(|r| r.record_slot(value, slot)));
     register_closure(obj, "record_f64", record_f64);
 }
 
 pub async fn run_binary(binary: &[u8]) -> Result<()> {
     use js_sys::{Function, Reflect};
-    reset_debug_state();
+    RUN_LOG.with(|r| r.reset());
     let imports = INSTRUMENTATION_IMPORTS.with(|imports| imports.clone());
     let promise = js_sys::WebAssembly::instantiate_buffer(binary, &imports);
     let js_value = wasm_bindgen_futures::JsFuture::from(promise)
@@ -407,64 +470,33 @@ pub async fn run_binary(binary: &[u8]) -> Result<()> {
         .fmt_err()?;
     let instance = Reflect::get(&js_value, &JsValue::from_str("instance")).fmt_err()?;
     let exports = Reflect::get(&instance, &JsValue::from_str("exports")).fmt_err()?;
+
     // Call main function with default values for its params
     match Reflect::get(&exports, &JsValue::from_str("main")) {
         Ok(main) => {
             let main = wasm_bindgen::JsCast::dyn_ref::<Function>(&main)
                 .context("main is not an exported function")?;
-            match main.apply(&JsValue::null(), &js_sys::Array::new()) {
-                Ok(val) if val.is_undefined() => {
-                    match termination_type() {
-                        TerminationType::Running => TERMINATION.set(TerminationType::Success),
-                        TerminationType::TooManySteps
-                        | TerminationType::HitInvalid
-                        | TerminationType::HitBadImport
-                        | TerminationType::Success
-                        | TerminationType::Error => {
-                            unreachable!("success after other result");
-                        }
-                    }
-                    Ok(())
-                }
-                Ok(val) => {
-                    bail!("unhandled return value from function: {:?}", val)
-                }
-                Err(e) => {
-                    let reason: String = if let Some(r) = e.dyn_ref::<RuntimeError>() {
-                        r.message().into()
-                    } else {
-                        let re = Regex::new(r"\((.*)")?;
-                        let debug_string = format!("{e:?}");
-                        if let Some(captures) = re.captures(&debug_string) {
-                            captures[1].to_string()
-                        } else {
-                            "unknown error".to_string()
-                        }
-                    };
-                    match termination_type() {
-                        TerminationType::Running => {
-                            if step_count() > 0 {
-                                with_completed_step(step_count() - 1, |completed| {
-                                    with_current_step_mut(|current| {
-                                        current.line_num = completed.line_num;
-                                    })
-                                });
-                            }
-                            commit_step();
-                            TERMINATION.set(TerminationType::Error);
-                            ERROR_STR.with(|e| e.set(reason));
-                        }
-                        TerminationType::HitInvalid
-                        | TerminationType::HitBadImport
-                        | TerminationType::TooManySteps => {} // error is expected
-                        TerminationType::Success | TerminationType::Error => {
-                            unreachable!("error after other result");
-                        }
-                    }
-                    Ok(())
-                }
-            }
+            let res = main.apply(&JsValue::null(), &js_sys::Array::new()); // run the function
+            RUN_LOG.with(|log| match res {
+                Ok(val) if val.is_undefined() => log.finish(Ok(())),
+                Ok(val) => bail!("unhandled return value from function: {:?}", val),
+                Err(e) => log.finish(Err(extract_error(&e))),
+            })
         }
         Err(e) => bail!("reflection failure: {:?}", e),
+    }
+}
+
+fn extract_error(jsv: &JsValue) -> String {
+    if let Some(r) = jsv.dyn_ref::<RuntimeError>() {
+        r.message().into()
+    } else {
+        let re = Regex::new(r"\((.*)").unwrap();
+        let debug_string = format!("{jsv:?}");
+        if let Some(captures) = re.captures(&debug_string) {
+            captures[1].to_string()
+        } else {
+            "unknown error".to_string()
+        }
     }
 }

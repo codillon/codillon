@@ -48,8 +48,8 @@ impl InstrImports {
     const FUNC_SIGS: &'static [(&'static [EncoderValType], &'static [EncoderValType])] = &[
         // 0: i32 -> i32
         (&[EncoderValType::I32], &[EncoderValType::I32]),
-        // 1: i32 -> ()
-        (&[EncoderValType::I32], &[]),
+        // 1: () -> ()
+        (&[], &[]),
         // 2: (i32, i32) -> ()
         (&[EncoderValType::I32, EncoderValType::I32], &[]),
         // 3: (f32, i32) -> ()
@@ -1990,6 +1990,7 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::debug::{ExecutionState, RunLog, TerminationType, WasmValue};
     use regex::Regex;
     use wasmparser::{BlockType, FuncType};
 
@@ -2626,7 +2627,13 @@ pub(crate) mod tests {
         fn set_frames(&mut self, _frames: Vec<FrameInfo>) {}
     }
 
-    fn test_editor_flow(editor: &mut FakeTextBuffer) -> Result<String> {
+    struct EditorOutput {
+        text: String,
+        binary: Vec<u8>,
+        connections: SlotConnections,
+    }
+
+    fn test_editor_flow(editor: &mut FakeTextBuffer) -> Result<EditorOutput> {
         use anyhow::Context;
 
         fix_syntax(editor);
@@ -2655,24 +2662,77 @@ pub(crate) mod tests {
 
         indent_and_frame(editor, &validized, &types);
 
-        let runnable = validized
+        let connections = find_connections(&validized, &types);
+
+        let instrumented_binary = validized
             .build_instrumented_binary(&types)
             .context("build_executable_binary")?;
 
-        let instrumented_text = wasmprinter::print_bytes(&runnable).context("print_bytes")?;
+        let instrumented_text =
+            wasmprinter::print_bytes(&instrumented_binary).context("print_bytes")?;
 
-        wasmparser::validate(&runnable).context(format!(
+        wasmparser::validate(&instrumented_binary).context(format!(
             "validate {:?} -> {instrumented_text}",
             editor.lines
         ))?;
 
         let re = Regex::new(r"\(;\d+;\) ")?; // remove wasmprinter idx comments to let tests evolve more easily
-        Ok(re.replace_all(&instrumented_text, "").to_string())
+        Ok(EditorOutput {
+            text: re.replace_all(&instrumented_text, "").to_string(),
+            binary: instrumented_binary,
+            connections,
+        })
+    }
+
+    fn test_execution(
+        binary: &[u8],
+        params: &[wasmtime::Val],
+        results: &mut [wasmtime::Val],
+    ) -> Result<RunLog> {
+        use wasmtime::*;
+
+        let engine = Engine::default();
+        let module = Module::new(&engine, binary)?;
+        let mut store = Store::new(&engine, RunLog::default());
+        let mut linker = Linker::new(&engine);
+
+        type Ctx<'a> = Caller<'a, RunLog>;
+
+        // Match the imports provided in make_imports() (excluding graphics for now)
+        linker.func_wrap("codillon_debug", "record_step", |ctx: Ctx<'_>, n| -> i32 {
+            ctx.data().wasm_step(n).into()
+        })?;
+        linker.func_wrap("codillon_debug", "record_invalid", |ctx: Ctx<'_>| {
+            ctx.data().set_termination_type(TerminationType::HitInvalid)
+        })?;
+        linker.func_wrap("codillon_debug", "func_placeholder", |ctx: Ctx<'_>| {
+            ctx.data()
+                .set_termination_type(TerminationType::HitBadImport)
+        })?;
+        linker.func_wrap("codillon_debug", "record_i32", |ctx: Ctx<'_>, v: i32, s| {
+            ctx.data().record_slot(v, s)
+        })?;
+        linker.func_wrap("codillon_debug", "record_f32", |ctx: Ctx<'_>, v: f32, s| {
+            ctx.data().record_slot(v, s)
+        })?;
+        linker.func_wrap("codillon_debug", "record_i64", |ctx: Ctx<'_>, v: i64, s| {
+            ctx.data().record_slot(v, s)
+        })?;
+        linker.func_wrap("codillon_debug", "record_f64", |ctx: Ctx<'_>, v: f64, s| {
+            ctx.data().record_slot(v, s)
+        })?;
+
+        let instance = linker.instantiate(&mut store, &module)?;
+        let main = instance.get_func(&mut store, "main").expect("main export");
+        let res = main.call(&mut store, params, results);
+        store.data().finish(res.map_err(|x| x.to_string()))?;
+
+        Ok(store.into_data())
     }
 
     const EXPECTED_TYPES: &str = r#"  (type (func))
   (type (func (param i32) (result i32)))
-  (type (func (param i32)))
+  (type (func))
   (type (func (param i32 i32)))
   (type (func (param f32 i32)))
   (type (func (param i64 i32)))
@@ -2727,7 +2787,11 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // syntax error (synthesizes closing paren)
@@ -2746,7 +2810,10 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // syntax error (synthesizes closing "func)" on line 1)
@@ -2765,7 +2832,10 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // syntax error (first operator is `else`)
@@ -2784,7 +2854,10 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // syntax error (missing (func) field but has instructions)
@@ -2820,7 +2893,10 @@ pub(crate) mod tests {
   )
 )
 "#;
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // well-formed block
@@ -2850,7 +2926,10 @@ pub(crate) mod tests {
                 + JUST_BLOCK_END
                 + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // syntax error (missing `end`) -- should be same as the well-formed block
@@ -2868,7 +2947,10 @@ pub(crate) mod tests {
                 + &JUST_BLOCK_END.replace("i32.const 3", "i32.const 2") // different line # for function end
                 + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // validation error (missing operand)
@@ -2910,7 +2992,10 @@ pub(crate) mod tests {
                 + EXPECTED_RECORD_I32
                 + ")\n";
 
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
         // syntax error (func has inline import but also instructions -- will deactivate the instructions)
@@ -2936,7 +3021,10 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // syntax error (consumed symbolic reference not defined - module-level, local, label)
@@ -2958,7 +3046,10 @@ pub(crate) mod tests {
                 + EXPECTED_STEP
                 + ")\n";
             let expected = expected.replace("i32.const 3", "i32.const 6");
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // syntax error (label on "end"/"else" doesn't match that introduced by the frame)
@@ -2995,7 +3086,10 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // validation error (impossible branch -- will be disabled)
@@ -3022,7 +3116,10 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
         // validation error (bad memory reference -- will be disabled)
@@ -3058,7 +3155,10 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
         // branch instruction renders rest of frame unreachable and pops all accessible operands
@@ -3097,7 +3197,10 @@ pub(crate) mod tests {
                 + EXPECTED_RECORD_I32
                 + ")\n";
 
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::TooManySteps, log.termination_type());
         }
 
         // validation error (operands not popped at end of block/function)
@@ -3128,7 +3231,10 @@ pub(crate) mod tests {
 "# + EXPECTED_STEP
                 + EXPECTED_RECORD_I32
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
         // additional function with multi-value result type
@@ -3226,7 +3332,10 @@ pub(crate) mod tests {
                 "  (type (func))\n  (type (func (param i32) (result i32)))",
                 "  (type (func (param i32) (result i32)))",
             );
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
         // local declaration mixed with other module parts
@@ -3262,7 +3371,10 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
 
         // invalid block
@@ -3325,7 +3437,10 @@ pub(crate) mod tests {
                 "  (type (func))\n  (type (func (param i32) (result i32)))",
                 "  (type (func (param i32) (result i32)))",
             );
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
         // placeholder import is called
@@ -3353,7 +3468,10 @@ pub(crate) mod tests {
   )
 "# + EXPECTED_STEP
                 + ")\n";
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::HitBadImport, log.termination_type());
         }
 
         {
@@ -3695,9 +3813,13 @@ pub(crate) mod tests {
             editor.push_line("memory.grow");
             editor.push_line(")");
 
-            let out = test_editor_flow(&mut editor)?;
-            assert!(out.contains("drop\n    i32.const -1"));
-            assert!(!out.contains("memory.grow"));
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let mut results = [wasmtime::Val::I32(0)];
+            let log = test_execution(&binary, &[], &mut results)?;
+            assert!(text.contains("drop\n    i32.const -1"));
+            assert!(!text.contains("memory.grow"));
+            assert_eq!(TerminationType::Success, log.termination_type());
+            assert_eq!(results[0].i32().expect("return value"), -1);
         }
 
         // Bounds check occurs for loads in memory with page size 1
@@ -3761,7 +3883,12 @@ pub(crate) mod tests {
                 "  (type (func))\n  (type (func (param i32) (result i32)))",
                 "  (type (func (param i32) (result i32)))",
             );
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let mut results = [wasmtime::Val::I32(0)];
+            let log = test_execution(&binary, &[], &mut results)?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
+            assert_eq!(results[0].i32().expect("return value"), 0);
         }
 
         // Bounds check ocurrs for store in memory with pagesize 1
@@ -3830,8 +3957,111 @@ pub(crate) mod tests {
 )
 "#;
 
-            assert_eq!(expected, test_editor_flow(&mut editor)?);
+            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(expected, text);
+            assert_eq!(TerminationType::Success, log.termination_type());
         }
+
+        {
+            // Bounds check success (default pagesize)
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 1)");
+            editor.push_line("(func");
+            editor.push_line("i32.const 65534");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.store16");
+            editor.push_line(")");
+            let EditorOutput { binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(TerminationType::Success, log.termination_type());
+        }
+
+        {
+            // Bounds check success (default pagesize)
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 1)");
+            editor.push_line("(func");
+            editor.push_line("i32.const 65535");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.store8");
+            editor.push_line(")");
+            let EditorOutput { binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(TerminationType::Success, log.termination_type());
+        }
+
+        {
+            // Bounds check failure (default pagesize)
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(memory 1)");
+            editor.push_line("(func");
+            editor.push_line("i32.const 65535");
+            editor.push_line("i32.const 0");
+            editor.push_line("i32.store16");
+            editor.push_line(")");
+            let EditorOutput { binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(TerminationType::Error, log.termination_type());
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn execution_tests() -> Result<()> {
+        // Test case 1: check that the stepping in execution tests are working correctly
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("(local i32)");
+            editor.push_line("loop");
+            editor.push_line("local.get 0");
+            editor.push_line("i32.const 1");
+            editor.push_line("i32.add");
+            editor.push_line("local.tee 0");
+            editor.push_line("i32.const 14286"); // Just barely exceeds number of steps at 100,005 steps
+            editor.push_line("i32.sub");
+            editor.push_line("br_if 0");
+            editor.push_line("end");
+            editor.push_line(")");
+
+            let EditorOutput { binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(TerminationType::TooManySteps, log.termination_type());
+        }
+
+        // Test basic "slot" assignments
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("i32.const 5");
+            editor.push_line("i32.const 9");
+            editor.push_line("i32.add");
+            editor.push_line("drop");
+            editor.push_line(")");
+
+            let EditorOutput {
+                binary,
+                connections,
+                ..
+            } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(TerminationType::Success, log.termination_type());
+            assert_eq!(6, log.step_count());
+
+            let mut state = ExecutionState::default();
+            state.reset(connections.len());
+            state.goto_step(&log, 5, None);
+
+            assert_eq!(state.step, 5);
+            assert_eq!(connections.len(), 3);
+            assert_eq!(state.slots.len(), 3);
+            assert_eq!(state.slots[0], Some(WasmValue::I32(5)));
+            assert_eq!(state.slots[1], Some(WasmValue::I32(9)));
+            assert_eq!(state.slots[2], Some(WasmValue::I32(14)));
+        }
+
         Ok(())
     }
 }
