@@ -4,23 +4,23 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-wasm-tools = "1.245.1"
-wasmparser = { version = "0.245.1", features = ["try-op"] }
-wast = "245.0.1"
-getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-tools = "1.251.0"
+wasmparser = { version = "0.251.0", features = ["try-op"] }
+wast = "251.0.0"
+getrandom = { version = "0.4", features = ["wasm_js"] }
 console_error_panic_hook = "0.1.7"
-wasmprinter = "0.245.1"
-wat = "1.245.1"
+wasmprinter = "0.251.0"
+wat = "1.251.0"
 anyhow = "1.0.102"
 delegate = "0.13.5"
-js-sys = "0.3.91"
+js-sys = "0.3.99"
 str_indices = "0.4.4"
-wasm-bindgen = "0.2.114"
-web-sys = { version = "0.3.91", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "MouseEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "SvgElement", "SvgLineElement", "SvgDefsElement", "SvgMarkerElement", "SvggElement", "SvgCircleElement", "SvgUseElement", "SvgPathElement", "HtmlInputElement", "HtmlCanvasElement", "HtmlDataListElement", "HtmlOptionElement", "CanvasRenderingContext2d", "Performance", "Storage", "BeforeUnloadEvent", "SvgAnimateElement", "SvgAnimatedLength", "SvgLength", "SvgTextElement", "FontFaceSet", "FontFaceSetLoadStatus"] }
-wasm-bindgen-futures = "0.4.64"
-wasm-encoder = { version = "0.245.1", features = ["wasmparser"] }
+wasm-bindgen = "0.2.122"
+web-sys = { version = "0.3.99", features = ["Text", "Element", "HtmlDivElement", "Window", "Document", "console", "HtmlBodyElement", "NodeList", "HtmlBrElement", "HtmlSpanElement", "HtmlParagraphElement", "HtmlElement", "InputEvent", "Range", "Selection", "DataTransfer", "KeyboardEvent", "MouseEvent", "ScrollIntoViewOptions", "ScrollBehavior", "ScrollLogicalPosition", "SvgElement", "SvgLineElement", "SvgDefsElement", "SvgMarkerElement", "SvggElement", "SvgCircleElement", "SvgUseElement", "SvgPathElement", "HtmlInputElement", "HtmlCanvasElement", "HtmlDataListElement", "HtmlOptionElement", "CanvasRenderingContext2d", "Performance", "Storage", "BeforeUnloadEvent", "SvgAnimateElement", "SvgAnimatedLength", "SvgLength", "SvgTextElement", "FontFaceSet", "FontFaceSetLoadStatus"] }
+wasm-bindgen-futures = "0.4.72"
+wasm-encoder = { version = "0.251.0", features = ["wasmparser"] }
 itertools = "0.14.0"
-indexmap = "2.13.0"
+indexmap = "2.14.0"
 regex = "1.12.3"
 humantime = "2.3.0"
 palette = "0.7.6"
