@@ -305,18 +305,20 @@ impl Editor {
         RUN_LOG.with(|log| {
             self.execution_state.goto_step(
                 log,
+                &self.slot_connections,
                 current_step,
                 Some(get_mut!(self.component, canvas)),
             )
         });
 
         for (slot_idx, value) in self.execution_state.slots.iter().enumerate() {
-            let where_written = &self.slot_connections[slot_idx].written;
+            let value = value.last().unwrap_or(&None);
+            let where_written = &self.slot_connections.connections[slot_idx].written;
             if let Some(coord) = where_written {
                 get_mut!(self.component, image).set_slot_value(coord, false, value);
             }
 
-            let where_read = &self.slot_connections[slot_idx].read;
+            let where_read = &self.slot_connections.connections[slot_idx].read;
             if let Some(coord) = where_read {
                 get_mut!(self.component, image).set_slot_value(coord, true, value);
             }
@@ -398,8 +400,7 @@ impl Editor {
                     slider_step = step_count - 1;
                 }
 
-                let slot_count = ed.slot_connections.len();
-                ed.execution_state.reset(slot_count);
+                ed.reset_execution_state();
                 ed.update_live_info(step_count, Some(slider_step), true);
                 ed.slider_mut()
                     .inner_mut()
@@ -407,6 +408,10 @@ impl Editor {
             }
             holder.borrow_mut().worker_running = false;
         });
+    }
+
+    fn reset_execution_state(&mut self) {
+        self.execution_state.reset(&self.slot_connections);
     }
 
     fn get_lines_and_positions(&self, range: &impl RangeLike) -> Result<PositionRange> {
@@ -970,7 +975,7 @@ impl Editor {
                     .map(|x| {
                         x.as_ref().map(|SlotUse(y)| SlotInfo {
                             slot: types.slots[*y].clone(),
-                            used: self.slot_connections[*y].written.is_some(),
+                            used: self.slot_connections.connections[*y].written.is_some(),
                         })
                     })
                     .collect();
@@ -981,7 +986,7 @@ impl Editor {
                         slot: types.slots[*x].clone(),
                         used: {
                             let is_used = i + 1 == func.operators.len()
-                                || self.slot_connections[*x].read.is_some();
+                                || self.slot_connections.connections[*x].read.is_some();
                             all_used &= is_used;
                             is_used
                         },

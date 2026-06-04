@@ -2,6 +2,7 @@
 // include the dataflow.
 
 use crate::{
+    debug::SlotContents,
     dom_set::DomSet,
     dom_struct::DomStruct,
     dom_text::DomText,
@@ -1081,7 +1082,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
 
     pub fn set_connections(&mut self, connections: &SlotConnections) {
         let mut connection_idx = 0;
-        for SlotConnection { written, read } in connections {
+        for SlotConnection { written, read } in &connections.connections {
             let (Some(src), Some(dst)) = (written, read) else {
                 continue;
             };
@@ -1123,7 +1124,7 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
         &mut self,
         location: &Coordinate,
         is_input: bool,
-        value: &Option<impl Separable>,
+        value: &Option<SlotContents>,
     ) {
         let fraction = &mut self.fractions_mut()[location.position_id];
         let slot = if is_input {
@@ -1134,7 +1135,12 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
             &mut fraction.outputs()[num_stranded + location.operand_num]
         };
         if let Some(value) = value {
-            slot.get_mut().1.0.set_val(value);
+            slot.get_mut().1.0.set_val(&value.val);
+            if value.old {
+                slot.get_mut().0.set_attribute("filter", "grayscale(0.75)");
+            } else {
+                slot.get_mut().0.remove_attribute("filter");
+            }
         } else {
             slot.get_mut().1.0.clear();
         }
