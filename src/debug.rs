@@ -29,6 +29,7 @@ pub struct RunLog {
     error_str: CodillonCell<String>,
     step_count: Cell<usize>,
     steps: Box<[CodillonCell<ExecutionStep>]>,
+    has_graphics: Cell<bool>,
 }
 
 impl Default for RunLog {
@@ -40,6 +41,7 @@ impl Default for RunLog {
             steps: (0..MAX_STEP_COUNT)
                 .map(|_| CodillonCell::new(ExecutionStep::default()))
                 .collect(),
+            has_graphics: Cell::new(Default::default()),
         }
     }
 }
@@ -61,6 +63,7 @@ impl RunLog {
         self.termination.set(Default::default());
         self.error_str.set(String::new());
         self.step_count.set(0);
+        self.has_graphics.set(false);
         self.with_current_step_mut(|step| step.reset());
     }
 
@@ -134,6 +137,7 @@ impl RunLog {
             debug_assert!(step.graphics_op.is_none());
             step.graphics_op = Some(act);
         });
+        self.has_graphics.set(true);
     }
 
     pub fn record_slot(&self, val: impl Into<WasmValue>, slot: u32) {
@@ -398,7 +402,7 @@ impl ExecutionState {
             // XXX save checkpoints?
             self.reset(connections);
             if let Some(canvas) = canvas.as_mut() {
-                canvas.reset()
+                canvas.reset(log.has_graphics.get())
             };
         }
         if log.step_count() == 0 {
