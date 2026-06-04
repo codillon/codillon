@@ -23,7 +23,6 @@ pub struct DomCanvas {
 
 impl DomCanvas {
     pub fn new(mut canvas: ElementHandle<HtmlCanvasElement>) -> Result<Self> {
-        canvas.set_attribute("class", "graph-canvas");
         canvas.set_attribute("width", &WIDTH.to_string());
         canvas.set_attribute("height", &HEIGHT.to_string());
         let mut ret = Self {
@@ -37,6 +36,7 @@ impl DomCanvas {
     }
 
     pub fn reset(&mut self) {
+        self.elem.remove_attribute("class");
         self.render(&Some(Action::Clear));
         self.render(&Some(Action::Color(0, 0, 0)));
         self.render(&Some(Action::Radius(3.0)));
@@ -52,6 +52,7 @@ impl DomCanvas {
             match *action {
                 Clear => self.context.clear_rect(0.0, 0.0, WIDTH, HEIGHT),
                 Point(x, y) => {
+                    self.elem.set_attribute("class", "graph-canvas");
                     let (xmin, xmax, ymin, ymax) = extent;
                     let pixel_x = (x - xmin) / (xmax - xmin) * WIDTH;
                     let pixel_y = ymax * HEIGHT - (y - ymin) / (ymax - ymin) * HEIGHT;
