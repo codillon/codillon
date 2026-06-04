@@ -92,18 +92,14 @@ impl Slider {
         let interval = Self::tick_interval(last_step);
         let remainder = last_step % interval;
         let mut step = 0;
-        let mut add_tick = |step: usize, class: &str, substitute_str: Option<&str>| {
+        let mut add_tick = |step: usize, class: &str, prefix_str: &str| {
             let pos = step as f64 / last_step as f64 * 100.0;
             let mut span = self.factory.span();
             span.set_attribute("class", class);
             span.set_attribute("style", &format!("left:calc({pos:.4}%)"));
-            self.tick_labels.push(DomStruct::new(
-                (
-                    DomText::new(substitute_str.unwrap_or(&step.separate_with_commas())),
-                    (),
-                ),
-                span,
-            ));
+            let label = prefix_str.to_string() + &step.separate_with_commas();
+            self.tick_labels
+                .push(DomStruct::new((DomText::new(&label), ()), span));
         };
         while step < last_step {
             // Don't include the last interval tick if it is less than half an interval away from last step
@@ -112,22 +108,22 @@ impl Slider {
                 break;
             }
             if step != current_step {
-                add_tick(step, "slider-tick", None);
+                add_tick(step, "slider-tick", "");
             }
             step += interval;
         }
-        let (class, substitute_str) = match termination {
+        let (class, prefix) = match termination {
             TerminationType::Success if last_step == current_step => {
-                ("slider-tick current-slider-tick", None)
+                ("slider-tick current-slider-tick", "")
             }
-            TerminationType::Success => ("slider-tick", None),
-            TerminationType::TooManySteps => ("slider-tick bad-slider-tick", Some("\u{221e}")),
-            _ => ("slider-tick bad-slider-tick", None),
+            TerminationType::Success => ("slider-tick", ""),
+            TerminationType::TooManySteps => ("slider-tick bad-slider-tick", ">\u{a0}"),
+            _ => ("slider-tick bad-slider-tick", ""),
         };
 
-        add_tick(last_step, class, substitute_str);
+        add_tick(last_step, class, prefix);
         if current_step != last_step {
-            add_tick(current_step, "slider-tick current-slider-tick", None);
+            add_tick(current_step, "slider-tick current-slider-tick", "");
         }
     }
 }
