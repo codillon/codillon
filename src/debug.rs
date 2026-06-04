@@ -22,7 +22,7 @@ use std::cell::Cell;
 use thousands::{Separable, SeparatorPolicy};
 use wasm_bindgen::{JsCast, prelude::*};
 
-const MAX_STEP_COUNT: usize = 100_000;
+const MAX_STEP_COUNT: usize = 100_001;
 
 pub struct RunLog {
     termination: Cell<TerminationType>,
