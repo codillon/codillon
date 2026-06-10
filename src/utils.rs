@@ -9,6 +9,7 @@ use itertools::{Itertools, zip_eq};
 use std::{
     cmp::{max, min},
     collections::HashMap,
+    fmt::{Debug, Formatter},
     num::NonZeroU32,
 };
 use wasm_encoder::{
@@ -803,6 +804,9 @@ fn is_unreachable_op(op: &Operator<'_>) -> bool {
     matches!(
         op,
         Operator::Return
+            | Operator::ReturnCall { .. }
+            | Operator::ReturnCallIndirect { .. }
+            | Operator::ReturnCallRef { .. }
             | Operator::Unreachable
             | Operator::Throw { .. }
             | Operator::ThrowRef
@@ -829,6 +833,10 @@ impl SimulatedStack {
         let frame_base_height = validator.get_control_frame(0).expect("top frame").height;
         assert!(pre_instr_height >= frame_base_height);
         let accessible_operands = pre_instr_height - frame_base_height;
+
+        #[cfg(debug_assertions)]
+        let expect_unreachable = is_unreachable_op(op)
+            || (validator.get_control_frame(0).unwrap().unreachable && *op != Operator::End);
 
         let pop_count = if is_unreachable_op(op) {
             accessible_operands
@@ -867,6 +875,11 @@ impl SimulatedStack {
         assert!(post_instr_height >= frame_base_height);
         let accessible_operands = post_instr_height - frame_base_height;
         assert!(push_count <= accessible_operands);
+
+        #[cfg(debug_assertions)]
+        if let Some(f) = validator.get_control_frame(0) {
+            debug_assert_eq!(expect_unreachable, f.unreachable);
+        }
 
         let outputs = (0..push_count)
             .map(|i| {
@@ -1612,7 +1625,7 @@ pub struct Slot {
 // A SlotUse represents any input from, or output to, a slot (identified by its global index).
 // We use a somewhat fancy representation so that Option<SlotUse> (representing the unknown
 // params to an untyped operator, or a valid operator after unreachable) can fit in 4 bytes.
-#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
+#[derive(PartialEq, Eq, Copy, Clone, Hash)]
 pub struct SlotUse(NonZeroU32);
 
 impl SlotUse {
@@ -1632,6 +1645,12 @@ impl SlotUse {
 
     pub fn i32(&self) -> i32 {
         self.u32().try_into().unwrap()
+    }
+}
+
+impl Debug for SlotUse {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(f, "SlotUse({})", self.u32())
     }
 }
 
@@ -4377,6 +4396,26 @@ pub(crate) mod tests {
             state.goto_step(&log, &connections, 25, None);
             assert_eq!(state.next_step, 26);
             assert_eq!(c2v(state.slot_contents(2)), Some(2.into())); // param of $x function after stack unwinds again
+        }
+
+        // Test annoying tail call (#270)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("  call $f");
+            editor.push_line("  drop");
+            editor.push_line(")");
+            editor.push_line("(func $f (result i64)");
+            editor.push_line("  block (result i64)");
+            editor.push_line("    i64.const 0");
+            editor.push_line("    return_call $f");
+            editor.push_line("    i64.const 0");
+            editor.push_line("  end");
+            editor.push_line(")");
+
+            let EditorOutput { binary, .. } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(TerminationType::TooManySteps, log.termination_type());
         }
 
         Ok(())
