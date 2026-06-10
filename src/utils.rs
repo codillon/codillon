@@ -9,6 +9,7 @@ use itertools::{Itertools, zip_eq};
 use std::{
     cmp::{max, min},
     collections::HashMap,
+    num::NonZeroU32,
 };
 use wasm_encoder::{
     CodeSection, Instruction as EncoderInstruction, MemArg, ValType as EncoderValType,
@@ -793,7 +794,7 @@ pub fn check_import(
 
 #[derive(Default)]
 struct SimulatedStack {
-    slot_idx_stack: Vec<usize>,
+    slot_idx_stack: Vec<SlotUse>,
 }
 
 // Opcodes that make the rest of the frame unreachable and pop all accessible operands.
@@ -842,16 +843,12 @@ impl SimulatedStack {
                 if untyped || (pop_count - i - 1) >= accessible_operands {
                     // XXX special-case for select. Should handle in more principled/general way.
                     if is_select && i == 2 && pop_count - 1 < accessible_operands {
-                        Some(SlotUse(
-                            self.slot_idx_stack[pre_instr_height + i - pop_count],
-                        ))
+                        Some(self.slot_idx_stack[pre_instr_height + i - pop_count])
                     } else {
                         None
                     }
                 } else {
-                    Some(SlotUse(
-                        self.slot_idx_stack[pre_instr_height + i - pop_count],
-                    ))
+                    Some(self.slot_idx_stack[pre_instr_height + i - pop_count])
                 }
             })
             .collect::<Vec<_>>();
@@ -878,15 +875,15 @@ impl SimulatedStack {
                         // XXX should handle in more principled/general way
                         inputs[0]
                             .as_ref()
-                            .and_then(|SlotUse(x)| slots.get(*x).and_then(|y| y.ty))
+                            .and_then(|x| slots.get(x.usize()).and_then(|y| y.ty))
                     } else {
                         validator.get_operand_type(push_count - i - 1).flatten()
                     },
                 });
-                self.slot_idx_stack.push(slots.len() - 1);
+                self.slot_idx_stack.push(SlotUse::new(slots.len() - 1));
                 // XXX: advisory connection to "original" global or local slot for a {global/local}.get?
                 // XXX: advisory connection to `end` or `loop` op for a br/br_[x]?
-                SlotUse(slots.len() - 1)
+                SlotUse::new(slots.len() - 1)
             })
             .collect::<Vec<_>>();
 
@@ -926,7 +923,7 @@ impl<'a> ValidModule<'a> {
             ret.slots.push(Slot {
                 ty: Some(*content_type),
             });
-            ret.globals.push(SlotUse(ret.slots.len() - 1));
+            ret.globals.push(SlotUse::new(ret.slots.len() - 1));
         }
 
         let mut funcs_iter = self.functions.iter();
@@ -955,7 +952,7 @@ impl<'a> ValidModule<'a> {
         blocks: &mut Vec<(SlotUse, SlotUse)>,
     ) -> Result<TypedFunction> {
         let mut ret = TypedFunction {
-            first_slot: SlotUse(slots.len()),
+            first_slot: SlotUse::new(slots.len()),
             params: Vec::with_capacity(valid_func.params.len()),
             locals: Vec::with_capacity(valid_func.locals.len()),
             ops: Vec::with_capacity(valid_func.operators.len()),
@@ -965,13 +962,13 @@ impl<'a> ValidModule<'a> {
             slots.push(Slot {
                 ty: Some(param_ty.inner),
             });
-            ret.params.push(SlotUse(slots.len() - 1));
+            ret.params.push(SlotUse::new(slots.len() - 1));
         }
 
         for ty in &valid_func.locals {
             func_validator.define_locals(DUMMY_OFFSET, 1, ty.inner)?;
             slots.push(Slot { ty: Some(ty.inner) });
-            ret.locals.push(SlotUse(slots.len() - 1));
+            ret.locals.push(SlotUse::new(slots.len() - 1));
         }
 
         let mut stack = SimulatedStack::default();
@@ -993,7 +990,10 @@ impl<'a> ValidModule<'a> {
             ret.ops.push(operator_ty);
 
             if op.inner.op == Operator::End && op.inner.info != OpInfo::FuncEnd {
-                blocks.push((SlotUse(frame_stack.pop().unwrap()), SlotUse(slots.len())));
+                blocks.push((
+                    SlotUse::new(frame_stack.pop().unwrap()),
+                    SlotUse::new(slots.len()),
+                ));
             }
         }
 
@@ -1112,7 +1112,7 @@ impl<'a> ValidModule<'a> {
                 for OperatorType { outputs, .. } in &func.ops {
                     let results = outputs
                         .iter()
-                        .filter_map(|SlotUse(idx)| types.slots[*idx].ty)
+                        .filter_map(|idx| types.slots[idx.usize()].ty)
                         .collect::<Vec<_>>();
                     if !results.is_empty() && !result_types_to_func_idx.contains_key(&results) {
                         // Make function-section entry for new "transparent" instrumentation function
@@ -1318,20 +1318,17 @@ impl<'a> ValidModule<'a> {
 
         let transparent_record_results =
             |f: &mut wasm_encoder::Function, results: &Vec<SlotUse>| {
-                if results.is_empty()
-                    || results
-                        .iter()
-                        .any(|SlotUse(x)| types.slots[*x].ty.is_none())
+                if results.is_empty() || results.iter().any(|x| types.slots[x.usize()].ty.is_none())
                 {
                     return;
                 }
-                for SlotUse(slot_idx) in results {
-                    f.instruction(&I32Const((*slot_idx).try_into().expect("slot -> i32")));
+                for slot_use in results {
+                    f.instruction(&I32Const(slot_use.i32()));
                 }
                 f.instruction(&Call(
                     info.result_types_to_func_idx[&results
                         .iter()
-                        .filter_map(|SlotUse(slot_idx)| types.slots[*slot_idx].ty)
+                        .filter_map(|slot_idx| types.slots[slot_idx.usize()].ty)
                         .collect::<Vec<_>>()],
                 ));
             };
@@ -1339,8 +1336,7 @@ impl<'a> ValidModule<'a> {
         let primitive_record = |f: &mut wasm_encoder::Function, operand: &SlotUse| {
             use InstrImports::*;
             use ValType::*;
-            let SlotUse(slot_idx) = operand;
-            let rec_function = match types.slots[*slot_idx].ty {
+            let rec_function = match types.slots[operand.usize()].ty {
                 Some(I32) => RecordI32,
                 Some(F32) => RecordF32,
                 Some(I64) => RecordI64,
@@ -1348,7 +1344,7 @@ impl<'a> ValidModule<'a> {
                 None => return Ok(()), /* don't try to record unknown types in unreachable code */
                 _ => bail!("unhandled ValType for primitive_record"),
             };
-            f.instruction(&I32Const((*slot_idx).try_into().expect("slot -> i32"))); // slot
+            f.instruction(&I32Const(operand.u32().try_into().unwrap()));
             f.instruction(&Call(rec_function as u32));
             Ok(())
         };
@@ -1614,8 +1610,35 @@ pub struct Slot {
 }
 
 // A SlotUse represents any input from, or output to, a slot (identified by its global index).
-#[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub struct SlotUse(pub usize);
+// We use a somewhat fancy representation so that Option<SlotUse> (representing the unknown
+// params to an untyped operator, or a valid operator after unreachable) can fit in 4 bytes.
+#[derive(Debug, PartialEq, Eq, Copy, Clone, Hash)]
+pub struct SlotUse(NonZeroU32);
+
+impl SlotUse {
+    pub fn new(idx: usize) -> Self {
+        let idx_as_u32: u32 = idx.try_into().unwrap();
+        let inner = NonZeroU32::new(!idx_as_u32).unwrap();
+        Self(inner)
+    }
+
+    pub fn u32(&self) -> u32 {
+        !self.0.get()
+    }
+
+    pub fn usize(&self) -> usize {
+        self.u32().try_into().unwrap()
+    }
+
+    pub fn i32(&self) -> i32 {
+        self.u32().try_into().unwrap()
+    }
+}
+
+#[test]
+fn assert_slot_use_small() {
+    assert_eq!(core::mem::size_of::<Option<SlotUse>>(), 4);
+}
 
 // An Expression represents a collection of Slots that are initiatialized on entry and restored on exit.
 // E.g. local Slots live in an Expression for the function's entire body, and stack operands
@@ -1670,9 +1693,9 @@ impl SlotConnections {
             .first_slot_of_func
             .get(local_func_idx as usize + 1)
             .copied()
-            .unwrap_or(SlotUse(self.connections.len()));
+            .unwrap_or_else(|| SlotUse::new(self.connections.len()));
         if lower_limit.0 != upper_limit.0 {
-            Some((lower_limit.0, upper_limit.0))
+            Some((lower_limit.usize(), upper_limit.usize()))
         } else {
             None
         }
@@ -1705,8 +1728,8 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
     };
 
     // locate globals
-    for (Aligned { position_id, .. }, SlotUse(slot_idx)) in zip_eq(&module.globals, &tys.globals) {
-        cx.connections[*slot_idx].written = Some(Coordinate {
+    for (Aligned { position_id, .. }, slot_idx) in zip_eq(&module.globals, &tys.globals) {
+        cx.connections[slot_idx.usize()].written = Some(Coordinate {
             position_id: *position_id,
             operand_num: 0,
         });
@@ -1716,8 +1739,8 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
         cx.first_slot_of_func.push(func_tys.first_slot);
 
         // locate params
-        for (operand_num, SlotUse(slot_idx)) in func_tys.params.iter().enumerate() {
-            cx.connections[*slot_idx].read = Some(Coordinate {
+        for (operand_num, slot_idx) in func_tys.params.iter().enumerate() {
+            cx.connections[slot_idx.usize()].read = Some(Coordinate {
                 position_id: func.positions.0,
                 operand_num,
             });
@@ -1725,16 +1748,14 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
 
         // locate locals
         let mut local_counter = (None, 0);
-        for (Aligned { position_id, .. }, SlotUse(slot_idx)) in
-            zip_eq(&func.locals, &func_tys.locals)
-        {
+        for (Aligned { position_id, .. }, slot_idx) in zip_eq(&func.locals, &func_tys.locals) {
             if local_counter.0 == Some(*position_id) {
                 local_counter.1 += 1;
             } else {
                 local_counter.0 = Some(*position_id);
                 local_counter.1 = 0;
             }
-            cx.connections[*slot_idx].written = Some(Coordinate {
+            cx.connections[slot_idx.usize()].written = Some(Coordinate {
                 position_id: *position_id,
                 operand_num: local_counter.1,
             });
@@ -1743,16 +1764,16 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
         for (Aligned { position_id, .. }, OperatorType { inputs, outputs }) in
             zip_eq(&func.operators, &func_tys.ops)
         {
-            for (operand_num, SlotUse(idx)) in outputs.iter().enumerate() {
-                cx.connections[*idx].written = Some(Coordinate {
+            for (operand_num, idx) in outputs.iter().enumerate() {
+                cx.connections[idx.usize()].written = Some(Coordinate {
                     position_id: *position_id,
                     operand_num,
                 });
             }
 
             for (operand_num, maybe_slot) in inputs.iter().enumerate() {
-                if let Some(SlotUse(idx)) = maybe_slot {
-                    cx.connections[*idx].read = Some(Coordinate {
+                if let Some(idx) = maybe_slot {
+                    cx.connections[idx.usize()].read = Some(Coordinate {
                         position_id: *position_id,
                         operand_num,
                     });
@@ -1783,8 +1804,8 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
     }
 }
 
-pub const FRAME_MARGIN: usize = 3;
-pub const BLOCK_BOUNDARY_INDENT: usize = 3;
+pub const FRAME_MARGIN: u16 = 3;
+pub const BLOCK_BOUNDARY_INDENT: u16 = 3;
 
 pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, types: &TypedModule) {
     assert!(code.len() > 0);
@@ -1792,7 +1813,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
     struct OpenFrame {
         end: usize,
         synthetic: bool,
-        indent: usize,
+        indent: u16,
         slots: Vec<SlotUse>,
     }
 
@@ -1828,28 +1849,28 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
         )
         .peekable();
 
-    let mut slot_map: HashMap<usize, usize> = HashMap::new(); // unfilled slot -> indent
+    let mut slot_map: HashMap<SlotUse, u16> = HashMap::new(); // unfilled slot -> indent
     let mut paren_indent: i32 = 0;
 
-    fn process_outputs(map: &mut HashMap<usize, usize>, outs: &Vec<SlotUse>) {
+    fn process_outputs(map: &mut HashMap<SlotUse, u16>, outs: &Vec<SlotUse>) {
         /* resolve dependencies */
-        for SlotUse(idx) in outs {
+        for idx in outs {
             map.remove(idx);
         }
     }
 
     fn process_inputs(
-        map: &mut HashMap<usize, usize>,
+        map: &mut HashMap<SlotUse, u16>,
         ins: &[Option<SlotUse>],
-        indent: usize,
+        indent: u16,
         frame_stack: &mut [OpenFrame],
     ) {
         /* insert dependencies */
-        for SlotUse(idx) in ins.iter().flatten() {
+        for idx in ins.iter().flatten() {
             debug_assert!(!map.contains_key(idx));
             map.insert(*idx, indent);
             if let Some(f) = frame_stack.last_mut() {
-                f.slots.push(SlotUse(*idx));
+                f.slots.push(*idx);
             }
         }
     }
@@ -1872,7 +1893,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
         };
 
         let margined_indent = frame_indent + if frame_indent == 0 { 0 } else { FRAME_MARGIN };
-        let mut instr_indent: usize = max(
+        let mut instr_indent: u16 = max(
             margined_indent,
             slot_map.values().max().copied().unwrap_or(0) + 1,
         );
@@ -1882,7 +1903,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
         paren_indent_above -= paren_depths.0;
         paren_indent_above -= paren_depths.1;
 
-        let default_indent: usize = max(
+        let default_indent: u16 = max(
             match frame_stack.last() {
                 Some(OpenFrame { indent, .. }) => *indent + 1,
                 None => 0,
@@ -2144,7 +2165,7 @@ pub(crate) mod tests {
 
         fn ins(inputs: Vec<usize>) -> OperatorType {
             OperatorType {
-                inputs: inputs.into_iter().map(|x| Some(SlotUse(x))).collect(),
+                inputs: inputs.into_iter().map(|x| Some(SlotUse::new(x))).collect(),
                 outputs: Vec::new(),
             }
         }
@@ -2152,14 +2173,14 @@ pub(crate) mod tests {
         fn outs(outputs: Vec<usize>) -> OperatorType {
             OperatorType {
                 inputs: Vec::new(),
-                outputs: outputs.into_iter().map(SlotUse).collect(),
+                outputs: outputs.into_iter().map(SlotUse::new).collect(),
             }
         }
 
         fn inout(inputs: Vec<usize>, outputs: Vec<usize>) -> OperatorType {
             OperatorType {
-                inputs: inputs.into_iter().map(|x| Some(SlotUse(x))).collect(),
-                outputs: outputs.into_iter().map(SlotUse).collect(),
+                inputs: inputs.into_iter().map(|x| Some(SlotUse::new(x))).collect(),
+                outputs: outputs.into_iter().map(SlotUse::new).collect(),
             }
         }
 
@@ -2199,10 +2220,10 @@ pub(crate) mod tests {
         //block instruction with params and results
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
-            blocks: vec![(SlotUse(2), SlotUse(6))],
+            blocks: vec![(SlotUse::new(2), SlotUse::new(6))],
             globals: vec![],
             funcs: vec![TypedFunction {
-                first_slot: SlotUse(0),
+                first_slot: SlotUse::new(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![
@@ -2280,10 +2301,10 @@ pub(crate) mod tests {
         //if else with params and results
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32)],
-            blocks: vec![(SlotUse(1), SlotUse(4))],
+            blocks: vec![(SlotUse::new(1), SlotUse::new(4))],
             globals: vec![],
             funcs: vec![TypedFunction {
-                first_slot: SlotUse(0),
+                first_slot: SlotUse::new(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![
@@ -2366,10 +2387,10 @@ pub(crate) mod tests {
         //loop with param and return
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
-            blocks: vec![(SlotUse(1), SlotUse(6))],
+            blocks: vec![(SlotUse::new(1), SlotUse::new(6))],
             globals: vec![],
             funcs: vec![TypedFunction {
-                first_slot: SlotUse(0),
+                first_slot: SlotUse::new(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![
@@ -2458,10 +2479,13 @@ pub(crate) mod tests {
         //nested block and if
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
-            blocks: vec![(SlotUse(2), SlotUse(5)), (SlotUse(1), SlotUse(6))],
+            blocks: vec![
+                (SlotUse::new(2), SlotUse::new(5)),
+                (SlotUse::new(1), SlotUse::new(6)),
+            ],
             globals: vec![],
             funcs: vec![TypedFunction {
-                first_slot: SlotUse(0),
+                first_slot: SlotUse::new(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![
@@ -2558,10 +2582,10 @@ pub(crate) mod tests {
         //empty block
         let output = TypedModule {
             slots: vec![],
-            blocks: vec![(SlotUse(0), SlotUse(0))],
+            blocks: vec![(SlotUse::new(0), SlotUse::new(0))],
             globals: vec![],
             funcs: vec![TypedFunction {
-                first_slot: SlotUse(0),
+                first_slot: SlotUse::new(0),
                 params: vec![],
                 locals: vec![],
                 ops: vec![ins(vec![]), ins(vec![]), ins(vec![])],
@@ -2744,7 +2768,7 @@ pub(crate) mod tests {
     }
 
     impl FrameInfosMut for FakeTextBuffer {
-        fn set_indent(&mut self, _index: usize, _num: usize) {}
+        fn set_indent(&mut self, _index: usize, _num: u16) {}
         fn set_frames(&mut self, _frames: Vec<FrameInfo>) {}
     }
 

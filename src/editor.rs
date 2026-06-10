@@ -22,7 +22,7 @@ use crate::{
     },
     utils::{
         AnnotatedOperatorType, FmtError, OperatorType, RawModule, SlotConnections, SlotInfo,
-        SlotUse, TypedModule, ValidModule, find_connections, indent_and_frame, str_to_binary,
+        TypedModule, ValidModule, find_connections, indent_and_frame, str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -164,7 +164,7 @@ impl LineInfosMut for Editor {
 }
 
 impl FrameInfosMut for Editor {
-    fn set_indent(&mut self, index: usize, num: usize) {
+    fn set_indent(&mut self, index: usize, num: u16) {
         if self.line_mut(index).set_indent(num) {
             self.component.set_attribute("class", "animated");
         }
@@ -870,7 +870,7 @@ impl Editor {
                     ty: AnnotatedOperatorType {
                         inputs: vec![],
                         outputs: vec![SlotInfo {
-                            slot: types.slots[global_type.0].clone(),
+                            slot: types.slots[global_type.usize()].clone(),
                             used: true,
                         }],
                     },
@@ -884,9 +884,9 @@ impl Editor {
                 let param_types: Vec<Option<SlotInfo>> = func_types
                     .params
                     .iter()
-                    .map(|SlotUse(x)| {
+                    .map(|x| {
                         Some(SlotInfo {
-                            slot: types.slots[*x].clone(),
+                            slot: types.slots[x.usize()].clone(),
                             used: true,
                         })
                     })
@@ -908,7 +908,7 @@ impl Editor {
             {
                 let mut local_line_idx: Option<usize> = None;
                 let mut local_slots = vec![];
-                for (local, SlotUse(slot_idx)) in zip_eq(&func.locals, &func_types.locals) {
+                for (local, slot_idx) in zip_eq(&func.locals, &func_types.locals) {
                     match local_line_idx {
                         Some(line_idx) if line_idx == local.line_idx => local_slots.push(*slot_idx),
                         None => {
@@ -929,7 +929,7 @@ impl Editor {
                                         outputs: local_slots
                                             .iter()
                                             .map(|x| SlotInfo {
-                                                slot: types.slots[*x].clone(),
+                                                slot: types.slots[x.usize()].clone(),
                                                 used: true,
                                             })
                                             .collect(),
@@ -956,7 +956,7 @@ impl Editor {
                                 outputs: local_slots
                                     .iter()
                                     .map(|x| SlotInfo {
-                                        slot: types.slots[*x].clone(),
+                                        slot: types.slots[x.usize()].clone(),
                                         used: true,
                                     })
                                     .collect(),
@@ -973,20 +973,22 @@ impl Editor {
                 let inputs: Vec<Option<SlotInfo>> = inputs
                     .iter()
                     .map(|x| {
-                        x.as_ref().map(|SlotUse(y)| SlotInfo {
-                            slot: types.slots[*y].clone(),
-                            used: self.slot_connections.connections[*y].written.is_some(),
+                        x.as_ref().map(|y| SlotInfo {
+                            slot: types.slots[y.usize()].clone(),
+                            used: self.slot_connections.connections[y.usize()]
+                                .written
+                                .is_some(),
                         })
                     })
                     .collect();
                 let mut all_used = true;
                 let outputs: Vec<SlotInfo> = outputs
                     .iter()
-                    .map(|SlotUse(x)| SlotInfo {
-                        slot: types.slots[*x].clone(),
+                    .map(|x| SlotInfo {
+                        slot: types.slots[x.usize()].clone(),
                         used: {
                             let is_used = i + 1 == func.operators.len()
-                                || self.slot_connections.connections[*x].read.is_some();
+                                || self.slot_connections.connections[x.usize()].read.is_some();
                             all_used &= is_used;
                             is_used
                         },

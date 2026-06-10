@@ -175,17 +175,21 @@ struct FrameLimits {
     y_bot: usize,
 }
 
+pub fn indent_px(indent: u16) -> usize {
+    (indent as usize) * INDENT_PX
+}
+
 impl FrameLimits {
     fn new(info: &FrameInfo) -> Self {
         let x_offset = if info.indent > 0 {
             X_OFFSET_PX
         } else {
-            X_OFFSET_PX - INDENT_PX * BLOCK_BOUNDARY_INDENT
+            X_OFFSET_PX - indent_px(BLOCK_BOUNDARY_INDENT)
         };
         let top_offset = if info.wide { 0 } else { LINE_SPACING / 2 };
         Self {
-            x_left: x_offset + INDENT_PX * info.indent,
-            x_right: x_offset + INDENT_PX * (info.indent + BLOCK_BOUNDARY_INDENT) - MARGIN,
+            x_left: x_offset + indent_px(info.indent),
+            x_right: x_offset + indent_px(info.indent + BLOCK_BOUNDARY_INDENT) - MARGIN,
             y_top: info.start * LINE_SPACING + top_offset + LINE_OFFSET_PX,
             y_bot: info.end * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX,
         }
@@ -566,7 +570,7 @@ type CodillonSVG = DomStruct<
 pub struct DomImage {
     contents: CodillonSVG,
     height: usize,
-    width: usize,
+    width: u16,
     factory: ElementFactory,
     pending_delete: HashMap<u32, f64>, // frame identity -> timestamp to delete
 }
@@ -971,14 +975,14 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    fn make_width_at_least(&mut self, width: usize) {
+    fn make_width_at_least(&mut self, width: u16) {
         if width > self.width {
             self.width = width;
             self.contents.set_attribute(
                 "width",
                 &format!(
                     "{}px",
-                    X_OFFSET_PX + (width + BLOCK_BOUNDARY_INDENT) * INDENT_PX
+                    X_OFFSET_PX + indent_px(width + BLOCK_BOUNDARY_INDENT)
                 ),
             );
         }
@@ -1063,7 +1067,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         ) in types
         {
             self.make_height_at_least(line_no + 2);
-            self.make_width_at_least(indent as usize);
+            self.make_width_at_least(indent);
 
             if self.fractions().get(id).is_none() {
                 get_mut!(self.contents, fractions)
@@ -1320,9 +1324,8 @@ impl OperatorFraction {
     }
 
     fn compute_target(line_no: usize, indent: u16) -> (f32, f32) {
-        let target_x = X_OFFSET_PX + INDENT_PX * indent as usize
-            - INDENT_PX * BLOCK_BOUNDARY_INDENT / 2
-            - MARGIN / 2;
+        let target_x =
+            X_OFFSET_PX + indent_px(indent) - indent_px(BLOCK_BOUNDARY_INDENT) / 2 - MARGIN / 2;
         let target_y = line_no * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX;
         (target_x as f32, target_y as f32)
     }
@@ -1372,7 +1375,7 @@ impl OperatorFraction {
         self.output_locations_scales_and_types.clear();
 
         fn scale(len: i32) -> f32 {
-            let max_width = (BLOCK_BOUNDARY_INDENT * INDENT_PX - 2 * MARGIN + 1) as f32;
+            let max_width = (indent_px(BLOCK_BOUNDARY_INDENT) - 2 * MARGIN + 1) as f32;
             if len as f32 * SYM_HW * 2.0 > max_width {
                 max_width / (len as f32 * SYM_HW * 2.0)
             } else {

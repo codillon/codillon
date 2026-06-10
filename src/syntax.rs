@@ -144,7 +144,7 @@ pub trait LineInfosMut: LineInfos {
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct FrameInfo {
-    pub indent: usize,
+    pub indent: u16,
     pub start: usize,
     pub end: usize,
     pub unclosed: bool,
@@ -153,7 +153,7 @@ pub struct FrameInfo {
 }
 
 pub trait FrameInfosMut: LineInfos {
-    fn set_indent(&mut self, index: usize, num: usize);
+    fn set_indent(&mut self, index: usize, num: u16);
     fn set_frames(&mut self, frames: Vec<FrameInfo>);
 }
 
