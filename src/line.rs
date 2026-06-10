@@ -6,6 +6,7 @@
 use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
+    graphics::indent_px,
     jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
     symbolic::{LineSymbols, parse_line_symbols},
     syntax::{InstrKind, LineKind, ModulePart, SyntheticWasm, parse_line},
@@ -628,13 +629,13 @@ impl CodeLine {
     }
 
     // Returns whether the indentation of nonempty text was changed (used to trigger animations)
-    pub fn set_indent(&mut self, val: usize) -> bool {
+    pub fn set_indent(&mut self, val: u16) -> bool {
         let old_indent = self.info.indent;
-        self.info.indent = Some(val.try_into().unwrap_or(u16::MAX));
-        self.contents.get_mut().0.set_attribute(
-            "style",
-            &format!("margin-left: {}px;", (4 + val) * INDENT_PX),
-        );
+        self.info.indent = Some(val);
+        self.contents
+            .get_mut()
+            .0
+            .set_attribute("style", &format!("margin-left: {}px;", indent_px(4 + val)));
 
         old_indent.is_some() && old_indent != self.info.indent && !self.all_whitespace()
     }

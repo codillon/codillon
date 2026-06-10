@@ -11,7 +11,7 @@
 
 use crate::{
     dom_canvas::{Action, DomCanvas},
-    utils::{FmtError, SlotConnections, SlotUse},
+    utils::{FmtError, SlotConnections},
 };
 use anyhow::{Context, Result, bail};
 use arrayvec::ArrayVec;
@@ -373,11 +373,11 @@ impl ExecutionState {
         self.cur_func = None;
         self.call_stack.clear();
         self.slots.resize(cx.connections.len(), SmallVec::new());
-        let SlotUse(first_function_slot) = if let Some(idx) = cx.first_slot_of_func.first() {
-            *idx
-        } else {
-            SlotUse(self.slots.len())
-        };
+        let first_function_slot = cx
+            .first_slot_of_func
+            .first()
+            .map(|x| x.usize())
+            .unwrap_or(self.slots.len());
         for (idx, slot) in self.slots.iter_mut().enumerate() {
             if idx < first_function_slot {
                 *slot = smallvec::smallvec![None];
@@ -504,8 +504,8 @@ impl ExecutionState {
             // on any kind of block, but wouldn't do anything useful): mark the previous
             // contents of the slots as "old".
             CallFrameOp::EnterBlock(block_idx) => {
-                let (SlotUse(lower), SlotUse(upper)) = connections.blocks[*block_idx as usize];
-                for slot_idx in lower..upper {
+                let (lower, upper) = connections.blocks[*block_idx as usize];
+                for slot_idx in lower.usize()..upper.usize() {
                     let cur_but_old = self.slots[slot_idx]
                         .last()
                         .copied()
