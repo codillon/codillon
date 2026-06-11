@@ -1146,6 +1146,7 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
                 slot.get_mut().0.remove_attribute("filter");
             }
         } else {
+            slot.get_mut().0.remove_attribute("filter");
             slot.get_mut().1.0.clear();
         }
     }
