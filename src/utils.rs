@@ -11,6 +11,7 @@ use std::{
     collections::HashMap,
     fmt::{Debug, Formatter},
     num::NonZeroU32,
+    ops::Range,
 };
 use wasm_encoder::{
     CodeSection, Instruction as EncoderInstruction, MemArg, ValType as EncoderValType,
@@ -851,12 +852,13 @@ impl SimulatedStack {
                 if untyped || (pop_count - i - 1) >= accessible_operands {
                     // XXX special-case for select. Should handle in more principled/general way.
                     if is_select && i == 2 && pop_count - 1 < accessible_operands {
-                        Some(self.slot_idx_stack[pre_instr_height + i - pop_count])
+                        self.slot_idx_stack[pre_instr_height + i - pop_count]
                     } else {
-                        None
+                        slots.push(Slot { ty: None });
+                        SlotUse::new(slots.len() - 1)
                     }
                 } else {
-                    Some(self.slot_idx_stack[pre_instr_height + i - pop_count])
+                    self.slot_idx_stack[pre_instr_height + i - pop_count]
                 }
             })
             .collect::<Vec<_>>();
@@ -886,9 +888,7 @@ impl SimulatedStack {
                 slots.push(Slot {
                     ty: if is_select {
                         // XXX should handle in more principled/general way
-                        inputs[0]
-                            .as_ref()
-                            .and_then(|x| slots.get(x.usize()).and_then(|y| y.ty))
+                        slots.get(inputs[0].usize()).and_then(|y| y.ty)
                     } else {
                         validator.get_operand_type(push_count - i - 1).flatten()
                     },
@@ -1691,7 +1691,7 @@ fn assert_slot_use_small() {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct OperatorType {
-    pub inputs: Vec<Option<SlotUse>>,
+    pub inputs: Vec<SlotUse>,
     pub outputs: Vec<SlotUse>,
 }
 
@@ -1717,7 +1717,7 @@ pub struct Coordinate {
     pub operand_num: usize,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, PartialEq, Clone)]
 pub struct SlotConnection {
     pub written: Option<Coordinate>,
     pub read: Option<Coordinate>,
@@ -1728,20 +1728,20 @@ pub struct SlotConnections {
     pub connections: Vec<SlotConnection>, // same index space as Slot #
     pub first_slot_of_func: Vec<SlotUse>, // indexed by "local" function idx (not including func imports)
     pub blocks: Vec<(SlotUse, SlotUse)>,
+    pub bad_connections: Vec<(Coordinate, Coordinate)>,
 }
 
 impl SlotConnections {
-    pub fn slot_range(&self, local_func_idx: u32) -> Option<(usize, usize)> {
+    pub fn slot_range(&self, local_func_idx: u32) -> Range<usize> {
         let lower_limit = self.first_slot_of_func[local_func_idx as usize];
         let upper_limit = self
             .first_slot_of_func
             .get(local_func_idx as usize + 1)
             .copied()
             .unwrap_or_else(|| SlotUse::new(self.connections.len()));
-        if lower_limit.0 != upper_limit.0 {
-            Some((lower_limit.usize(), upper_limit.usize()))
-        } else {
-            None
+        Range {
+            start: lower_limit.usize(),
+            end: upper_limit.usize(),
         }
     }
 }
@@ -1754,7 +1754,7 @@ pub struct SlotInfo {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct AnnotatedOperatorType {
-    pub inputs: Vec<Option<SlotInfo>>,
+    pub inputs: Vec<SlotInfo>,
     pub outputs: Vec<SlotInfo>,
 }
 
@@ -1769,6 +1769,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
         ],
         first_slot_of_func: Vec::with_capacity(tys.funcs.len()),
         blocks: tys.blocks.clone(),
+        bad_connections: vec![],
     };
 
     // locate globals
@@ -1815,9 +1816,46 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
                 });
             }
 
-            for (operand_num, maybe_slot) in inputs.iter().enumerate() {
-                if let Some(idx) = maybe_slot {
-                    cx.connections[idx.usize()].read = Some(Coordinate {
+            for (operand_num, idx) in inputs.iter().enumerate() {
+                cx.connections[idx.usize()].read = Some(Coordinate {
+                    position_id: *position_id,
+                    operand_num,
+                });
+            }
+        }
+
+        // connect "bad connections"
+        let mut stranded: Vec<Coordinate> = Vec::new();
+        for (
+            Aligned {
+                position_id,
+                inner: GeneralOperator { op, .. },
+                ..
+            },
+            OperatorType { inputs, outputs },
+        ) in zip_eq(&func.operators, &func_tys.ops)
+        {
+            for (operand_num, slot) in inputs.iter().enumerate().rev() {
+                if cx.connections[slot.usize()].written.is_none()
+                    && let Some(where_written) = stranded.pop()
+                {
+                    cx.bad_connections.push((
+                        where_written,
+                        Coordinate {
+                            position_id: *position_id,
+                            operand_num,
+                        },
+                    ));
+                }
+            }
+
+            if *op == Operator::End {
+                stranded.clear();
+            }
+
+            for (operand_num, idx) in outputs.iter().enumerate() {
+                if cx.connections[idx.usize()].read.is_none() {
+                    stranded.push(Coordinate {
                         position_id: *position_id,
                         operand_num,
                     });
@@ -1905,12 +1943,12 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
 
     fn process_inputs(
         map: &mut HashMap<SlotUse, u16>,
-        ins: &[Option<SlotUse>],
+        ins: &[SlotUse],
         indent: u16,
         frame_stack: &mut [OpenFrame],
     ) {
         /* insert dependencies */
-        for idx in ins.iter().flatten() {
+        for idx in ins {
             debug_assert!(!map.contains_key(idx));
             map.insert(*idx, indent);
             if let Some(f) = frame_stack.last_mut() {
@@ -2209,7 +2247,7 @@ pub(crate) mod tests {
 
         fn ins(inputs: Vec<usize>) -> OperatorType {
             OperatorType {
-                inputs: inputs.into_iter().map(|x| Some(SlotUse::new(x))).collect(),
+                inputs: inputs.into_iter().map(SlotUse::new).collect(),
                 outputs: Vec::new(),
             }
         }
@@ -2223,7 +2261,7 @@ pub(crate) mod tests {
 
         fn inout(inputs: Vec<usize>, outputs: Vec<usize>) -> OperatorType {
             OperatorType {
-                inputs: inputs.into_iter().map(|x| Some(SlotUse::new(x))).collect(),
+                inputs: inputs.into_iter().map(SlotUse::new).collect(),
                 outputs: outputs.into_iter().map(SlotUse::new).collect(),
             }
         }
@@ -3887,6 +3925,94 @@ pub(crate) mod tests {
             test_editor_flow(&mut editor)?;
         }
 
+        {
+            // bad connections
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func (result f64)");
+            editor.push_line("i32.const 4");
+            editor.push_line(")");
+            let EditorOutput { connections, .. } = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                connections.connections,
+                vec![
+                    SlotConnection {
+                        written: Some(Coordinate {
+                            position_id: 1,
+                            operand_num: 0
+                        }),
+                        read: None
+                    },
+                    SlotConnection {
+                        written: None,
+                        read: Some(Coordinate {
+                            position_id: 2,
+                            operand_num: 0
+                        })
+                    },
+                    SlotConnection {
+                        written: Some(Coordinate {
+                            position_id: 2,
+                            operand_num: 0
+                        }),
+                        read: None
+                    }
+                ]
+            );
+            assert_eq!(connections.first_slot_of_func, vec![SlotUse::new(0)]);
+            assert_eq!(
+                connections.bad_connections,
+                vec![(
+                    Coordinate {
+                        position_id: 1,
+                        operand_num: 0
+                    },
+                    Coordinate {
+                        position_id: 2,
+                        operand_num: 0
+                    }
+                )]
+            );
+        }
+
+        {
+            // bad connections don't escape a block
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func (result f64)");
+            editor.push_line("block");
+            editor.push_line("i32.const 4");
+            editor.push_line("end");
+            editor.push_line(")");
+            let EditorOutput { connections, .. } = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                connections.connections,
+                vec![
+                    SlotConnection {
+                        written: Some(Coordinate {
+                            position_id: 2,
+                            operand_num: 0
+                        }),
+                        read: None
+                    },
+                    SlotConnection {
+                        written: None,
+                        read: Some(Coordinate {
+                            position_id: 4,
+                            operand_num: 0
+                        })
+                    },
+                    SlotConnection {
+                        written: Some(Coordinate {
+                            position_id: 4,
+                            operand_num: 0
+                        }),
+                        read: None
+                    }
+                ]
+            );
+            assert_eq!(connections.first_slot_of_func, vec![SlotUse::new(0)]);
+            assert!(connections.bad_connections.is_empty());
+        }
+
         Ok(())
     }
 
@@ -3896,7 +4022,7 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"not_draw\" \"point\" (func (param f64 f64)))");
-            let _ = test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor)?;
             assert_eq!(
                 editor.lines[0]
                     .info
@@ -3911,7 +4037,7 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"draw\" \"not_point\" (func (param f64 f64)))");
-            let _ = test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor)?;
             assert_eq!(
                 editor.lines[0]
                     .info
@@ -3926,7 +4052,7 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"draw\" \"point\" (func (param i32)))");
-            let _ = test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor)?;
             assert_eq!(
                 editor.lines[0]
                     .info
@@ -3941,7 +4067,7 @@ pub(crate) mod tests {
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"draw\" \"point\" (func (param f64, f64)))");
-            let _ = test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor)?;
             assert!(
                 editor.lines[0].info.invalid.is_none(),
                 "draw/point should be correctly imported"
@@ -3967,7 +4093,7 @@ pub(crate) mod tests {
             editor.push_line("call $clear_canvas");
             editor.push_line("call $fake_func2");
             editor.push_line(")");
-            let _ = test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor)?;
             assert_eq!(
                 editor.lines[0]
                     .info
@@ -4030,7 +4156,7 @@ pub(crate) mod tests {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"listen\" \"num_samples\" (global i32))");
             editor.push_line("(import \"listen\" \"listen_memory\" (memory 1))");
-            let _ = test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor)?;
             assert!(
                 editor.lines[0].info.invalid.is_none(),
                 "num_samples global should be valid"
@@ -4046,7 +4172,7 @@ pub(crate) mod tests {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(import \"listen\" \"num_samples\" (global (mut i32)))");
             editor.push_line("(import \"listen\" \"listen_memory\" (memory 2))");
-            let _ = test_editor_flow(&mut editor)?;
+            test_editor_flow(&mut editor)?;
             assert_eq!(
                 editor.lines[0].info.kind,
                 LineKind::Malformed("expected (global i32)".to_string()),

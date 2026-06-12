@@ -452,32 +452,32 @@ impl ExecutionState {
             // When re-entering a function: preserve the old slot values, but mark them "old" (grayed out).
             CallFrameOp::EnterFunc(func_idx) => {
                 self.cur_func = Some(*func_idx);
-                if let Some((lower, upper)) = connections.slot_range(*func_idx) {
-                    for slot_idx in lower..upper {
-                        let old = self.slots[slot_idx]
-                            .last()
-                            .copied()
-                            .flatten()
-                            .map(|SlotContents { val, .. }| SlotContents { val, old: true });
-                        self.slots[slot_idx].push(old);
-                    }
+                for slot_idx in connections.slot_range(*func_idx) {
+                    let old = self.slots[slot_idx]
+                        .last()
+                        .copied()
+                        .flatten()
+                        .map(|SlotContents { val, .. }| SlotContents { val, old: true });
+                    self.slots[slot_idx].push(old);
                 }
             }
             // Before a call or call_indirect: store the current depth of this function's slots
             // so they can be restored to this call frame on return.
             CallFrameOp::BeforeCall => {
-                if let Some((lower, _upper)) = connections.slot_range(self.cur_func.unwrap()) {
+                let range = connections.slot_range(self.cur_func.unwrap());
+                if !range.is_empty() {
                     self.call_stack
-                        .push((self.cur_func.unwrap(), self.slots[lower].len()));
+                        .push((self.cur_func.unwrap(), self.slots[range.start].len()));
                 }
             }
             // Before a tail call: just copy our slots to the previous call frame of this function
             // if there is one. (The goal is to avoid unbounded stack growth.)
             CallFrameOp::BeforeTailCall => {
-                if let Some((lower, upper)) = connections.slot_range(self.cur_func.unwrap()) {
-                    let first_slot_len = self.slots[lower].len();
+                let range = connections.slot_range(self.cur_func.unwrap());
+                if !range.is_empty() {
+                    let first_slot_len = self.slots[range.start].len();
                     if first_slot_len > 1 {
-                        for slot_idx in lower..upper {
+                        for slot_idx in range {
                             let cur = self.slots[slot_idx].pop().unwrap();
                             *self.slots[slot_idx].last_mut().unwrap() = cur;
                         }
@@ -488,13 +488,14 @@ impl ExecutionState {
             CallFrameOp::AfterCall(func_idx) => {
                 self.cur_func = Some(*func_idx);
 
-                if let Some((lower, upper)) = connections.slot_range(*func_idx) {
+                let range = connections.slot_range(*func_idx);
+                if !range.is_empty() {
                     let (orig_func, target_height) = self.call_stack.pop().unwrap();
                     assert_eq!(orig_func, *func_idx);
-                    let first_slot_len = self.slots[lower].len();
+                    let first_slot_len = self.slots[range.start].len();
                     debug_assert!(first_slot_len >= target_height);
 
-                    for slot_idx in lower..upper {
+                    for slot_idx in range {
                         debug_assert_eq!(self.slots[slot_idx].len(), first_slot_len);
                         self.slots[slot_idx].truncate(target_height);
                     }
