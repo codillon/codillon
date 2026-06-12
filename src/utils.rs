@@ -1000,7 +1000,21 @@ impl<'a> ValidModule<'a> {
             }
 
             let operator_ty = stack.op(&op.inner.op, func_validator, slots, op.inner.untyped)?;
-            ret.ops.push(operator_ty);
+
+            if op.line_idx == valid_func.lines.1 && op.inner.info != OpInfo::FuncEnd {
+                debug_assert!(
+                    (op.inner.op == Operator::End)
+                        || (op.inner.op == Operator::Else
+                            && op.inner.info == OpInfo::SyntheticElse)
+                );
+
+                ret.ops.push(OperatorType {
+                    inputs: vec![],
+                    outputs: vec![],
+                }); // don't give type to synthetic else or end
+            } else {
+                ret.ops.push(operator_ty);
+            }
 
             if op.inner.op == Operator::End && op.inner.info != OpInfo::FuncEnd {
                 blocks.push((
@@ -1407,9 +1421,6 @@ impl<'a> ValidModule<'a> {
             if codillon_operator.inner.untyped || !codillon_operator.inner.prepended.is_empty() {
                 // Originally invalid operator that was "validized" for type-analysis purposes.
                 // Traps at runtime.
-                new_function.instruction(&I32Const(
-                    codillon_operator.line_idx.try_into().expect("line -> i32"),
-                ));
                 new_function.instruction(&Call(InstrImports::RecordInvalid as u32));
                 new_function.instruction(&Unreachable);
             }
@@ -1478,6 +1489,20 @@ impl<'a> ValidModule<'a> {
             } else {
                 // the operator itself
                 new_function.instruction(&op);
+            }
+
+            if codillon_operator.line_idx == orig_function.lines.1 {
+                // synthetic else or end
+
+                debug_assert!(
+                    (codillon_operator.inner.op == Operator::End)
+                        || (codillon_operator.inner.op == Operator::Else
+                            && codillon_operator.inner.info == OpInfo::SyntheticElse)
+                );
+
+                debug_assert!(codillon_operator.inner.info != OpInfo::FuncEnd);
+                new_function.instruction(&Call(InstrImports::RecordInvalid as u32));
+                new_function.instruction(&Unreachable);
             }
 
             // record result operands
@@ -1692,13 +1717,13 @@ pub struct Coordinate {
     pub operand_num: usize,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct SlotConnection {
     pub written: Option<Coordinate>,
     pub read: Option<Coordinate>,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct SlotConnections {
     pub connections: Vec<SlotConnection>, // same index space as Slot #
     pub first_slot_of_func: Vec<SlotUse>, // indexed by "local" function idx (not including func imports)
@@ -2267,7 +2292,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 0),
+                lines: (0, 7),
                 positions: (0, 0),
                 params: vec![],
                 locals: vec![],
@@ -2348,7 +2373,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 0),
+                lines: (0, 8),
                 positions: (0, 0),
                 params: vec![],
                 locals: vec![],
@@ -2435,7 +2460,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 0),
+                lines: (0, 9),
                 positions: (0, 0),
                 params: vec![],
                 locals: vec![],
@@ -2531,7 +2556,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 0),
+                lines: (0, 10),
                 positions: (0, 0),
                 params: vec![],
                 locals: vec![],
@@ -2620,7 +2645,7 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 0),
+                lines: (0, 2),
                 positions: (0, 0),
                 params: vec![],
                 locals: vec![],
@@ -3132,8 +3157,8 @@ pub(crate) mod tests {
             assert_eq!(TerminationType::Success, log.termination_type());
         }
 
-        // syntax error (missing `end`) -- should be same as the well-formed block
-        // (with different line # for the function end)
+        // syntax error (missing `end`) -- should be similar to well-formed block
+        // (with different line # for the function end, and now invalid on synthetic end)
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
@@ -3144,13 +3169,13 @@ pub(crate) mod tests {
                 + EXPECTED_IMPORTS
                 + EXPECTED_MAIN
                 + "  (func (type 0)\n"
-                + &JUST_BLOCK_END.replace("i32.const 3", "i32.const 2") // different line # for function end
+                + &JUST_BLOCK_END.replace("i32.const 3", "call 1\n    unreachable\n    i32.const 2") // different line # for function end
                 + EXPECTED_STEP
                 + ")\n";
             let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
             let log = test_execution(&binary, &[], &mut [])?;
             assert_eq!(expected, text);
-            assert_eq!(TerminationType::Success, log.termination_type());
+            assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
         // validation error (missing operand)
@@ -3178,7 +3203,6 @@ pub(crate) mod tests {
     call 13
     i32.const 2
     call 12
-    i32.const 2
     call 1
     unreachable
     i32.add
@@ -3317,7 +3341,6 @@ pub(crate) mod tests {
     call 12
     i32.const 1
     call 12
-    i32.const 1
     call 1
     unreachable
     nop
@@ -3352,13 +3375,11 @@ pub(crate) mod tests {
     call 12
     i32.const 2
     call 12
-    i32.const 2
     call 1
     unreachable
     nop
     i32.const 3
     call 12
-    i32.const 3
     call 1
     unreachable
     drop
@@ -3442,7 +3463,6 @@ pub(crate) mod tests {
     call 13
     i32.const 2
     call 12
-    i32.const 2
     call 1
     unreachable
   )
@@ -3507,7 +3527,6 @@ pub(crate) mod tests {
     call 15
     i32.const 3
     call 13
-    i32.const 3
     call 1
     unreachable
   )
@@ -3641,7 +3660,6 @@ pub(crate) mod tests {
     call 12
     i32.const 1
     call 12
-    i32.const 1
     call 1
     unreachable
     block (type 1) (param i32) ;; label = @1
@@ -3649,7 +3667,6 @@ pub(crate) mod tests {
       call 13
       i32.const 2
       call 12
-      i32.const 2
       call 1
       unreachable
     end
@@ -4416,6 +4433,27 @@ pub(crate) mod tests {
             let EditorOutput { binary, .. } = test_editor_flow(&mut editor)?;
             let log = test_execution(&binary, &[], &mut [])?;
             assert_eq!(TerminationType::TooManySteps, log.termination_type());
+        }
+
+        // Test synthetic end with non-unit type (#273)
+        {
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("  block (result i32)");
+            editor.push_line(")");
+
+            let EditorOutput {
+                binary,
+                connections,
+                ..
+            } = test_editor_flow(&mut editor)?;
+            let log = test_execution(&binary, &[], &mut [])?;
+            assert_eq!(TerminationType::HitInvalid, log.termination_type());
+            assert_eq!(connections.connections.len(), 2);
+            assert!(connections.connections[0].written.is_none());
+            assert!(connections.connections[0].read.is_none());
+            assert!(connections.connections[1].written.is_none());
+            assert!(connections.connections[1].read.is_none());
         }
 
         Ok(())
