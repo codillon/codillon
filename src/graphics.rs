@@ -1084,41 +1084,63 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
+    fn make_connection(
+        &mut self,
+        connection_idx: usize,
+        src: &Coordinate,
+        dst: &Coordinate,
+        is_bad: bool,
+    ) {
+        let src_frac = &self.fractions()[src.position_id];
+        let dst_frac = &self.fractions()[dst.position_id];
+        let (write_base, read_base) = (src_frac.target, dst_frac.target);
+        let (x, write_scale, ty) = src_frac.output_locations_scales_and_types[src.operand_num];
+        let reader_offset = if is_bad { 0.0 } else { icon_height(ty) };
+
+        let write_x = write_base.0 + x;
+        let (relative_x, read_scale) = dst_frac.input_locations_and_scales[dst.operand_num];
+        let read_x = read_base.0 + relative_x;
+        let write_y = write_base.1 + 10.0 * write_scale;
+        let read_y = read_base.1 - reader_offset * read_scale;
+        let first_control_height = write_y + 1.0;
+        let second_control_height = write_y;
+
+        while connection_idx >= self.connections_mut().len() {
+            let newpath = self.factory.svg_path();
+            self.connections_mut().push(newpath);
+        }
+        let cx = &mut self.connections_mut()[connection_idx];
+        if is_bad {
+            cx.set_attribute("stroke", ty_to_color(&ty.as_ref()));
+            cx.set_attr_num("stroke-dasharray", "1");
+            cx.set_attr_num("stroke-width", 1.0);
+        } else {
+            cx.set_attribute("stroke", &ty_to_muted(&ty.as_ref()));
+            cx.remove_attribute("stroke-dasharray");
+            cx.set_attr_num("stroke-width", 10.0 * read_scale);
+        }
+        cx.set_attribute("fill", "none");
+        cx.set_attribute(
+            "d",
+            &format!(
+                "M {write_x} {write_y}
+C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{read_y}"
+            ),
+        );
+    }
+
     pub fn set_connections(&mut self, connections: &SlotConnections) {
         let mut connection_idx = 0;
         for SlotConnection { written, read } in &connections.connections {
             let (Some(src), Some(dst)) = (written, read) else {
                 continue;
             };
-            let src_frac = &self.fractions()[src.position_id];
-            let dst_frac = &self.fractions()[dst.position_id];
-            let (write_base, read_base) = (src_frac.target, dst_frac.target);
-            let (x, write_scale, ty) = src_frac.output_locations_scales_and_types[src.operand_num];
-            let reader_offset = icon_height(ty);
 
-            let write_x = write_base.0 + x;
-            let (relative_x, read_scale) = dst_frac.input_locations_and_scales[dst.operand_num];
-            let read_x = read_base.0 + relative_x;
-            let write_y = write_base.1 + 10.0 * write_scale;
-            let read_y = read_base.1 - reader_offset * read_scale;
-            let first_control_height = write_y + 1.0;
-            let second_control_height = write_y;
-
-            while connection_idx >= self.connections_mut().len() {
-                let newpath = self.factory.svg_path();
-                self.connections_mut().push(newpath);
-            }
-            let cx = &mut self.connections_mut()[connection_idx];
-            cx.set_attribute("stroke", &ty_to_muted(&ty.as_ref()));
-            cx.set_attr_num("stroke-width", 10.0 * read_scale);
-            cx.set_attribute("fill", "none");
-            cx.set_attribute(
-                "d",
-                &format!(
-                    "M {write_x} {write_y}
-C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{read_y}"
-                ),
-            );
+            self.make_connection(connection_idx, src, dst, false);
+            connection_idx += 1;
+        }
+        for (src, dst) in &connections.bad_connections {
+            self.make_connection(connection_idx, src, dst, true);
             connection_idx += 1;
         }
         self.connections_mut().truncate(connection_idx);

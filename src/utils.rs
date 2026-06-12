@@ -11,6 +11,7 @@ use std::{
     collections::HashMap,
     fmt::{Debug, Formatter},
     num::NonZeroU32,
+    ops::Range,
 };
 use wasm_encoder::{
     CodeSection, Instruction as EncoderInstruction, MemArg, ValType as EncoderValType,
@@ -1728,20 +1729,20 @@ pub struct SlotConnections {
     pub connections: Vec<SlotConnection>, // same index space as Slot #
     pub first_slot_of_func: Vec<SlotUse>, // indexed by "local" function idx (not including func imports)
     pub blocks: Vec<(SlotUse, SlotUse)>,
+    pub bad_connections: Vec<(Coordinate, Coordinate)>,
 }
 
 impl SlotConnections {
-    pub fn slot_range(&self, local_func_idx: u32) -> Option<(usize, usize)> {
+    pub fn slot_range(&self, local_func_idx: u32) -> Range<usize> {
         let lower_limit = self.first_slot_of_func[local_func_idx as usize];
         let upper_limit = self
             .first_slot_of_func
             .get(local_func_idx as usize + 1)
             .copied()
             .unwrap_or_else(|| SlotUse::new(self.connections.len()));
-        if lower_limit.0 != upper_limit.0 {
-            Some((lower_limit.usize(), upper_limit.usize()))
-        } else {
-            None
+        Range {
+            start: lower_limit.usize(),
+            end: upper_limit.usize(),
         }
     }
 }
@@ -1769,6 +1770,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
         ],
         first_slot_of_func: Vec::with_capacity(tys.funcs.len()),
         blocks: tys.blocks.clone(),
+        bad_connections: vec![],
     };
 
     // locate globals
@@ -1818,6 +1820,42 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
             for (operand_num, maybe_slot) in inputs.iter().enumerate() {
                 if let Some(idx) = maybe_slot {
                     cx.connections[idx.usize()].read = Some(Coordinate {
+                        position_id: *position_id,
+                        operand_num,
+                    });
+                }
+            }
+        }
+
+        // connect "bad connections"
+        let mut stranded: Vec<Coordinate> = Vec::new();
+        fn thirsty(maybe_slot: &Option<SlotUse>, conn: &SlotConnections) -> bool {
+            match maybe_slot {
+                None => true,
+                Some(slot) if conn.connections[slot.usize()].written.is_none() => true,
+                _ => false,
+            }
+        }
+        for (Aligned { position_id, .. }, OperatorType { inputs, outputs }) in
+            zip_eq(&func.operators, &func_tys.ops)
+        {
+            for (operand_num, maybe_slot) in inputs.iter().enumerate().rev() {
+                if thirsty(maybe_slot, &cx)
+                    && let Some(where_written) = stranded.pop()
+                {
+                    cx.bad_connections.push((
+                        where_written,
+                        Coordinate {
+                            position_id: *position_id,
+                            operand_num,
+                        },
+                    ));
+                }
+            }
+
+            for (operand_num, idx) in outputs.iter().enumerate() {
+                if cx.connections[idx.usize()].read.is_none() {
+                    stranded.push(Coordinate {
                         position_id: *position_id,
                         operand_num,
                     });
