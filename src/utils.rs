@@ -11,6 +11,7 @@ use std::{
     collections::HashMap,
     fmt::{Debug, Formatter},
     num::NonZeroU32,
+    ops::Range,
 };
 use wasm_encoder::{
     CodeSection, Instruction as EncoderInstruction, MemArg, ValType as EncoderValType,
@@ -851,12 +852,13 @@ impl SimulatedStack {
                 if untyped || (pop_count - i - 1) >= accessible_operands {
                     // XXX special-case for select. Should handle in more principled/general way.
                     if is_select && i == 2 && pop_count - 1 < accessible_operands {
-                        Some(self.slot_idx_stack[pre_instr_height + i - pop_count])
+                        self.slot_idx_stack[pre_instr_height + i - pop_count]
                     } else {
-                        None
+                        slots.push(Slot { ty: None });
+                        SlotUse::new(slots.len() - 1)
                     }
                 } else {
-                    Some(self.slot_idx_stack[pre_instr_height + i - pop_count])
+                    self.slot_idx_stack[pre_instr_height + i - pop_count]
                 }
             })
             .collect::<Vec<_>>();
@@ -886,9 +888,7 @@ impl SimulatedStack {
                 slots.push(Slot {
                     ty: if is_select {
                         // XXX should handle in more principled/general way
-                        inputs[0]
-                            .as_ref()
-                            .and_then(|x| slots.get(x.usize()).and_then(|y| y.ty))
+                        slots.get(inputs[0].usize()).and_then(|y| y.ty)
                     } else {
                         validator.get_operand_type(push_count - i - 1).flatten()
                     },
@@ -1691,7 +1691,7 @@ fn assert_slot_use_small() {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct OperatorType {
-    pub inputs: Vec<Option<SlotUse>>,
+    pub inputs: Vec<SlotUse>,
     pub outputs: Vec<SlotUse>,
 }
 
@@ -1728,20 +1728,20 @@ pub struct SlotConnections {
     pub connections: Vec<SlotConnection>, // same index space as Slot #
     pub first_slot_of_func: Vec<SlotUse>, // indexed by "local" function idx (not including func imports)
     pub blocks: Vec<(SlotUse, SlotUse)>,
+    pub bad_connections: Vec<(Coordinate, Coordinate)>,
 }
 
 impl SlotConnections {
-    pub fn slot_range(&self, local_func_idx: u32) -> Option<(usize, usize)> {
+    pub fn slot_range(&self, local_func_idx: u32) -> Range<usize> {
         let lower_limit = self.first_slot_of_func[local_func_idx as usize];
         let upper_limit = self
             .first_slot_of_func
             .get(local_func_idx as usize + 1)
             .copied()
             .unwrap_or_else(|| SlotUse::new(self.connections.len()));
-        if lower_limit.0 != upper_limit.0 {
-            Some((lower_limit.usize(), upper_limit.usize()))
-        } else {
-            None
+        Range {
+            start: lower_limit.usize(),
+            end: upper_limit.usize(),
         }
     }
 }
@@ -1754,7 +1754,7 @@ pub struct SlotInfo {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct AnnotatedOperatorType {
-    pub inputs: Vec<Option<SlotInfo>>,
+    pub inputs: Vec<SlotInfo>,
     pub outputs: Vec<SlotInfo>,
 }
 
@@ -1769,6 +1769,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
         ],
         first_slot_of_func: Vec::with_capacity(tys.funcs.len()),
         blocks: tys.blocks.clone(),
+        bad_connections: vec![],
     };
 
     // locate globals
@@ -1815,9 +1816,46 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
                 });
             }
 
-            for (operand_num, maybe_slot) in inputs.iter().enumerate() {
-                if let Some(idx) = maybe_slot {
-                    cx.connections[idx.usize()].read = Some(Coordinate {
+            for (operand_num, idx) in inputs.iter().enumerate() {
+                cx.connections[idx.usize()].read = Some(Coordinate {
+                    position_id: *position_id,
+                    operand_num,
+                });
+            }
+        }
+
+        // connect "bad connections"
+        let mut stranded: Vec<Coordinate> = Vec::new();
+        for (
+            Aligned {
+                position_id,
+                inner: GeneralOperator { op, .. },
+                ..
+            },
+            OperatorType { inputs, outputs },
+        ) in zip_eq(&func.operators, &func_tys.ops)
+        {
+            for (operand_num, slot) in inputs.iter().enumerate().rev() {
+                if cx.connections[slot.usize()].written.is_none()
+                    && let Some(where_written) = stranded.pop()
+                {
+                    cx.bad_connections.push((
+                        where_written,
+                        Coordinate {
+                            position_id: *position_id,
+                            operand_num,
+                        },
+                    ));
+                }
+            }
+
+            if *op == Operator::End {
+                stranded.clear();
+            }
+
+            for (operand_num, idx) in outputs.iter().enumerate() {
+                if cx.connections[idx.usize()].read.is_none() {
+                    stranded.push(Coordinate {
                         position_id: *position_id,
                         operand_num,
                     });
@@ -1905,12 +1943,12 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
 
     fn process_inputs(
         map: &mut HashMap<SlotUse, u16>,
-        ins: &[Option<SlotUse>],
+        ins: &[SlotUse],
         indent: u16,
         frame_stack: &mut [OpenFrame],
     ) {
         /* insert dependencies */
-        for idx in ins.iter().flatten() {
+        for idx in ins {
             debug_assert!(!map.contains_key(idx));
             map.insert(*idx, indent);
             if let Some(f) = frame_stack.last_mut() {
@@ -2209,7 +2247,7 @@ pub(crate) mod tests {
 
         fn ins(inputs: Vec<usize>) -> OperatorType {
             OperatorType {
-                inputs: inputs.into_iter().map(|x| Some(SlotUse::new(x))).collect(),
+                inputs: inputs.into_iter().map(SlotUse::new).collect(),
                 outputs: Vec::new(),
             }
         }
@@ -2223,7 +2261,7 @@ pub(crate) mod tests {
 
         fn inout(inputs: Vec<usize>, outputs: Vec<usize>) -> OperatorType {
             OperatorType {
-                inputs: inputs.into_iter().map(|x| Some(SlotUse::new(x))).collect(),
+                inputs: inputs.into_iter().map(SlotUse::new).collect(),
                 outputs: outputs.into_iter().map(SlotUse::new).collect(),
             }
         }
