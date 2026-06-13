@@ -23,8 +23,8 @@ use std::{collections::HashMap, str::FromStr};
 use thousands::Separable;
 use wasmparser::ValType;
 use web_sys::{
-    SvgAnimateElement, SvgDefsElement, SvgElement, SvgLineElement, SvgPathElement, SvgTextElement,
-    SvgUseElement, SvggElement, console::log_1,
+    SvgAnimateElement, SvgDefsElement, SvgElement, SvgLineElement, SvgLinearGradientElement,
+    SvgPathElement, SvgStopElement, SvgTextElement, SvgUseElement, SvggElement, console::log_1,
 };
 
 const SYM_HW: f32 = 15.0;
@@ -555,7 +555,17 @@ impl Arrow {
     }
 }
 
-type SVGDefs = DomVec<ElementHandle<SvgPathElement>, SvgDefsElement>; // definitions in SVG header
+// definitions in SVG header
+type SVGDefs = DomStruct<
+    (
+        DomVec<ElementHandle<SvgPathElement>, SvggElement>,
+        (
+            DomVec<ElementHandle<SvgStopElement>, SvgLinearGradientElement>,
+            (),
+        ),
+    ),
+    SvgDefsElement,
+>;
 type CodillonBlocks = DomSet<FrameLine, SvggElement>; // the lines themselves
 type Fractions = DomSet<OperatorFraction, SvggElement>;
 type Connections = DomVec<ElementHandle<SvgPathElement>, SvggElement>;
@@ -677,6 +687,11 @@ impl DomImage {
         get_mut!(self.contents, arrow)
     }
 
+    fn make_empty(mut ret: ElementHandle<SvgPathElement>) -> ElementHandle<SvgPathElement> {
+        ret.set_attribute("fill", "url(#fade-up)");
+        ret
+    }
+
     fn make_icon(
         factory: &ElementFactory,
         id: &str,
@@ -717,7 +732,13 @@ impl DomImage {
         let mut ret = Self {
             contents: CodillonSVG::new(
                 (
-                    SVGDefs::new(factory.svg_defs()),
+                    SVGDefs::new(
+                        (
+                            DomVec::new(factory.svg_g()),
+                            (DomVec::new(factory.svg_linear_gradient()), ()),
+                        ),
+                        factory.svg_defs(),
+                    ),
                     (
                         Connections::new(factory.svg_g()),
                         (
@@ -745,7 +766,7 @@ impl DomImage {
         // The "unclosed" symbol looks like a ⊘ (Circled Division Slash)
         // character, or like an "End of All Prohibitions"
         // European road sign.
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "unclosed",
             "M 5.1970835,0 C 5.1970835,2.87027 2.87027,5.1970835 0,5.1970835 -2.87027,5.1970835 -5.1970835,2.87027 -5.1970835,0 -5.1970835,-2.87027 -2.87027,-5.1970835 0,-5.1970835 2.87027,-5.1970835 5.1970835,-2.87027 5.1970835,0 Z M 3.6812636,-3.6812727 -3.681272,3.6812676",
@@ -765,10 +786,10 @@ impl DomImage {
             );
             arrow_icon.set_attribute("paint-order", "stroke");
 
-            ret.defs_mut().push(arrow_icon);
+            ret.defs_mut().get_mut().0.push(arrow_icon);
         }
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "mystery_in_empty",
 	    "M -0,-20
@@ -783,7 +804,7 @@ Z",
             "2",
         ));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "mystery_in",
 	    "M -0,-20
@@ -798,7 +819,7 @@ Z",
             "1",
         ));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "mystery_out",
 "m 0,0
@@ -810,7 +831,7 @@ Z",
             "0.5",
         ));
 
-        ret.defs_mut().push(Self::make_stranded(
+        ret.defs_mut().get_mut().0.push(Self::make_stranded(
             &factory,
             "mystery_out_stranded",
 "m 0,0
@@ -820,16 +841,19 @@ Z",
 	    &None,
         ));
 
-        ret.defs_mut().push(Self::make_icon(
-            &factory,
-            "i32_in_empty",
-            "M -4.9,-12 H -15 V 0 H 15 V -12 H 4.9",
-            "#fffff0",
-            ty_to_color(&Some(&I32)),
-            "1.5",
-        ));
+        ret.defs_mut()
+            .get_mut()
+            .0
+            .push(Self::make_empty(Self::make_icon(
+                &factory,
+                "i32_in_empty",
+                "M -4.9,-12 H -15 V 0 H 15 V -12 H 4.9",
+                "#fffff0",
+                ty_to_color(&Some(&I32)),
+                "1.5",
+            )));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "i32_in",
             "M -4.9,-12 H -15 V 0 H 15 V -12 H 4.9",
@@ -838,7 +862,7 @@ Z",
             "1.5",
         ));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "i32_out",
             "M -15,0 V 12 H 15 V 0 Z",
@@ -847,23 +871,26 @@ Z",
             "0.25",
         ));
 
-        ret.defs_mut().push(Self::make_stranded(
+        ret.defs_mut().get_mut().0.push(Self::make_stranded(
             &factory,
             "i32_out_stranded",
             "M -15,0 V 12 H 15 V 0 Z",
             &Some(&I32),
         ));
 
-        ret.defs_mut().push(Self::make_icon(
-            &factory,
-            "i64_in_empty",
-            "M -4.9,-20 H -15 V 0 H 15 V -20 H 4.9",
-            "#fffff0",
-            ty_to_color(&Some(&I64)),
-            "2",
-        ));
+        ret.defs_mut()
+            .get_mut()
+            .0
+            .push(Self::make_empty(Self::make_icon(
+                &factory,
+                "i64_in_empty",
+                "M -4.9,-20 H -15 V 0 H 15 V -20 H 4.9",
+                "#fffff0",
+                ty_to_color(&Some(&I64)),
+                "2",
+            )));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "i64_in",
             "M -4.9,-20 H -15 V 0 H 15 V -20 H 4.9",
@@ -872,7 +899,7 @@ Z",
             "2",
         ));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "i64_out",
             "M -15,0 V 20 H 15 V 0 Z",
@@ -881,14 +908,14 @@ Z",
             "0.25",
         ));
 
-        ret.defs_mut().push(Self::make_stranded(
+        ret.defs_mut().get_mut().0.push(Self::make_stranded(
             &factory,
             "i64_out_stranded",
             "M -15,0 V 20 H 15 V 0 Z",
             &Some(&I64),
         ));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "f32_out",
             "M 15,7.5
@@ -899,7 +926,7 @@ Z",
             "0.25",
         ));
 
-        ret.defs_mut().push(Self::make_stranded(
+        ret.defs_mut().get_mut().0.push(Self::make_stranded(
             &factory,
             "f32_out_stranded",
             "M 15,7.5
@@ -908,7 +935,7 @@ Z",
             &Some(&F32),
         ));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "f64_out",
             "M 15,10 A 15,10 0 0 1 0,20 15,10 0 0 1 -15,10 15,10 0 0 1 0,0 15,10 0 0 1 15,10 Z",
@@ -917,14 +944,14 @@ Z",
             "0.25",
         ));
 
-        ret.defs_mut().push(Self::make_stranded(
+        ret.defs_mut().get_mut().0.push(Self::make_stranded(
             &factory,
             "f64_out_stranded",
             "M 15,10 A 15,10 0 0 1 0,20 15,10 0 0 1 -15,10 15,10 0 0 1 0,0 15,10 0 0 1 15,10 Z",
             &Some(&F64),
         ));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "f32_in",
             "M 4.499,-11.724
@@ -934,17 +961,20 @@ A 15,6 0 0 1 14.826,-5.09 15,6 0 0 1 0,-0 15,6 0 0 1 -14.826,-5.09 15,6 0 0 1 -4
             "1.5",
         ));
 
-        ret.defs_mut().push(Self::make_icon(
-            &factory,
-            "f32_in_empty",
-            "M 4.499,-11.724
+        ret.defs_mut()
+            .get_mut()
+            .0
+            .push(Self::make_empty(Self::make_icon(
+                &factory,
+                "f32_in_empty",
+                "M 4.499,-11.724
 A 15,6 0 0 1 14.826,-5.09 15,6 0 0 1 0,-0 15,6 0 0 1 -14.826,-5.09 15,6 0 0 1 -4.5,-11.724",
-            "#fffff0",
-            ty_to_color(&Some(&F32)),
-            "1.5",
-        ));
+                "#fffff0",
+                ty_to_color(&Some(&F32)),
+                "1.5",
+            )));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_icon(
             &factory,
             "f64_in",
 "M 4.498,-19.54
@@ -954,7 +984,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             "2",
         ));
 
-        ret.defs_mut().push(Self::make_icon(
+        ret.defs_mut().get_mut().0.push(Self::make_empty(Self::make_icon(
             &factory,
             "f64_in_empty",
 "M 4.498,-19.54
@@ -962,7 +992,23 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             "#fffff0",
             ty_to_color(&Some(&F64)),
             "2",
-        ));
+        )));
+
+        ret.defs_mut().get_mut().1.0.set_attribute("id", "fade-up");
+        ret.defs_mut().get_mut().1.0.set_attribute("x1", "0%");
+        ret.defs_mut().get_mut().1.0.set_attribute("x2", "0%");
+        ret.defs_mut().get_mut().1.0.set_attribute("y1", "100%");
+        ret.defs_mut().get_mut().1.0.set_attribute("y2", "0%");
+
+        let mut add_stop = |offset, color| {
+            let mut stop = factory.svg_stop();
+            stop.set_attribute("offset", offset);
+            stop.set_attribute("stop-color", color);
+            ret.defs_mut().get_mut().1.0.push(stop);
+        };
+        add_stop("0%", "#fffff0ff");
+        add_stop("50%", "#fffff0ff");
+        add_stop("100%", "#fffff000");
 
         ret
     }
@@ -1094,11 +1140,18 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         let src_frac = &self.fractions()[src.position_id];
         let dst_frac = &self.fractions()[dst.position_id];
         let (write_base, read_base) = (src_frac.target, dst_frac.target);
-        let (x, write_scale, ty) = src_frac.output_locations_scales_and_types[src.operand_num];
-        let reader_offset = if is_bad { 0.0 } else { icon_height(ty) };
+        let (x, write_scale, src_ty) = src_frac.output_locations_scales_and_types[src.operand_num];
 
         let write_x = write_base.0 + x;
-        let (relative_x, read_scale) = dst_frac.input_locations_and_scales[dst.operand_num];
+        let (relative_x, read_scale, dst_ty) =
+            dst_frac.input_locations_scales_and_types[dst.operand_num];
+
+        let reader_offset = if is_bad {
+            icon_height(dst_ty) / 2.0
+        } else {
+            icon_height(dst_ty)
+        };
+
         let read_x = read_base.0 + relative_x;
         let write_y = write_base.1 + 10.0 * write_scale;
         let read_y = read_base.1 - reader_offset * read_scale;
@@ -1111,11 +1164,11 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
         let cx = &mut self.connections_mut()[connection_idx];
         if is_bad {
-            cx.set_attribute("stroke", ty_to_color(&ty.as_ref()));
+            cx.set_attribute("stroke", ty_to_color(&src_ty.as_ref()));
             cx.set_attr_num("stroke-dasharray", "1");
             cx.set_attr_num("stroke-width", 1.0);
         } else {
-            cx.set_attribute("stroke", &ty_to_muted(&ty.as_ref()));
+            cx.set_attribute("stroke", &ty_to_muted(&src_ty.as_ref()));
             cx.remove_attribute("stroke-dasharray");
             cx.set_attr_num("stroke-width", 10.0 * read_scale);
         }
@@ -1131,16 +1184,16 @@ C {write_x},{first_control_height} {read_x},{second_control_height}, {read_x},{r
 
     pub fn set_connections(&mut self, connections: &SlotConnections) {
         let mut connection_idx = 0;
+        for (src, dst) in &connections.bad_connections {
+            self.make_connection(connection_idx, src, dst, true);
+            connection_idx += 1;
+        }
         for SlotConnection { written, read } in &connections.connections {
             let (Some(src), Some(dst)) = (written, read) else {
                 continue;
             };
 
             self.make_connection(connection_idx, src, dst, false);
-            connection_idx += 1;
-        }
-        for (src, dst) in &connections.bad_connections {
-            self.make_connection(connection_idx, src, dst, true);
             connection_idx += 1;
         }
         self.connections_mut().truncate(connection_idx);
@@ -1215,7 +1268,7 @@ type FractionVec = DomVec<Slot, SvggElement>;
 type SymbolsType = DomStruct<(FractionVec, (FractionVec, ())), SvggElement>;
 
 struct FractionCache {
-    input_types: Vec<Option<SlotInfo>>,
+    input_types: Vec<SlotInfo>,
     output_types: Vec<SlotInfo>,
 }
 
@@ -1224,7 +1277,7 @@ struct OperatorFraction {
     cache: Option<FractionCache>,
     line_no: usize,
     target: (f32, f32),
-    input_locations_and_scales: Vec<(f32, f32)>,
+    input_locations_scales_and_types: Vec<(f32, f32, Option<ValType>)>,
     output_locations_scales_and_types: Vec<(f32, f32, Option<ValType>)>,
 }
 
@@ -1330,7 +1383,7 @@ impl OperatorFraction {
             cache: None,
             line_no,
             target: Self::compute_target(line_no, indent),
-            input_locations_and_scales: vec![],
+            input_locations_scales_and_types: vec![],
             output_locations_scales_and_types: vec![],
         };
         ret.symbols.set_attribute("class", "fraction");
@@ -1368,7 +1421,7 @@ impl OperatorFraction {
         factory: &ElementFactory,
         line_no: usize,
         indent: u16,
-        input_types: Vec<Option<SlotInfo>>,
+        input_types: Vec<SlotInfo>,
         output_types: Vec<SlotInfo>,
     ) {
         self.goto(line_no, indent);
@@ -1394,7 +1447,7 @@ impl OperatorFraction {
             self.outputs().push(Slot::new_empty(factory));
         }
 
-        self.input_locations_and_scales.clear();
+        self.input_locations_scales_and_types.clear();
         self.output_locations_scales_and_types.clear();
 
         fn scale(len: i32) -> f32 {
@@ -1425,22 +1478,13 @@ impl OperatorFraction {
         let left_edge_in = -SYM_HW * (in_len - 1) as f32;
         let left_edge_out = -SYM_HW * (out_len - 1) as f32;
 
-        fn render(maybe_slot: Option<&SlotInfo>, is_input: bool) -> String {
-            let (slot, used) = match maybe_slot {
-                Some(s) => (
-                    match s.slot.ty {
-                        Some(ty) => ty.to_string(),
-                        None => "mystery".to_string(),
-                    },
-                    s.used,
-                ),
-                None => ("mystery".to_string(), false),
-            };
+        fn render(info: &SlotInfo, is_input: bool) -> String {
+            let name = info.slot.ty.map(|x| x.to_string());
             format!(
                 "#{}_{}{}",
-                slot,
+                name.unwrap_or(String::from("mystery")),
                 if is_input { "in" } else { "out" },
-                if !used && is_input { "_empty" } else { "" }
+                if !info.used && is_input { "_empty" } else { "" }
             )
         }
 
@@ -1448,11 +1492,11 @@ impl OperatorFraction {
             let sym = &mut self.inputs()[i].get_mut().0;
             let x = left_edge_in + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
-            sym.set_attribute("href", &render(ty.as_ref(), true));
-            self.input_locations_and_scales
-                .push((in_scale * x, in_scale));
+            sym.set_attribute("href", &render(ty, true));
+            self.input_locations_scales_and_types
+                .push((in_scale * x, in_scale, ty.slot.ty));
 
-            let height = icon_height(ty.as_ref().and_then(|x| x.slot.ty)) - 1.25;
+            let height = icon_height(ty.slot.ty) - 1.25;
             let text = &mut self.inputs()[i].get_mut().1.0;
 
             text.set_pos(x, -height / 2.0);
@@ -1469,7 +1513,7 @@ impl OperatorFraction {
             let sym = &mut self.outputs()[i].get_mut().0;
             let x = left_edge_out + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
-            sym.set_attribute("href", &(render(Some(ty), false) + "_stranded"));
+            sym.set_attribute("href", &(render(ty, false) + "_stranded"));
 
             let text = &mut self.outputs()[i].get_mut().1.0;
             text.clear();
@@ -1480,7 +1524,7 @@ impl OperatorFraction {
             let sym = &mut self.outputs()[idx].get_mut().0;
             let x = left_edge_out + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
-            sym.set_attribute("href", &render(Some(ty), false));
+            sym.set_attribute("href", &render(ty, false));
 
             self.output_locations_scales_and_types
                 .push((out_scale * x, out_scale, ty.slot.ty));
