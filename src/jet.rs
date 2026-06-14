@@ -638,6 +638,14 @@ impl ElementFactory {
         ElementHandle::new(self.create_svg_element("use"))
     }
 
+    pub fn svg_linear_gradient(&self) -> ElementHandle<web_sys::SvgLinearGradientElement> {
+        ElementHandle::new(self.create_svg_element("linearGradient"))
+    }
+
+    pub fn svg_stop(&self) -> ElementHandle<web_sys::SvgStopElement> {
+        ElementHandle::new(self.create_svg_element("stop"))
+    }
+
     pub fn input(&self) -> ElementHandle<web_sys::HtmlInputElement> {
         ElementHandle::new(self.create_element("input"))
     }

@@ -881,14 +881,12 @@ impl Editor {
         for (func, func_types) in zip_eq(&validized.functions, &types.funcs) {
             // set types of params
             if !func_types.params.is_empty() {
-                let param_types: Vec<Option<SlotInfo>> = func_types
+                let param_types: Vec<SlotInfo> = func_types
                     .params
                     .iter()
-                    .map(|x| {
-                        Some(SlotInfo {
-                            slot: types.slots[x.usize()].clone(),
-                            used: true,
-                        })
+                    .map(|x| SlotInfo {
+                        slot: types.slots[x.usize()].clone(),
+                        used: true,
                     })
                     .collect();
                 tagged_types.insert(
@@ -970,15 +968,13 @@ impl Editor {
             for (i, (op, OperatorType { inputs, outputs })) in
                 zip_eq(&func.operators, &func_types.ops).enumerate()
             {
-                let inputs: Vec<Option<SlotInfo>> = inputs
+                let inputs: Vec<SlotInfo> = inputs
                     .iter()
-                    .map(|x| {
-                        x.as_ref().map(|y| SlotInfo {
-                            slot: types.slots[y.usize()].clone(),
-                            used: self.slot_connections.connections[y.usize()]
-                                .written
-                                .is_some(),
-                        })
+                    .map(|x| SlotInfo {
+                        slot: types.slots[x.usize()].clone(),
+                        used: self.slot_connections.connections[x.usize()]
+                            .written
+                            .is_some(),
                     })
                     .collect();
                 let mut all_used = true;
