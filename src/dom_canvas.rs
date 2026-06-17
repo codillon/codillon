@@ -58,7 +58,7 @@ impl DomCanvas {
                 Point(x, y) => {
                     let (xmin, xmax, ymin, ymax) = extent;
                     let pixel_x = (x - xmin) / (xmax - xmin) * WIDTH;
-                    let pixel_y = ymax * HEIGHT - (y - ymin) / (ymax - ymin) * HEIGHT;
+                    let pixel_y = HEIGHT - (y - ymin) / (ymax - ymin) * HEIGHT;
                     self.context.begin_path();
                     self.context
                         .arc(pixel_x, pixel_y, point_radius, 0.0, TAU)
