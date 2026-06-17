@@ -426,13 +426,23 @@ impl Editor {
         }
 
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
+        let target = self.get_lines_and_positions(target_range)?;
+        self.replace_position_range(target, saved_selection, new_str, true)
+    }
 
+    fn replace_position_range(
+        &mut self,
+        target: PositionRange,
+        saved_selection: PositionRange,
+        new_str: &str,
+        record: bool,
+    ) -> Result<()> {
         let PositionRange {
             start_line,
             start_pos,
             end_line,
             end_pos,
-        } = self.get_lines_and_positions(target_range)?;
+        } = target;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -580,12 +590,12 @@ impl Editor {
         match self.on_change() {
             Ok(()) => {
                 self.line(fixup_line).set_cursor_position(new_cursor_pos)?;
-                let mut new_lines = Vec::new();
-                for i in start_line..=fixup_line {
-                    new_lines.push(self.line(i).suffix(Position::begin())?);
-                }
                 // Store new edit
-                {
+                if record {
+                    let mut new_lines = Vec::new();
+                    for i in start_line..=fixup_line {
+                        new_lines.push(self.line(i).suffix(Position::begin())?);
+                    }
                     self.action_history.store_edit(Edit {
                         start_line,
                         old_lines: backup,
@@ -1062,27 +1072,20 @@ impl Editor {
         insert_lines: &[String],
         selection_after: &PositionRange,
     ) -> Result<()> {
-        let mut document_length = self.text().len();
-        if start_line > document_length {
+        let document_length = self.text().len();
+        if start_line >= document_length {
             bail!("start_line {start_line} out of range");
         }
-        // Removing ending
-        let end = min(
-            start_line
-                .checked_add(remove_len)
-                .unwrap_or(document_length),
-            self.text().len(),
-        );
-        if end > start_line {
-            self.text_mut().remove_range(start_line, end);
-        }
-        // Add new lines
-        for (index, value) in insert_lines.iter().enumerate() {
-            let newline = CodeLine::new(value, &self.factory);
-            self.text_mut().insert(start_line + index, newline);
-        }
-        self.on_change()?;
-        document_length = self.text().len().saturating_sub(1);
+        let end_line = min(start_line + remove_len, document_length) - 1;
+        let target = PositionRange {
+            start_line,
+            start_pos: Position::begin(),
+            end_line,
+            end_pos: self.line(end_line).end_position(),
+        };
+        let new_str = insert_lines.join("\n");
+        self.replace_position_range(target, selection_after.clone(), &new_str, false)?;
+        let document_length = self.text().len().saturating_sub(1);
         let start_index = min(selection_after.start_line, document_length);
         let end_index = min(selection_after.end_line, document_length);
         // Restore caret position
