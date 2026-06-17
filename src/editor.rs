@@ -1153,6 +1153,7 @@ impl Editor {
     }
 
     fn show_autocomplete(&mut self) -> Result<()> {
+        use str_indices::utf16::to_byte_idx;
         let selection = get_selection();
         if !selection.is_collapsed() {
             self.autocomplete_mut().update("");
@@ -1168,7 +1169,8 @@ impl Editor {
             return Ok(());
         }
 
-        let prefix = self.line(line_idx).instr().get()[..pos.offset].to_string();
+        let instruction = self.line(line_idx).instr().get();
+        let prefix = instruction[..to_byte_idx(instruction, pos.offset)].to_string();
         self.autocomplete_mut().update(&prefix);
         Ok(())
     }
