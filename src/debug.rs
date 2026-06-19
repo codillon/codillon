@@ -103,22 +103,14 @@ impl RunLog {
 
     pub fn wasm_step(&self, line_num: u32) -> bool {
         use TerminationType::*;
-        if self.termination_type() == HitBadImport && self.step_count() > 0 {
-            self.with_completed_step(self.step_count() - 1, |completed| {
-                self.with_current_step_mut(|current| {
-                    current.line_num = completed.line_num;
-                })
-            });
-        } else {
-            self.with_current_step_mut(|step| step.line_num = line_num);
-        }
 
+        self.with_current_step_mut(|step| step.line_num = line_num);
         self.commit_step();
 
         match self.termination_type() {
             Running => (),
             TooManySteps => panic!("execution unexpectedly continued after TooManySteps"),
-            HitInvalid | HitBadImport => return false,
+            HitInvalid => return false,
             Error => panic!("execution unexpectedly continued after Error"),
             Success => panic!("execution unexpectedly continued after Success"),
         }
@@ -154,7 +146,6 @@ impl RunLog {
                 TerminationType::Running => self.set_termination_type(TerminationType::Success),
                 TerminationType::TooManySteps
                 | TerminationType::HitInvalid
-                | TerminationType::HitBadImport
                 | TerminationType::Success
                 | TerminationType::Error => {
                     unreachable!("success after other result");
@@ -173,9 +164,7 @@ impl RunLog {
                     self.set_termination_type(TerminationType::Error);
                     self.set_error_string(err);
                 }
-                TerminationType::HitInvalid
-                | TerminationType::HitBadImport
-                | TerminationType::TooManySteps => {} // error is expected
+                TerminationType::HitInvalid | TerminationType::TooManySteps => {} // error is expected
                 TerminationType::Success | TerminationType::Error => {
                     unreachable!("error after other result");
                 }
@@ -309,7 +298,6 @@ pub enum TerminationType {
     Running,
     TooManySteps,
     HitInvalid,
-    HitBadImport,
     Error,
     Success,
 }
@@ -542,11 +530,6 @@ fn make_imports() -> Result<Object, JsValue> {
         let record_invalid: ScopedClosure<'_, dyn Fn()> =
             Closure::new(|| RUN_LOG.with(|r| r.set_termination_type(TerminationType::HitInvalid)));
         register_closure(&codillon_debug, "record_invalid", record_invalid);
-
-        let func_placeholder: ScopedClosure<'_, dyn Fn()> = Closure::new(|| {
-            RUN_LOG.with(|r| r.set_termination_type(TerminationType::HitBadImport))
-        });
-        register_closure(&codillon_debug, "func_placeholder", func_placeholder);
 
         create_closure_record_operations(&codillon_debug);
         create_closure_frame_operations(&codillon_debug);

@@ -1,18 +1,20 @@
 // Structures and utilities to support multi-function/multi-module text buffers.
 
-use crate::line::LineInfo;
-use crate::symbolic::{
-    ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
-    symbols_resolved,
+use crate::{
+    line::LineInfo,
+    symbolic::{
+        ModuleIdentifiers, collect_label_symbol, collect_local_symbols, collect_module_symbols,
+        symbols_resolved,
+    },
+    utils::{HelperImportKind, check_import},
 };
-use crate::utils::{HelperImportKind, check_import};
 use anyhow::Result;
 use std::collections::HashSet;
 use wast::{
     Error,
     core::{
-        Export, Global, Imports, InlineExport, InlineImport, Instruction, ItemKind, Limits,
-        LocalParser, Memory, MemoryType, Table, ValType,
+        Export, Func, FuncKind, FunctionType, Global, Imports, InlineExport, InlineImport,
+        Instruction, ItemKind, Limits, LocalParser, Memory, MemoryType, Table, TypeUse, ValType,
     },
     kw,
     parser::{self, Cursor, Parse, ParseBuffer, Parser, Peek},
@@ -30,26 +32,38 @@ pub enum InstrKind {
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub enum ModulePart {
-    LParen,
-    RParen,
+pub enum FuncPart {
     FuncKeyword,
     Id,
-    Export,
-    Import,
     InlineExport,
-    InlineImport,
     Param,
     Result,
     Local(usize), // number of locals declared
-    Global,
-    Table,
-    Memory,
+    LParen,
+    RParen,
 }
 
-impl From<ModulePart> for &'static str {
-    fn from(val: ModulePart) -> &'static str {
-        use ModulePart::*;
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ImportKind {
+    Import,
+    InlineMemory,
+    InlineGlobal,
+    InlineFunc,
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum ModulePart {
+    Export,
+    Import(ImportKind),
+    Memory,
+    Table,
+    Global,
+    Func(Vec<FuncPart>),
+}
+
+impl From<FuncPart> for &'static str {
+    fn from(val: FuncPart) -> &'static str {
+        use FuncPart::*;
         match val {
             LParen => "(",
             RParen => ")",
@@ -59,72 +73,11 @@ impl From<ModulePart> for &'static str {
     }
 }
 
-impl From<kw::func> for ModulePart {
-    fn from(_: kw::func) -> Self {
-        ModulePart::FuncKeyword
-    }
-}
-
-impl<'a> From<Id<'a>> for ModulePart {
-    fn from(_: Id) -> Self {
-        ModulePart::Id
-    }
-}
-
-impl<'a> From<InlineImport<'a>> for ModulePart {
-    fn from(_: InlineImport) -> Self {
-        ModulePart::InlineImport
-    }
-}
-
-impl<'a> From<Imports<'a>> for ModulePart {
-    fn from(_: Imports) -> Self {
-        ModulePart::Import
-    }
-}
-
-impl<'a> From<InlineExport<'a>> for ModulePart {
-    fn from(_: InlineExport) -> Self {
-        ModulePart::InlineExport
-    }
-}
-
-impl<'a> From<Export<'a>> for ModulePart {
-    fn from(_: Export) -> Self {
-        ModulePart::Export
-    }
-}
-
-impl<'a> From<LocalParser<'a>> for ModulePart {
-    fn from(parser: LocalParser) -> Self {
-        ModulePart::Local(parser.locals.len())
-    }
-}
-
-impl<'a> From<Memory<'a>> for ModulePart {
-    fn from(_: Memory) -> Self {
-        ModulePart::Memory
-    }
-}
-
-impl<'a> From<Global<'a>> for ModulePart {
-    fn from(_: Global) -> Self {
-        ModulePart::Global
-    }
-}
-
-impl<'a> From<Table<'a>> for ModulePart {
-    fn from(_: Table) -> Self {
-        ModulePart::Table
-    }
-}
-
-#[derive(Debug, Default, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum LineKind {
-    #[default]
     Empty,
     Instr(InstrKind),
-    Other(Vec<ModulePart>),
+    Other(ModulePart),
     Malformed(String), // explanation
 }
 
@@ -199,78 +152,48 @@ impl From<Error> for LineKind {
 impl<'a> Parse<'a> for ModulePart {
     fn parse(parser: Parser<'a>) -> Result<Self, Error> {
         use ValType::*;
-        // Prioritize fields of format "(...)" over single "(" token
-
-        if parser.peek::<InlineExport>()? {
-            Ok(parser.parse::<InlineExport<'a>>()?.into())
-        } else if parser.peek2::<kw::export>()? {
-            parser.parens(|p| Ok(p.parse::<Export<'a>>()?.into()))
+        if parser.peek2::<kw::export>()? {
+            if parser.peek::<InlineExport>()? {
+                parse_func_parts(&parser, false)
+            } else {
+                parser.parens(|p| p.parse::<Export>())?;
+                Ok(ModulePart::Export)
+            }
         } else if parser.peek::<InlineImport>()? {
-            Ok(parser.parse::<InlineImport<'a>>()?.into())
+            Err(parser.error("imports must be on one line"))
         } else if parser.peek2::<kw::import>()? {
-            parser.parens(|p| {
-                let imports = p.parse::<Imports<'a>>()?;
-                match imports {
-                    Imports {
-                        items:
-                            wast::core::ImportItems::Single {
-                                module,
-                                name,
-                                sig: wast::core::ItemSig { ref kind, .. },
-                            },
-                        ..
-                    } => match kind {
-                        ItemKind::Func(_) => Ok(imports.into()),
-                        ItemKind::Global(ty) => {
-                            match check_import(module, name, &HelperImportKind::Global(*ty)) {
-                                None => Ok(imports.into()),
-                                Some(error_message) => Err(parser.error(error_message)),
-                            }
+            parser.parens(|p| match p.parse::<Imports>()? {
+                Imports {
+                    items:
+                        wast::core::ImportItems::Single {
+                            module,
+                            name,
+                            sig: wast::core::ItemSig { kind, .. },
+                        },
+                    ..
+                } => match kind {
+                    ItemKind::Func(ty) => {
+                        check_func_import(&parser, module, name, ty, ImportKind::Import)
+                    }
+                    ItemKind::Global(ty) => {
+                        match check_import(module, name, Some(&HelperImportKind::Global(ty))) {
+                            None => Ok(ModulePart::Import(ImportKind::Import)),
+                            Some(error_message) => Err(parser.error(error_message)),
                         }
-                        ItemKind::Memory(ty) => {
-                            match check_import(module, name, &HelperImportKind::Memory(*ty)) {
-                                None => Ok(imports.into()),
-                                Some(error_message) => Err(parser.error(error_message)),
-                            }
+                    }
+                    ItemKind::Memory(ty) => {
+                        match check_import(module, name, Some(&HelperImportKind::Memory(ty))) {
+                            None => Ok(ModulePart::Import(ImportKind::Import)),
+                            Some(error_message) => Err(parser.error(error_message)),
                         }
-                        _ => Err(parser.error("unsupported import kind")),
-                    },
-
+                    }
                     _ => Err(parser.error("unsupported import kind")),
-                }
-            })
-        } else if parser.peek2::<kw::param>()? {
-            // Modified from FunctionType parser
-            parser.parens(|p| {
-                p.parse::<kw::param>()?;
-                if p.is_empty() {
-                    return Ok(ModulePart::Param);
-                }
+                },
 
-                let id = p.parse::<Option<Id<'a>>>()?;
-                let parse_more = id.is_none();
-                p.parse::<ValType<'a>>()?;
-                while parse_more && !p.is_empty() {
-                    p.parse::<ValType<'a>>()?;
-                }
-
-                Ok(ModulePart::Param)
+                _ => Err(parser.error("unsupported import kind")),
             })
-        } else if parser.peek2::<kw::result>()? {
-            // Modified from FunctionType parser
-            parser.parens(|p| {
-                p.parse::<kw::result>()?;
-                while !p.is_empty() {
-                    p.parse::<ValType<'a>>()?;
-                }
-
-                Ok(ModulePart::Result)
-            })
-        } else if parser.peek2::<kw::local>()? {
-            // Modified from Local parse_remainder
-            parser.parens(|_| Ok(parser.parse::<LocalParser<'a>>()?.into()))
         } else if parser.peek2::<kw::memory>()? {
-            parser.parens(|p| match p.parse::<Memory<'a>>()? {
+            parser.parens(|p| match p.parse::<Memory>()? {
                 Memory {
                     kind:
                         wast::core::MemoryKind::Import {
@@ -279,8 +202,8 @@ impl<'a> Parse<'a> for ModulePart {
                             ..
                         },
                     ..
-                } => match check_import(module, field, &HelperImportKind::Memory(ty)) {
-                    None => Ok(ModulePart::Import),
+                } => match check_import(module, field, Some(&HelperImportKind::Memory(ty))) {
+                    None => Ok(ModulePart::Import(ImportKind::InlineMemory)),
                     Some(error_message) => Err(parser.error(error_message)),
                 },
                 Memory {
@@ -295,7 +218,7 @@ impl<'a> Parse<'a> for ModulePart {
                 _ => Err(parser.error("unsupported memory feature")),
             })
         } else if parser.peek2::<kw::table>()? {
-            parser.parens(|p| match p.parse::<Table<'a>>()? {
+            parser.parens(|p| match p.parse::<Table>()? {
                 Table {
                     kind: wast::core::TableKind::Import { .. },
                     ..
@@ -303,13 +226,13 @@ impl<'a> Parse<'a> for ModulePart {
                 _ => Ok(ModulePart::Table),
             })
         } else if parser.peek2::<kw::global>()? {
-            parser.parens(|p| match p.parse::<Global<'a>>()? {
+            parser.parens(|p| match p.parse::<Global>()? {
                 Global {
                     kind: wast::core::GlobalKind::Import(InlineImport { module, field }),
                     ty,
                     ..
-                } => match check_import(module, field, &HelperImportKind::Global(ty)) {
-                    None => Ok(ModulePart::Import),
+                } => match check_import(module, field, Some(&HelperImportKind::Global(ty))) {
+                    None => Ok(ModulePart::Import(ImportKind::InlineGlobal)),
                     Some(error_message) => Err(parser.error(error_message)),
                 },
                 Global {
@@ -336,37 +259,72 @@ impl<'a> Parse<'a> for ModulePart {
                 },
                 _ => Err(parser.error("unsupported global type")),
             })
-        } else if parser.step(|cursor| match cursor.lparen()? {
-            Some(rest) => Ok((true, rest)),
-            None => Ok((false, cursor)),
-        })? {
-            Ok(ModulePart::LParen)
-        } else if parser.step(|cursor| match cursor.rparen()? {
-            Some(rest) => Ok((true, rest)),
-            None => Ok((false, cursor)),
-        })? {
-            Ok(ModulePart::RParen)
-        } else if parser.peek::<kw::func>()? {
-            Ok(parser.parse::<kw::func>()?.into())
-        } else if parser.peek::<Id<'a>>()? {
-            Ok(parser.parse::<Id<'a>>()?.into())
+        } else if parser.step(|cursor| Ok((cursor.peek_lparen()?, cursor)))?
+            && parser.peek2::<kw::func>()?
+        {
+            parse_func_parts(&parser, true)
         } else {
-            Err(parser.error("expected a non-instruction token"))
+            parse_func_parts(&parser, false)
         }
     }
 }
 
+fn check_func_import(
+    parser: &Parser,
+    module: &str,
+    field: &str,
+    ty: TypeUse<FunctionType>,
+    kind: ImportKind,
+) -> Result<ModulePart, Error> {
+    if ty.index.is_some() {
+        Err(parser.error("type index not supported"))
+    } else {
+        let ty = ty.inline.unwrap_or_default();
+        match check_import(
+            module,
+            field,
+            Some(&HelperImportKind::Func {
+                params: &ty.params.iter().map(|(_, _, p)| *p).collect::<Vec<_>>(),
+                results: &ty.results,
+            }),
+        ) {
+            None => Ok(ModulePart::Import(kind)),
+            Some(error_message) => Err(parser.error(error_message)),
+        }
+    }
+}
+
+fn parse_func_parts(parser: &Parser, import_ok: bool) -> Result<ModulePart, Error> {
+    let mut parts = Vec::new();
+    let checkpoint = parser.step(|cursor| Ok((cursor, cursor)))?;
+
+    loop {
+        if parser.peek::<InlineImport>()? && import_ok {
+            parser.step(|_| Ok(((), checkpoint)))?;
+            return match parser.parens(|p| p.parse::<Func>()) {
+                Ok(Func {
+                    kind: FuncKind::Import(InlineImport { module, field }, _),
+                    ty,
+                    ..
+                }) => check_func_import(parser, module, field, ty, ImportKind::InlineFunc),
+                Err(e) => Err(e),
+                _ => Err(parser.error("unsupported function")),
+            };
+        }
+        parts.push(parser.parse()?);
+        if parser.is_empty() && !parser.step(|c| Ok((c.peek_rparen()?, c)))? {
+            break;
+        }
+    }
+    Ok(ModulePart::Func(parts))
+}
+
 impl Peek for ModulePart {
     fn peek(cursor: Cursor) -> Result<bool, Error> {
-        if cursor.peek_lparen()?
+        Ok(cursor.peek_lparen()?
             || cursor.peek_rparen()?
             || kw::func::peek(cursor)?
-            || Id::peek(cursor)?
-        {
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+            || Id::peek(cursor)?)
     }
 
     fn display() -> &'static str {
@@ -377,14 +335,12 @@ impl Peek for ModulePart {
 impl<'a> Parse<'a> for LineKind {
     fn parse(parser: Parser<'a>) -> Result<Self, Error> {
         // In the Codillon editor, a line can contain a single instruction
-        // or a (possibly empty) sequence of ModuleParts.
+        // or a ModulePart: either a single "module-scope" element
+        // (import, export, memory, table, global) or a sequence of parts of
+        // an inline (non-imported) function.
 
         if parser.peek::<ModulePart>()? {
-            let mut parts = Vec::new();
-            while (!parser.is_empty()) || parser.peek::<ModulePart>()? {
-                parts.push(parser.parse()?);
-            }
-            Ok(LineKind::Other(parts))
+            Ok(LineKind::Other(parser.parse()?))
         } else if parser.is_empty() {
             Ok(LineKind::Empty)
         } else {
@@ -397,10 +353,95 @@ impl<'a> Parse<'a> for LineKind {
     }
 }
 
+#[derive(Default)]
+pub struct CodillonParam<'a>(pub FunctionType<'a>);
+
+impl<'a> Parse<'a> for CodillonParam<'a> {
+    fn parse(parser: Parser<'a>) -> Result<Self, Error> {
+        // Modified from FunctionType parser
+        let mut params = Vec::new();
+        parser.parens(|p| {
+            p.parse::<kw::param>()?;
+            if p.is_empty() {
+                return Ok(Self::default());
+            }
+            let (id, name) = (p.parse::<Option<_>>()?, p.parse::<Option<_>>()?);
+            let parse_more = id.is_none() && name.is_none();
+            let ty = p.parse()?;
+            params.push((id, name, ty));
+            while parse_more && !p.is_empty() {
+                params.push((None, None, p.parse()?));
+            }
+            Ok(Self(FunctionType {
+                params: params.into(),
+                ..Default::default()
+            }))
+        })
+    }
+}
+
+#[derive(Default)]
+pub struct CodillonResult<'a>(pub FunctionType<'a>);
+
+impl<'a> Parse<'a> for CodillonResult<'a> {
+    fn parse(parser: Parser<'a>) -> Result<Self, Error> {
+        // Modified from FunctionType parser
+        let mut results = Vec::new();
+        parser.parens(|p| {
+            p.parse::<kw::result>()?;
+            while !p.is_empty() {
+                results.push(p.parse()?);
+            }
+
+            Ok(Self(FunctionType {
+                results: results.into(),
+                ..Default::default()
+            }))
+        })
+    }
+}
+
+impl<'a> Parse<'a> for FuncPart {
+    fn parse(parser: Parser<'a>) -> Result<Self, Error> {
+        if parser.peek::<kw::func>()? {
+            parser.parse::<kw::func>()?;
+            Ok(FuncPart::FuncKeyword)
+        } else if parser.peek::<Id>()? {
+            parser.parse::<Id>()?;
+            Ok(FuncPart::Id)
+        } else if parser.peek::<InlineExport>()? {
+            parser.parse::<InlineExport>()?;
+            Ok(FuncPart::InlineExport)
+        } else if parser.peek2::<kw::param>()? {
+            parser.parse::<CodillonParam>()?;
+            Ok(FuncPart::Param)
+        } else if parser.peek2::<kw::result>()? {
+            parser.parse::<CodillonResult>()?;
+            Ok(FuncPart::Result)
+        } else if parser.peek2::<kw::local>()? {
+            parser.parens(|p| Ok(FuncPart::Local(p.parse::<LocalParser>()?.locals.len())))
+        } else if parser.peek::<InlineImport>()? {
+            Err(parser.error("imports must be on one line"))
+        } else if parser.step(|cursor| match cursor.lparen()? {
+            Some(rest) => Ok((true, rest)),
+            None => Ok((false, cursor)),
+        })? {
+            Ok(FuncPart::LParen)
+        } else if parser.step(|cursor| match cursor.rparen()? {
+            Some(rest) => Ok((true, rest)),
+            None => Ok((false, cursor)),
+        })? {
+            Ok(FuncPart::RParen)
+        } else {
+            Err(parser.error("unexpected token"))
+        }
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 pub struct SyntheticWasm {
     pub end_opcodes: usize,
-    pub module_field_syntax: Vec<ModulePart>,
+    pub module_field_syntax: Vec<FuncPart>,
     pub module_syntax_first: bool,
 }
 
@@ -449,7 +490,7 @@ impl SyntheticWasm {
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum SyntaxState {
     Initial,
-    AfterModuleFieldLParen,
+    AfterLParen,
     AfterFuncHeader(FuncHeader),
     AfterInstruction,
 }
@@ -458,24 +499,21 @@ enum SyntaxState {
 struct FuncHeader {
     /// Fields in a function header follows an order and some extra restrictions.
     /// This structure tracks and transits states, where each state indicates new fields allowed.
-    // Whether the function has (import ...) field
-    is_import: bool,
     // Lowest possible index for next field in the expected order
     next_field: usize,
 }
 
 impl FuncHeader {
-    fn transit_state(&mut self, part: ModulePart) -> Result<(), &'static str> {
+    fn transit_state(&mut self, part: FuncPart) -> Result<(), &'static str> {
         // Find position (index) of part in the order list
         let part_pos = match part {
             // Expected order of function fields
-            ModulePart::FuncKeyword => 0,  // required
-            ModulePart::Id => 1,           // optional
-            ModulePart::InlineExport => 2, // optional, repeatable
-            ModulePart::InlineImport => 3, // optional
-            ModulePart::Param => 4,        // optional, repeatable
-            ModulePart::Result => 5,       // optional, repeatable,
-            ModulePart::Local(_) => 6,     // optional, repeatable, on individual lines
+            FuncPart::FuncKeyword => 0,  // required
+            FuncPart::Id => 1,           // optional
+            FuncPart::InlineExport => 2, // optional, repeatable
+            FuncPart::Param => 3,        // optional, repeatable
+            FuncPart::Result => 4,       // optional, repeatable,
+            FuncPart::Local(_) => 5,     // optional, repeatable, on individual lines
             _ => return Err("not a function header field"),
         };
 
@@ -487,7 +525,7 @@ impl FuncHeader {
 
         let repeatable = matches!(
             part,
-            ModulePart::Export | ModulePart::Param | ModulePart::Result | ModulePart::Local(_)
+            FuncPart::InlineExport | FuncPart::Param | FuncPart::Result | FuncPart::Local(_)
         );
         let order_invalid = if repeatable {
             part_pos + 1 < self.next_field
@@ -498,14 +536,7 @@ impl FuncHeader {
             return Err("invalid field order");
         }
 
-        // Check for function with (import ...)
-        // function import can't have locals & instructions
-        if self.is_import && matches!(part, ModulePart::Local(_)) {
-            return Err("imported function cannot have locals");
-        }
-
         // Transition state
-        self.is_import |= matches!(part, ModulePart::InlineImport);
         self.next_field = part_pos + 1;
 
         Ok(())
@@ -520,7 +551,7 @@ impl SyntaxState {
     ) -> Result<(), &'static str> {
         if info.synthetic_before.module_syntax_first {
             for part in &info.synthetic_before.module_field_syntax {
-                self.transit_state_from_module_part(*part)?;
+                self.transit_state_from_func_part(*part)?;
                 callback(self);
             }
             if info.synthetic_before.end_opcodes > 0 {
@@ -533,7 +564,7 @@ impl SyntaxState {
                 callback(self);
             }
             for part in &info.synthetic_before.module_field_syntax {
-                self.transit_state_from_module_part(*part)?;
+                self.transit_state_from_func_part(*part)?;
                 callback(self);
             }
         }
@@ -542,58 +573,38 @@ impl SyntaxState {
             return Ok(());
         }
 
-        let mut hit_initial = false;
-        let mut has_local = false;
         let mut has_result = false;
-        let mut has_import = false;
         match &info.kind {
             LineKind::Empty | LineKind::Malformed(_) => {}
             LineKind::Instr(_) => {
                 self.transit_state_from_instruction()?;
                 callback(self);
             }
-            LineKind::Other(parts) => {
-                for part in parts {
-                    // Codiillon only wants one module-scope field per line. If this line reached the initial
-                    // state and then had more syntax afterward, disable it, revert state, and skip to next.
-                    // This rules out lines like "(memory 0) (func)" or "(func) (func)".
-                    if hit_initial {
-                        return Err("fields must be on separate lines");
-                    }
+            LineKind::Other(module_part) => {
+                match module_part {
+                    ModulePart::Func(parts) => {
+                        for part in parts {
+                            // Codillon wants local declarations on their own line.
+                            if matches!(part, FuncPart::Local(_)) && parts.len() > 1 {
+                                return Err("fields must be on separate lines");
+                            }
 
-                    // Codillon also only wants one local declaration per line.
-                    if has_local {
-                        return Err("fields must be on separate lines");
-                    }
-                    if matches!(part, ModulePart::Local(_)) {
-                        has_local = true;
-                        if parts.len() > 1 {
-                            return Err("fields must be on separate lines");
+                            if matches!(part, FuncPart::Result) {
+                                has_result = true;
+                            }
+
+                            self.transit_state_from_func_part(*part)?;
+                            callback(self);
+
+                            if *self == SyntaxState::Initial && has_result {
+                                return Err("function with results must end on another line");
+                            }
                         }
                     }
-                    if matches!(part, ModulePart::Result) {
-                        has_result = true;
-                    }
-
-                    self.transit_state_from_module_part(*part)?;
-                    callback(self);
-
-                    if matches!(
-                        *self,
-                        SyntaxState::AfterFuncHeader(FuncHeader {
-                            is_import: true,
-                            ..
-                        })
-                    ) {
-                        has_import = true;
-                    }
-
-                    if *self == SyntaxState::Initial {
-                        hit_initial = true;
-                        if has_result && !has_import {
-                            return Err("function with results must end on another line");
+                    _ => {
+                        if *self != SyntaxState::Initial {
+                            return Err("invalid field order");
                         }
-                        has_import = false;
                     }
                 }
             }
@@ -612,39 +623,26 @@ impl SyntaxState {
         Ok(())
     }
 
-    fn transit_state_from_module_part(&mut self, part: ModulePart) -> Result<(), &'static str> {
+    fn transit_state_from_func_part(&mut self, part: FuncPart) -> Result<(), &'static str> {
         *self = match (&self, part) {
-            (SyntaxState::Initial, ModulePart::LParen) => SyntaxState::AfterModuleFieldLParen,
-            (
-                SyntaxState::Initial,
-                ModulePart::Memory
-                | ModulePart::Table
-                | ModulePart::Global
-                | ModulePart::Import
-                | ModulePart::Export,
-            ) => SyntaxState::Initial,
-            (SyntaxState::AfterModuleFieldLParen, ModulePart::FuncKeyword) => {
-                SyntaxState::AfterFuncHeader(FuncHeader {
-                    is_import: false,
-                    next_field: 1,
-                })
+            (SyntaxState::Initial, FuncPart::LParen) => SyntaxState::AfterLParen,
+            (SyntaxState::AfterLParen, FuncPart::FuncKeyword) => {
+                SyntaxState::AfterFuncHeader(FuncHeader { next_field: 1 })
             }
             (
                 &&mut SyntaxState::AfterFuncHeader(mut fh),
-                ModulePart::Id
-                | ModulePart::InlineExport
-                | ModulePart::InlineImport
-                | ModulePart::Param
-                | ModulePart::Result
-                | ModulePart::Local(_),
+                FuncPart::Id
+                | FuncPart::InlineExport
+                | FuncPart::Param
+                | FuncPart::Result
+                | FuncPart::Local(_),
             ) => {
                 fh.transit_state(part)?;
                 SyntaxState::AfterFuncHeader(fh)
             }
-            (
-                SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction,
-                ModulePart::RParen,
-            ) => SyntaxState::Initial,
+            (SyntaxState::AfterFuncHeader(_) | SyntaxState::AfterInstruction, FuncPart::RParen) => {
+                SyntaxState::Initial
+            }
             _ => return Err("invalid field order"),
         };
         Ok(())
@@ -661,7 +659,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
     let mut state = Initial;
     let mut frame_stack: Vec<(InstrKind, DefinedLabel)> = Vec::new();
-    let mut before_imports = true;
+    let mut imports_allowed = true;
 
     // Structures for symbolic references
     let mut module_symbol_defs = ModuleIdentifiers::default();
@@ -673,7 +671,6 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     // and declare module-scope symbolic ids for any surviving lines.
 
     // There are probably still cases that can produce a "bounce."
-    let mut saw_func = false;
     for line_no in 0..lines.len() {
         lines.set_synthetic_before(line_no, SyntheticWasm::default());
         lines.set_active_status(line_no, Active);
@@ -684,69 +681,44 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
         // If line will be rejected in second pass, don't let it define a symbol.
         let orig_state = state;
-
-        if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
-            match state {
+        match line_kind {
+            LineKind::Instr(_) => match state {
                 // Fix #2 (simulation from below): prepend "(func" if an instruction appears at module scope
                 Initial => {
-                    let _ = state.transit_state_from_module_part(ModulePart::LParen);
-                    let _ = state.transit_state_from_module_part(ModulePart::FuncKeyword);
+                    let _ = state.transit_state_from_func_part(FuncPart::LParen);
+                    let _ = state.transit_state_from_func_part(FuncPart::FuncKeyword);
                 }
                 // Fix #3 (simulation from below): prepend "func" if an instruction appears after just "("
-                AfterModuleFieldLParen => {
-                    let _ = state.transit_state_from_module_part(ModulePart::FuncKeyword);
+                AfterLParen => {
+                    let _ = state.transit_state_from_func_part(FuncPart::FuncKeyword);
                 }
                 _ => {}
-            }
+            },
+
+            // Enforce no imports after other module fields
+            LineKind::Other(module_part) => match module_part {
+                ModulePart::Import(_) if imports_allowed => {}
+                ModulePart::Import(_) if !imports_allowed => {
+                    lines.set_active_status(
+                        line_no,
+                        Inactive("imports must appear before other module fields"),
+                    );
+                    continue;
+                }
+                _ => imports_allowed = false,
+            },
+            LineKind::Empty | LineKind::Malformed(_) => (),
         }
 
-        if state
-            .transit_state(lines.info(line_no), |st| match st {
-                SyntaxState::AfterFuncHeader(FuncHeader {
-                    is_import: true, ..
-                }) => saw_func = false,
-                SyntaxState::AfterFuncHeader(_) => saw_func = true,
-                _ => {}
-            })
-            .is_err()
-        {
+        if state.transit_state(lines.info(line_no), |_| {}).is_err() {
             state = orig_state;
             continue;
         }
 
-        if saw_func && state == SyntaxState::Initial {
-            before_imports = false;
-        }
-
-        // Enforce no imports after other module fields
-        if let LineKind::Other(parts) = &line_kind {
-            let has_import = parts
-                .iter()
-                .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport));
-            let module_field = parts.iter().any(|&p| {
-                matches!(
-                    p,
-                    ModulePart::Memory
-                        | ModulePart::Table
-                        | ModulePart::Global
-                        | ModulePart::Export
-                )
-            });
-            if has_import && !before_imports {
-                lines.set_active_status(
-                    line_no,
-                    Inactive("imports must appear before other module fields"),
-                );
-                continue;
-            } else if module_field {
-                before_imports = false;
-            }
-        }
-
         // Collect module-level symbols
-        let collect_result =
-            collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs);
-        if let Err(reason) = collect_result {
+        if let Err(reason) =
+            collect_module_symbols(&lines.info(line_no).symbols, &mut module_symbol_defs)
+        {
             lines.set_active_status(line_no, Inactive(reason));
             continue;
         }
@@ -785,29 +757,20 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
         // Fixup instructions that appear where they don't belong
         if matches!(lines.info(line_no).kind, LineKind::Instr(_)) {
             match state {
-                // Fix #1: Disable an instruction that appears in an imported function, skipping to next line
-                AfterFuncHeader(FuncHeader {
-                    is_import: true, ..
-                }) => {
-                    lines.set_active_status(
-                        line_no,
-                        Inactive("imported functions cannot have instructions"),
-                    );
-                    continue;
-                }
+                // Fix #1: (no longer needed)
                 // Fix #2: prepend "(func" if an instruction appears at module scope
                 Initial => lines.set_synthetic_before(
                     line_no,
                     SyntheticWasm {
-                        module_field_syntax: vec![ModulePart::LParen, ModulePart::FuncKeyword],
+                        module_field_syntax: vec![FuncPart::LParen, FuncPart::FuncKeyword],
                         ..Default::default()
                     },
                 ),
                 // Fix #3: prepend "func" if an instruction appears after just "("
-                AfterModuleFieldLParen => lines.set_synthetic_before(
+                AfterLParen => lines.set_synthetic_before(
                     line_no,
                     SyntheticWasm {
-                        module_field_syntax: vec![ModulePart::FuncKeyword],
+                        module_field_syntax: vec![FuncPart::FuncKeyword],
                         ..Default::default()
                     },
                 ),
@@ -898,7 +861,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
 
     match state {
         // Fix #7: if ending with "(" state, close with "func)"
-        AfterModuleFieldLParen => {
+        AfterLParen => {
             assert!(frame_stack.is_empty());
 
             // Make sure there is an empty line that can become a synthetic "func)"
@@ -913,7 +876,7 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 SyntheticWasm {
                     module_syntax_first: false,
                     end_opcodes: 0,
-                    module_field_syntax: vec![ModulePart::FuncKeyword, ModulePart::RParen],
+                    module_field_syntax: vec![FuncPart::FuncKeyword, FuncPart::RParen],
                 },
             );
         }
@@ -930,27 +893,12 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
                 SyntheticWasm {
                     module_syntax_first: false,
                     end_opcodes: frame_stack.len(),
-                    module_field_syntax: vec![ModulePart::RParen],
+                    module_field_syntax: vec![FuncPart::RParen],
                 },
             );
         }
         _ => {}
     }
-}
-
-pub fn find_import_lines(code: &impl LineInfos) -> Vec<usize> {
-    let mut imports = Vec::new();
-    for line_no in 0..code.len() {
-        if let LineKind::Other(parts) = &code.info(line_no).kind
-            && code.info(line_no).is_active()
-            && parts
-                .iter()
-                .any(|&p| matches!(p, ModulePart::Import | ModulePart::InlineImport))
-        {
-            imports.push(line_no);
-        }
-    }
-    imports
 }
 
 pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
@@ -967,10 +915,7 @@ pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
 
                 (
                     Some(start_line),
-                    AfterInstruction
-                    | AfterFuncHeader(FuncHeader {
-                        is_import: false, ..
-                    }),
+                    AfterInstruction | AfterFuncHeader(FuncHeader { .. }),
                     Initial,
                 ) => {
                     ranges.push((start_line, line_no));
@@ -1070,31 +1015,32 @@ mod tests {
     fn test_parse_modulepart() -> Result<()> {
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    (   ")?)?,
-            ModulePart::LParen
+            ModulePart::Func(vec![FuncPart::LParen])
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    )    ")?)?,
-            ModulePart::RParen
+            ModulePart::Func(vec![FuncPart::RParen])
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    func    ")?)?,
-            ModulePart::FuncKeyword
+            ModulePart::Func(vec![FuncPart::FuncKeyword])
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    $x    ")?)?,
-            ModulePart::Id
+            ModulePart::Func(vec![FuncPart::Id])
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("  ( export \"main\")    ")?)?,
-            ModulePart::InlineExport
+            ModulePart::Func(vec![FuncPart::InlineExport])
+        );
+        assert!(
+            parse::<ModulePart>(&ParseBuffer::new("  ( import \"foo\" \"bar\" )    ")?).is_err(),
         );
         assert_eq!(
-            parse::<ModulePart>(&ParseBuffer::new("  ( import \"foo\" \"bar\" )    ")?)?,
-            ModulePart::InlineImport
-        );
-        assert_eq!(
-            parse::<ModulePart>(&ParseBuffer::new(r#" ( import "foo" "bar" (func $bar)) "#)?)?,
-            ModulePart::Import
+            parse::<ModulePart>(&ParseBuffer::new(
+                r#" ( import "draw" "clear" (func $bar)) "#
+            )?)?,
+            ModulePart::Import(ImportKind::Import)
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new(r#"  ( export "foo" (func $bar))    "#)?)?,
@@ -1102,18 +1048,21 @@ mod tests {
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    (param $x i32)    ")?)?,
-            ModulePart::Param
+            ModulePart::Func(vec![FuncPart::Param])
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    ( result i32 f32 i64   )    ")?)?,
-            ModulePart::Result
+            ModulePart::Func(vec![FuncPart::Result])
         );
         assert_eq!(
             parse::<ModulePart>(&ParseBuffer::new("    (local $x    f64 )    ")?)?,
-            ModulePart::Local(1)
+            ModulePart::Func(vec![FuncPart::Local(1)])
         );
         assert!(parse::<ModulePart>(&ParseBuffer::new("( param")?).is_err());
-        assert!(parse::<ModulePart>(&ParseBuffer::new("()")?).is_err());
+        assert_eq!(
+            parse::<ModulePart>(&ParseBuffer::new("()")?)?,
+            ModulePart::Func(vec![FuncPart::LParen, FuncPart::RParen])
+        );
         Ok(())
     }
 
@@ -1143,65 +1092,71 @@ mod tests {
 
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new("   (   ")?)?,
-            LineKind::Other(vec![ModulePart::LParen])
+            LineKind::Other(ModulePart::Func(vec![FuncPart::LParen]))
         );
 
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new(")")?)?,
-            LineKind::Other(vec![ModulePart::RParen])
+            LineKind::Other(ModulePart::Func(vec![FuncPart::RParen]))
         );
 
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new("()")?)?,
-            LineKind::Other(vec![ModulePart::LParen, ModulePart::RParen])
+            LineKind::Other(ModulePart::Func(vec![FuncPart::LParen, FuncPart::RParen]))
         );
 
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new(")func")?)?,
-            LineKind::Other(vec![ModulePart::RParen, ModulePart::FuncKeyword])
+            LineKind::Other(ModulePart::Func(vec![
+                FuncPart::RParen,
+                FuncPart::FuncKeyword
+            ]))
         );
 
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new(") func")?)?,
-            LineKind::Other(vec![ModulePart::RParen, ModulePart::FuncKeyword])
+            LineKind::Other(ModulePart::Func(vec![
+                FuncPart::RParen,
+                FuncPart::FuncKeyword
+            ]))
         );
 
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new("   (func)   ")?)?,
-            LineKind::Other(vec![
-                ModulePart::LParen,
-                ModulePart::FuncKeyword,
-                ModulePart::RParen
-            ])
+            LineKind::Other(ModulePart::Func(vec![
+                FuncPart::LParen,
+                FuncPart::FuncKeyword,
+                FuncPart::RParen
+            ]))
         );
 
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new(
-                " ( func $foo ( export \"main\") (import \"modu\" \"bar\") (param $x i32) (result i32 f64) (local $tmp i64)"
+                " ( func $foo ( export \"main\") (param $x i32) (result i32 f64) (local $tmp i64)"
             )?)?,
-            LineKind::Other(vec![
-                ModulePart::LParen,
-                ModulePart::FuncKeyword,
-                ModulePart::Id,
-                ModulePart::InlineExport,
-                ModulePart::InlineImport,
-                ModulePart::Param,
-                ModulePart::Result,
-                ModulePart::Local(1)
-            ])
+            LineKind::Other(ModulePart::Func(vec![
+                FuncPart::LParen,
+                FuncPart::FuncKeyword,
+                FuncPart::Id,
+                FuncPart::InlineExport,
+                FuncPart::Param,
+                FuncPart::Result,
+                FuncPart::Local(1)
+            ]))
         );
+
         assert_eq!(
             parse::<LineKind>(&ParseBuffer::new(
-                "(import \"foo\" \"bar\" (func $bar)) (func $baz) (export \"foo\" (func $baz))"
+                " ( func $foo ( export \"main\") (import \"draw\" \"point\") (param $x f64) (param $y f64))"
             )?)?,
-            LineKind::Other(vec![
-                ModulePart::Import,
-                ModulePart::LParen,
-                ModulePart::FuncKeyword,
-                ModulePart::Id,
-                ModulePart::RParen,
-                ModulePart::Export
-            ])
+            LineKind::Other(ModulePart::Import(ImportKind::InlineFunc))
+        );
+
+        assert!(
+            parse::<LineKind>(&ParseBuffer::new(
+                "(import \"draw\" \"clear\" (func $bar)) (func $baz) (export \"foo\" (func $baz))"
+            )?)
+            .is_err()
         );
 
         assert!(parse::<LineKind>(&ParseBuffer::new(") func i32.const 7")?).is_err());
@@ -1213,45 +1168,42 @@ mod tests {
     fn test_func_header() -> Result<()> {
         // valid state transitions
         let mut header_valid = FuncHeader::default();
-        let _ = header_valid.transit_state(ModulePart::FuncKeyword);
-        assert!(!header_valid.is_import);
+        let _ = header_valid.transit_state(FuncPart::FuncKeyword);
         assert_eq!(header_valid.next_field, 1);
-        let _ = header_valid.transit_state(ModulePart::InlineExport);
-        assert!(!header_valid.is_import);
+        let _ = header_valid.transit_state(FuncPart::InlineExport);
         assert_eq!(header_valid.next_field, 3);
-        let _ = header_valid.transit_state(ModulePart::InlineExport);
-        assert!(!header_valid.is_import);
+        let _ = header_valid.transit_state(FuncPart::InlineExport);
         assert_eq!(header_valid.next_field, 3);
-        let _ = header_valid.transit_state(ModulePart::InlineImport);
-        assert!(header_valid.is_import);
-        assert_eq!(header_valid.next_field, 4);
-        let _ = header_valid.transit_state(ModulePart::Result);
-        assert!(header_valid.is_import);
+        let _ = header_valid.transit_state(FuncPart::Result);
+        assert_eq!(header_valid.next_field, 5);
+        let _ = header_valid.transit_state(FuncPart::Local(1));
+        assert_eq!(header_valid.next_field, 6);
+        let _ = header_valid.transit_state(FuncPart::Local(3));
         assert_eq!(header_valid.next_field, 6);
 
-        // local after import
-        assert!(header_valid.transit_state(ModulePart::Local(1)).is_err());
+        // param after local
+        assert!(header_valid.transit_state(FuncPart::Param).is_err());
 
         // no func keyword
         let mut header_no_func_keyword = FuncHeader::default();
         assert!(
             header_no_func_keyword
-                .transit_state(ModulePart::Param)
+                .transit_state(FuncPart::Param)
                 .is_err()
         );
 
         // invalid order
         let mut header_invalid_order = FuncHeader::default();
-        let _ = header_invalid_order.transit_state(ModulePart::FuncKeyword);
-        let _ = header_invalid_order.transit_state(ModulePart::Result);
-        assert!(header_invalid_order.transit_state(ModulePart::Id).is_err());
+        let _ = header_invalid_order.transit_state(FuncPart::FuncKeyword);
+        let _ = header_invalid_order.transit_state(FuncPart::Result);
+        assert!(header_invalid_order.transit_state(FuncPart::Id).is_err());
 
         // repeat non-repeatable field
         let mut header_non_repeatable = FuncHeader::default();
-        let _ = header_non_repeatable.transit_state(ModulePart::FuncKeyword);
+        let _ = header_non_repeatable.transit_state(FuncPart::FuncKeyword);
         assert!(
             header_non_repeatable
-                .transit_state(ModulePart::FuncKeyword)
+                .transit_state(FuncPart::FuncKeyword)
                 .is_err()
         );
 
@@ -1275,13 +1227,10 @@ mod tests {
             parse_line("i32.const 4 i32.const 5"),
             malf("extra tokens remaining after parse")
         );
-        assert_eq!(
-            parse_line("(i32.const 4)"),
-            malf("expected a non-instruction token")
-        );
+        assert_eq!(parse_line("(i32.const 4)"), malf("unexpected token"));
         assert_eq!(
             parse_line("(i32.add (i32.const 4) (i32.const 5))"),
-            malf("expected a non-instruction token")
+            malf("unexpected token")
         );
         //spaces before and after, comments, and empty lines are well-formed
         assert_eq!(
@@ -1392,35 +1341,32 @@ mod tests {
 
         {
             // Test case 6: Imports after other module fields
-            let mut infos6 =
-                TestLineInfos::new(["(global i32 (i32.const 0))", "(import \"\" \"\" (func))"]);
+            // (N.B. needs to be an acceptable mod/field or else marked malformed and still "active")
+            let mut infos6 = TestLineInfos::new([
+                "(global i32 (i32.const 0))",
+                "(import \"draw\" \"clear\" (func))",
+            ]);
             fix_syntax(&mut infos6);
             assert!(infos6.lines[0].is_active());
             assert!(!infos6.lines[1].is_active());
 
-            infos6 =
-                TestLineInfos::new(["(global i32 (i32.const 0))", "(func (import \"\" \"\"))"]);
+            infos6 = TestLineInfos::new([
+                "(global i32 (i32.const 0))",
+                "(func (import \"draw\" \"clear\"))",
+            ]);
             fix_syntax(&mut infos6);
             assert!(infos6.lines[0].is_active());
             assert!(!infos6.lines[1].is_active());
 
-            infos6 = TestLineInfos::new(["(func)", "(import \"\" \"\" (func))"]);
+            infos6 = TestLineInfos::new(["(func)", "(import \"draw\" \"clear\" (func))"]);
             fix_syntax(&mut infos6);
             assert!(infos6.lines[0].is_active());
             assert!(!infos6.lines[1].is_active());
 
-            infos6 = TestLineInfos::new(["(func)", "(func (import \"\" \"\"))"]);
+            infos6 = TestLineInfos::new(["(func)", "(func (import \"draw\" \"clear\"))"]);
             fix_syntax(&mut infos6);
             assert!(infos6.lines[0].is_active());
             assert!(!infos6.lines[1].is_active());
-        }
-
-        {
-            // Import with params and results on one line
-            let mut infos =
-                TestLineInfos::new(["(func $x (import \"x\" \"y\") (param i32) (result f64))"]);
-            fix_syntax(&mut infos);
-            assert!(infos.lines[0].is_well_formed());
         }
 
         {
@@ -1431,10 +1377,59 @@ mod tests {
         }
 
         {
-            // Multi-line imported function, then a non-import module field
+            // Imported function, then a non-import module field
             let mut infos = TestLineInfos::new([
-                "(func $x (import \"x\" \"y\") (param i32)",
-                "(result f64))",
+                "(func $x (import \"draw\" \"set_color\") (param i32 i32 i32))",
+                "(memory 1)",
+            ]);
+            fix_syntax(&mut infos);
+            assert!(infos.lines[0].is_well_formed());
+            assert!(infos.lines[1].is_well_formed());
+        }
+
+        {
+            // Attempted multi-line imported function (import on first line)
+            let mut infos = TestLineInfos::new([
+                "(func $x (import \"draw\" \"set_color\")",
+                "(param i32 i32 i32))",
+                "(memory 1)",
+            ]);
+            fix_syntax(&mut infos);
+            assert!(!infos.lines[0].is_well_formed());
+            assert!(infos.lines[0].is_active());
+            assert!(!infos.lines[1].is_well_formed());
+            assert!(!infos.lines[1].is_active());
+            assert!(infos.lines[2].is_well_formed());
+            assert_eq!(
+                infos.lines[0].kind,
+                LineKind::Malformed("expected `)`".to_string())
+            );
+            assert_eq!(
+                infos.lines[1].active,
+                Activity::Inactive("invalid field order")
+            );
+        }
+
+        {
+            // Attempted multi-line imported function (import on second line)
+            let mut infos = TestLineInfos::new([
+                "(func $x",
+                "(import \"draw\" \"set_color\") (param i32 i32 i32))",
+                "(memory 1)",
+            ]);
+            fix_syntax(&mut infos);
+            assert!(infos.lines[0].is_well_formed());
+            assert_eq!(
+                infos.lines[1].kind,
+                LineKind::Malformed("imports must be on one line".to_string())
+            );
+        }
+
+        {
+            // Multi-line exported function
+            let mut infos = TestLineInfos::new([
+                "(func $x",
+                "(export \"hello\") (param i32 i32 i32))",
                 "(memory 1)",
             ]);
             fix_syntax(&mut infos);
@@ -1444,16 +1439,35 @@ mod tests {
         }
 
         {
-            // Multi-line imported function, then another import
+            // Multi-line exported+imported function (inline import after inline export)
             let mut infos = TestLineInfos::new([
-                "(func $x (import \"x\" \"y\") (param i32)",
-                "(result f64))",
+                "(func $x",
+                "(export \"hello\") (import \"draw\" \"set_color\") (param i32 i32 i32))",
+                "(memory 1)",
+            ]);
+            fix_syntax(&mut infos);
+            assert!(infos.lines[0].is_well_formed());
+            assert!(!infos.lines[1].is_well_formed());
+            assert!(!infos.lines[2].is_well_formed());
+            assert_eq!(
+                infos.lines[1].kind,
+                LineKind::Malformed("imports must be on one line".to_string())
+            );
+            assert_eq!(
+                infos.lines[2].active,
+                Activity::Inactive("invalid field order")
+            );
+        }
+
+        {
+            // Imported function, then another import
+            let mut infos = TestLineInfos::new([
+                "(func $x (import \"draw\" \"set_color\") (param i32 i32 i32))",
                 "(memory (import \"listen\" \"listen_memory\") 1)",
             ]);
             fix_syntax(&mut infos);
             assert!(infos.lines[0].is_well_formed());
             assert!(infos.lines[1].is_well_formed());
-            assert!(infos.lines[2].is_well_formed());
         }
 
         {

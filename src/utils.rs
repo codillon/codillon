@@ -1,6 +1,6 @@
 use crate::syntax::{
-    FrameInfo, FrameInfosMut, InstrKind, LineInfos, LineInfosMut, LineKind, ModulePart,
-    find_function_ranges, find_import_lines,
+    FrameInfo, FrameInfosMut, FuncPart, InstrKind, LineInfos, LineInfosMut, LineKind, ModulePart,
+    find_function_ranges,
 };
 use EncoderInstruction::*;
 use anyhow::{Result, bail};
@@ -79,8 +79,8 @@ impl InstrImports {
 #[derive(PartialEq, Eq)]
 pub enum HelperImportKind<'a> {
     Func {
-        params: &'a [ValType],
-        results: &'a [ValType],
+        params: &'a [TextValType<'a>],
+        results: &'a [TextValType<'a>],
     },
     Global(TextGlobalType<'a>),
     Memory(TextMemoryType),
@@ -99,7 +99,7 @@ const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
             HelperImport {
                 name: "point",
                 kind: HelperImportKind::Func {
-                    params: &[ValType::F64, ValType::F64],
+                    params: &[TextValType::F64, TextValType::F64],
                     results: &[],
                 },
                 reason: "expected type (param f64 f64)",
@@ -115,7 +115,7 @@ const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
             HelperImport {
                 name: "set_color",
                 kind: HelperImportKind::Func {
-                    params: &[ValType::I32, ValType::I32, ValType::I32],
+                    params: &[TextValType::I32, TextValType::I32, TextValType::I32],
                     results: &[],
                 },
                 reason: "expected type (param i32 i32 i32)",
@@ -123,7 +123,12 @@ const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
             HelperImport {
                 name: "set_extent",
                 kind: HelperImportKind::Func {
-                    params: &[ValType::F64, ValType::F64, ValType::F64, ValType::F64],
+                    params: &[
+                        TextValType::F64,
+                        TextValType::F64,
+                        TextValType::F64,
+                        TextValType::F64,
+                    ],
                     results: &[],
                 },
                 reason: "expected type (param f64 f64 f64 f64)",
@@ -131,7 +136,7 @@ const HELPER_IMPORTS: &[(&str, &[HelperImport])] = &[
             HelperImport {
                 name: "set_radius",
                 kind: HelperImportKind::Func {
-                    params: &[ValType::F64],
+                    params: &[TextValType::F64],
                     results: &[],
                 },
                 reason: "expected type (param f64)",
@@ -329,10 +334,8 @@ impl<'a> RawModule<'a> {
             let mut globals_iter = globals.iter_mut();
             for line_no in 0..editor.len() {
                 if editor.info(line_no).is_active()
-                    && let LineKind::Other(parts) = &editor.info(line_no).kind
-                    && parts.first() == Some(&ModulePart::Global)
+                    && let LineKind::Other(ModulePart::Global) = &editor.info(line_no).kind
                 {
-                    debug_assert_eq!(parts.len(), 1);
                     let glob = globals_iter.next().expect("not enough globals in module");
                     glob.line_idx = line_no;
                     glob.position_id = editor.info(line_no).id;
@@ -366,8 +369,8 @@ impl<'a> RawModule<'a> {
             let mut locals_iter = locals.iter_mut();
             for line_no in start_line..=end_line {
                 if editor.info(line_no).is_active()
-                    && let LineKind::Other(parts) = &editor.info(line_no).kind
-                    && let Some(ModulePart::Local(num)) = parts.first()
+                    && let LineKind::Other(ModulePart::Func(parts)) = &editor.info(line_no).kind
+                    && let Some(FuncPart::Local(num)) = parts.first()
                 {
                     debug_assert_eq!(parts.len(), 1);
                     for _ in 0..*num {
@@ -430,46 +433,11 @@ impl<'a> RawModule<'a> {
     ) -> Result<ValidModule<'a>> {
         let parser = wasmparser::Parser::new(0);
         let mut validator = Validator::new_with_features(CODILLON_WASM_FEATURES);
-        let import_lines = find_import_lines(editor);
         let mut allocs = wasmparser::FuncValidatorAllocations::default();
-
-        /* Disable unlinkable function imports (other imports were already syntactically disabled) */
-        let mut imports = Vec::new();
-
-        for (import_idx, import @ wasmparser::Import { module, name, ty }) in
-            self.imports.into_iter().enumerate()
-        {
-            let wasmparser::TypeRef::Func(type_idx) = ty else {
-                imports.push(import);
-                continue;
-            };
-
-            let func_type = &self.types[type_idx as usize];
-
-            match check_import(
-                module,
-                name,
-                &HelperImportKind::Func {
-                    params: func_type.params(),
-                    results: func_type.results(),
-                },
-            ) {
-                None => imports.push(import),
-                Some(reason) => {
-                    editor.set_invalid(import_lines[import_idx], Some(reason));
-
-                    imports.push(wasmparser::Import {
-                        module: "codillon_debug",
-                        name: "func_placeholder",
-                        ty: wasmparser::TypeRef::Func(type_idx),
-                    });
-                }
-            }
-        }
 
         let mut ret = ValidModule {
             types: self.types,
-            imports,
+            imports: self.imports,
             memory: self.memory,
             globals: self.globals,
             functions: Vec::with_capacity(self.functions.len()),
@@ -770,7 +738,7 @@ impl<'a> RawModule<'a> {
 pub fn check_import(
     import_module: &str,
     import_name: &str,
-    import_kind: &HelperImportKind,
+    import_kind: Option<&HelperImportKind>,
 ) -> Option<String> {
     // Check if module name exists
     for (module, components) in HELPER_IMPORTS {
@@ -778,8 +746,8 @@ pub fn check_import(
             for HelperImport { name, kind, reason } in *components {
                 // Check if component name exists
                 if *name == import_name {
-                    // Check if function type matches
-                    return if import_kind == kind {
+                    // Check if type matches
+                    return if import_kind == Some(kind) {
                         None
                     } else {
                         Some(reason.to_string())
@@ -2932,10 +2900,6 @@ pub(crate) mod tests {
         linker.func_wrap("codillon_debug", "record_invalid", |ctx: Ctx<'_>| {
             ctx.data().set_termination_type(TerminationType::HitInvalid)
         })?;
-        linker.func_wrap("codillon_debug", "func_placeholder", |ctx: Ctx<'_>| {
-            ctx.data()
-                .set_termination_type(TerminationType::HitBadImport)
-        })?;
         linker.func_wrap("codillon_debug", "record_i32", |ctx: Ctx<'_>, v: i32, s| {
             ctx.data().record_slot(v, s)
         })?;
@@ -3262,7 +3226,7 @@ pub(crate) mod tests {
             assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
-        // syntax error (func has inline import but also instructions -- will deactivate the instructions)
+        // (func has inline import -- will deactivate the import)
         {
             let mut editor = FakeTextBuffer::default();
             editor.push_line("(func");
@@ -3274,11 +3238,36 @@ pub(crate) mod tests {
             editor.push_line("(func)");
             let expected = String::from("(module\n")
                 + EXPECTED_TYPES
+                + "  (type (func (param i32 i32) (result i32)))\n"
                 + EXPECTED_IMPORTS
-                + r#"  (import "codillon_debug" "func_placeholder" (func (type 0)))
-  (export "main" (func 12))
-  (func (type 0)
+                + EXPECTED_MAIN
+                + r#"  (func (type 0)
     i32.const 0
+    call 6
+    i32.const 0
+    call 13
+    i32.const 2
+    call 13
+    i32.const 7
+    i32.const 0
+    call 14
+    i32.const 3
+    call 13
+    i32.const 8
+    i32.const 1
+    call 14
+    i32.const 4
+    call 13
+    i32.const 9
+    i32.const 2
+    call 14
+    i32.const 5
+    call 13
+    call 1
+    unreachable
+  )
+  (func (type 0)
+    i32.const 1
     call 6
     i32.const 6
     call 13
@@ -3286,11 +3275,18 @@ pub(crate) mod tests {
     call 13
   )
 "# + EXPECTED_STEP
-                + ")\n";
+                + r#"  (func (type 8) (param i32 i32) (result i32)
+    local.get 0
+    local.get 1
+    call 2
+    local.get 0
+  )
+)
+"#;
             let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
             let log = test_execution(&binary, &[], &mut [])?;
             assert_eq!(expected, text);
-            assert_eq!(TerminationType::Success, log.termination_type());
+            assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
         // syntax error (consumed symbolic reference not defined - module-level, local, label)
@@ -3737,42 +3733,6 @@ pub(crate) mod tests {
             assert_eq!(TerminationType::HitInvalid, log.termination_type());
         }
 
-        // placeholder import is called
-        {
-            let mut editor = FakeTextBuffer::default();
-            editor.push_line("(import \"x\" \"y\" (func $f))");
-            editor.push_line("(func");
-            editor.push_line("call $f");
-            editor.push_line(")");
-            let expected = String::from("(module\n")
-                + EXPECTED_TYPES
-                + EXPECTED_IMPORTS
-                + r#"  (import "codillon_debug" "func_placeholder" (func (type 0)))
-  (export "main" (func 12))
-  (func (type 0)
-    i32.const 0
-    call 6
-    i32.const 1
-    call 13
-    i32.const 2
-    call 13
-    call 7
-    call 11
-    i32.const 0
-    call 8
-    i32.const -2147483646
-    call 13
-    i32.const 3
-    call 13
-  )
-"# + EXPECTED_STEP
-                + ")\n";
-            let EditorOutput { text, binary, .. } = test_editor_flow(&mut editor)?;
-            let log = test_execution(&binary, &[], &mut [])?;
-            assert_eq!(expected, text);
-            assert_eq!(TerminationType::HitBadImport, log.termination_type());
-        }
-
         {
             // issue #168
             let mut editor = FakeTextBuffer::default();
@@ -4024,12 +3984,8 @@ pub(crate) mod tests {
             editor.push_line("(import \"not_draw\" \"point\" (func (param f64 f64)))");
             test_editor_flow(&mut editor)?;
             assert_eq!(
-                editor.lines[0]
-                    .info
-                    .invalid
-                    .as_ref()
-                    .expect("nonexistent module name should be invalid"),
-                "module ‘not_draw’ not found"
+                editor.lines[0].info.kind,
+                LineKind::Malformed("module ‘not_draw’ not found".to_string())
             );
         }
 
@@ -4039,12 +3995,8 @@ pub(crate) mod tests {
             editor.push_line("(import \"draw\" \"not_point\" (func (param f64 f64)))");
             test_editor_flow(&mut editor)?;
             assert_eq!(
-                editor.lines[0]
-                    .info
-                    .invalid
-                    .as_ref()
-                    .expect("nonexistent component name should be invalid"),
-                "field ‘not_point’ not found in module draw"
+                editor.lines[0].info.kind,
+                LineKind::Malformed("field ‘not_point’ not found in module draw".to_string())
             );
         }
 
@@ -4054,12 +4006,8 @@ pub(crate) mod tests {
             editor.push_line("(import \"draw\" \"point\" (func (param i32)))");
             test_editor_flow(&mut editor)?;
             assert_eq!(
-                editor.lines[0]
-                    .info
-                    .invalid
-                    .as_ref()
-                    .expect("wrong function type should be invalid"),
-                "expected type (param f64 f64)"
+                editor.lines[0].info.kind,
+                LineKind::Malformed("expected type (param f64 f64)".to_string())
             );
         }
 
@@ -4095,60 +4043,39 @@ pub(crate) mod tests {
             editor.push_line(")");
             test_editor_flow(&mut editor)?;
             assert_eq!(
-                editor.lines[0]
-                    .info
-                    .invalid
-                    .as_ref()
-                    .expect("a/b should be invalid"),
-                "module ‘a’ not found"
+                editor.lines[0].info.kind,
+                LineKind::Malformed("module ‘a’ not found".to_string())
             );
             assert!(
                 editor.lines[1].info.invalid.is_none(),
                 "clear_canvas should be valid"
             );
             assert_eq!(
-                editor.lines[2]
-                    .info
-                    .invalid
-                    .as_ref()
-                    .expect("c/d should be invalid"),
-                "module ‘c’ not found"
+                editor.lines[2].info.kind,
+                LineKind::Malformed("module ‘c’ not found".to_string())
             );
             assert!(
                 editor.lines[3].info.invalid.is_none(),
                 "draw_point should be valid"
             );
             assert_eq!(
-                editor.lines[4]
-                    .info
-                    .invalid
-                    .as_ref()
-                    .expect("e/f should be invalid"),
-                "module ‘e’ not found"
+                editor.lines[4].info.kind,
+                LineKind::Malformed("module ‘e’ not found".to_string())
             );
-            /*
-             * Skip below, because we aren't statically tracking calls to invalid imports at the callsite.
-             * (This would be hard to do for call_indirect, etc.)
-             * TODO: signal the HitBadImport at execution time on the culprit line.
-
-                for i in 5..editor.len() {
-                    if i % 2 == 0 {
-                        assert_eq!(
-                            editor.lines[i]
-                                .info
-                                .invalid
-                                .as_ref()
-                                .expect("invalid import test should be invalid"),
-                            "call to invalid import"
-                        );
-                    } else {
-                        assert!(
-                            editor.lines[i].info.invalid.is_none(),
-                            "invalid import test line {i} should be invalid"
-                        );
-                    }
+            for i in 6..editor.lines.len() {
+                if i % 2 == 0 {
+                    assert_eq!(
+                        editor.lines[i].info.active,
+                        Activity::Inactive("undefined symbolic reference"),
+                    );
+                } else {
+                    assert!(
+                        editor.lines[i].info.is_well_formed()
+                            && editor.lines[i].info.invalid.is_none(),
+                        "import test line {i} should be valid"
+                    );
+                }
             }
-            */
         }
 
         // Test case 6: valid global and memory imports

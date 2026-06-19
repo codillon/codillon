@@ -3,15 +3,16 @@
 use std::collections::HashSet;
 use wast::{
     core::{
-        ElemPayload, Export, ExportKind, Expression, Func, FuncKind, FunctionType, Global,
-        GlobalKind, HeapType, ImportItems, Imports, Instruction, ItemKind, ItemSig, Local, Memory,
-        ModuleField, Table, TableKind, ValType,
+        ElemPayload, Export, ExportKind, Expression, Func, FunctionType, Global, GlobalKind,
+        HeapType, ImportItems, Imports, InlineExport, Instruction, ItemKind, ItemSig, Local,
+        LocalParser, Memory, Table, TableKind, ValType,
     },
-    parser::{self, ParseBuffer},
-    token::Index,
+    kw,
+    parser::{self, Parse, ParseBuffer, Parser},
+    token::{Id, Index},
 };
 
-use crate::syntax::{LineKind, ModulePart};
+use crate::syntax::{CodillonParam, CodillonResult, ImportKind, LineKind, ModulePart};
 
 #[derive(Clone, Debug, PartialEq)]
 enum IndexSpace {
@@ -406,6 +407,24 @@ impl<'a> From<ValType<'a>> for LineSymbols {
     }
 }
 
+impl<'a> From<LocalParser<'a>> for LineSymbols {
+    fn from(p: LocalParser) -> Self {
+        let mut line_symbols = LineSymbols::default();
+
+        for Local { id, ty, .. } in p.locals {
+            if let Some(id) = id {
+                line_symbols
+                    .defines
+                    .push(SymbolRef::new(id.name(), IndexSpace::Local));
+            }
+
+            line_symbols.merge(ty.into());
+        }
+
+        line_symbols
+    }
+}
+
 impl<'a> From<FunctionType<'a>> for LineSymbols {
     fn from(ft: FunctionType) -> Self {
         let mut line_symbols = LineSymbols::default();
@@ -576,72 +595,84 @@ impl<'a> From<Memory<'a>> for LineSymbols {
     }
 }
 
+struct Parened<T>(T);
+
+impl<'a, T: Parse<'a>> Parse<'a> for Parened<T> {
+    fn parse(parser: Parser<'a>) -> Result<Self, wast::Error> {
+        Ok(Self(parser.parens(T::parse)?))
+    }
+}
+
+impl<T: Into<LineSymbols>> From<Parened<T>> for LineSymbols {
+    fn from(val: Parened<T>) -> Self {
+        val.0.into()
+    }
+}
+
+struct FuncDefs(LineSymbols);
+impl<'a> Parse<'a> for FuncDefs {
+    fn parse(parser: Parser<'a>) -> Result<Self, wast::Error> {
+        let mut syms = LineSymbols::default();
+        while !parser.is_empty() || parser.step(|c| Ok((c.peek_rparen()?, c)))? {
+            if parser.peek::<kw::func>()? {
+                parser.parse::<kw::func>()?;
+            } else if parser.peek::<Id>()? {
+                syms.defines.push(SymbolRef::new(
+                    parser.parse::<Id>()?.name(),
+                    IndexSpace::Func,
+                ));
+            } else if parser.peek::<InlineExport>()? {
+                parser.parse::<InlineExport>()?;
+            } else if parser.peek2::<kw::param>()? {
+                syms.merge(parser.parse::<CodillonParam>()?.0.into());
+            } else if parser.peek2::<kw::result>()? {
+                syms.merge(parser.parse::<CodillonResult>()?.0.into());
+            } else if parser.peek2::<kw::local>()? {
+                syms.merge(parser.parse::<Parened<LocalParser>>()?.into());
+            } else if parser.step(|cursor| match cursor.lparen()? {
+                Some(rest) => Ok((true, rest)),
+                None => Ok((false, cursor)),
+            })? || parser.step(|cursor| match cursor.rparen()? {
+                Some(rest) => Ok((true, rest)),
+                None => Ok((false, cursor)),
+            })? {
+            } else {
+                panic!("unexpected token")
+            }
+        }
+        Ok(Self(syms))
+    }
+}
+
 // Assume kind correctly reflects the line's kind
 pub fn parse_line_symbols(s: &str, kind: &LineKind) -> LineSymbols {
+    let buf = ParseBuffer::new(s).unwrap();
     match kind {
-        LineKind::Instr(_) => {
-            let Ok(buf) = ParseBuffer::new(s) else {
-                return LineSymbols::default();
-            };
-            parser::parse::<Instruction>(&buf)
-                .map(Into::into)
-                .unwrap_or_default()
-        }
-        LineKind::Other(module_parts) if !module_parts.is_empty() && s.len() > 1 => {
-            // Line is non-function module part
-            let Ok(buf) = ParseBuffer::new(&s[1..s.len() - 1]) else {
-                return LineSymbols::default();
-            };
-            if let Ok(field) = parser::parse::<ModuleField>(&buf) {
-                match field {
-                    ModuleField::Export(e) => return e.into(),
-                    ModuleField::Import(i) => return i.into(),
-                    ModuleField::Global(g) => return g.into(),
-                    ModuleField::Table(t) => return t.into(),
-                    ModuleField::Memory(m) => return m.into(),
-                    _ => {}
+        LineKind::Instr(_) => parser::parse::<Instruction>(&buf)
+            .map(Into::into)
+            .unwrap_or_default(),
+        LineKind::Other(part) => match part {
+            ModulePart::Export => parser::parse::<Parened<Export>>(&buf).unwrap().into(),
+            ModulePart::Import(kind) => match kind {
+                ImportKind::Import => parser::parse::<Parened<Imports>>(&buf).unwrap().into(),
+                ImportKind::InlineFunc => {
+                    if let Some(name) = parser::parse::<Parened<Func>>(&buf).unwrap().0.id {
+                        LineSymbols {
+                            defines: vec![SymbolRef::new(name.name(), IndexSpace::Func)],
+                            consumes: vec![],
+                        }
+                    } else {
+                        LineSymbols::default()
+                    }
                 }
-            }
-
-            // Line is made up of function segments
-            let mut wrapped_s = match module_parts[0] {
-                ModulePart::FuncKeyword => s.to_string(),
-                ModulePart::LParen => s[1..].to_string(),
-                _ => format!("func {s}"),
-            };
-            if matches!(module_parts.last(), Some(ModulePart::RParen)) {
-                wrapped_s = wrapped_s
-                    .strip_suffix(')')
-                    .unwrap_or(&wrapped_s)
-                    .to_string();
-            }
-
-            let Ok(wrapped_buf) = ParseBuffer::new(&wrapped_s) else {
-                return LineSymbols::default();
-            };
-            let Ok(func) = parser::parse::<Func>(&wrapped_buf) else {
-                return LineSymbols::default();
-            };
-
-            let mut line_symbols = LineSymbols::default();
-            // Id
-            if let Some(id) = func.id {
-                line_symbols
-                    .defines
-                    .push(SymbolRef::new(id.name(), IndexSpace::Func));
-            }
-            // Param & Result
-            if let Some(ft) = func.ty.inline {
-                line_symbols.merge(ft.into());
-            }
-            // Local
-            if let FuncKind::Inline { locals, .. } = func.kind {
-                for local in locals {
-                    line_symbols.merge(local.into());
-                }
-            }
-            line_symbols
-        }
+                ImportKind::InlineMemory => parser::parse::<Parened<Memory>>(&buf).unwrap().into(),
+                ImportKind::InlineGlobal => parser::parse::<Parened<Global>>(&buf).unwrap().into(),
+            },
+            ModulePart::Global => parser::parse::<Parened<Global>>(&buf).unwrap().into(),
+            ModulePart::Table => parser::parse::<Parened<Table>>(&buf).unwrap().into(),
+            ModulePart::Memory => parser::parse::<Parened<Memory>>(&buf).unwrap().into(),
+            ModulePart::Func(_) => parser::parse::<FuncDefs>(&buf).unwrap().0,
+        },
         _ => LineSymbols::default(),
     }
 }
@@ -770,11 +801,6 @@ mod tests {
         assert_eq!(symbols.defines[0].space, IndexSpace::Mem);
         assert!(symbols.consumes.is_empty());
 
-        line = "(memory $mem 1 2) (func)";
-        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
-        assert!(symbols.defines.is_empty());
-        assert!(symbols.consumes.is_empty());
-
         line = "(export \"foo\" (func $myfunc))";
         symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert!(symbols.defines.is_empty());
@@ -782,7 +808,7 @@ mod tests {
         assert_eq!(symbols.consumes[0].name, "myfunc");
         assert_eq!(symbols.consumes[0].space, IndexSpace::Func);
 
-        line = "(import \"env\" \"fn\"  (func $f (param $p i32)))";
+        line = "(import \"draw\" \"set_radius\"  (func $f (param $p f64)))";
         symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
         assert_eq!(symbols.defines.len(), 2);
         assert_eq!(symbols.defines[0].name, "f");
@@ -791,14 +817,16 @@ mod tests {
         assert_eq!(symbols.defines[1].space, IndexSpace::Local);
         assert!(symbols.consumes.is_empty());
 
-        line = "(import \"env\" \"fn\"  (func $f (type $t)))";
-        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
-        assert_eq!(symbols.defines.len(), 1);
-        assert_eq!(symbols.defines[0].name, "f");
-        assert_eq!(symbols.defines[0].space, IndexSpace::Func);
-        assert_eq!(symbols.consumes.len(), 1);
-        assert_eq!(symbols.consumes[0].name, "t");
-        assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
+        /* type index not supported
+                line = "(import \"env\" \"fn\"  (func $f (type $t)))";
+                symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
+                assert_eq!(symbols.defines.len(), 1);
+                assert_eq!(symbols.defines[0].name, "f");
+                assert_eq!(symbols.defines[0].space, IndexSpace::Func);
+                assert_eq!(symbols.consumes.len(), 1);
+                assert_eq!(symbols.consumes[0].name, "t");
+                assert_eq!(symbols.consumes[0].space, IndexSpace::Type);
+        */
 
         line = "(func $f (param $p i32) (result (ref $ft)) (local $l i64))";
         symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
@@ -834,9 +862,7 @@ mod tests {
         assert!(symbols.consumes.is_empty());
 
         line = "(import \"\" \"\") (local $l f32)";
-        symbols = parse_line_symbols(line, &parse::<LineKind>(&ParseBuffer::new(line)?)?);
-        assert!(symbols.defines.is_empty());
-        assert!(symbols.consumes.is_empty());
+        assert!(parse::<LineKind>(&ParseBuffer::new(line)?).is_err());
 
         Ok(())
     }

@@ -9,7 +9,7 @@ use crate::{
     graphics::indent_px,
     jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
     symbolic::{LineSymbols, parse_line_symbols},
-    syntax::{InstrKind, LineKind, ModulePart, SyntheticWasm, parse_line},
+    syntax::{FuncPart, InstrKind, LineKind, ModulePart, SyntheticWasm, parse_line},
     utils::find_comment,
 };
 use anyhow::{Result, bail};
@@ -56,7 +56,7 @@ impl Default for LineInfo {
     fn default() -> Self {
         let ret = Self {
             id: NEXT_LINE_ID.get(),
-            kind: Default::default(),
+            kind: LineKind::Empty,
             active: Default::default(),
             indent: None,
             synthetic_before: Default::default(),
@@ -97,22 +97,22 @@ impl LineInfo {
         let mut initial = 0;
         for part in &self.synthetic_before.module_field_syntax {
             match part {
-                ModulePart::LParen => initial += 1,
-                ModulePart::RParen => initial -= 1,
+                FuncPart::LParen => initial += 1,
+                FuncPart::RParen => initial -= 1,
                 _ => {}
             }
         }
 
         let mut rest = 0;
         if self.is_active()
-            && let LineKind::Other(parts) = &self.kind
+            && let LineKind::Other(ModulePart::Func(parts)) = &self.kind
         {
             let mut first_letter = true;
             for part in parts {
                 match part {
-                    ModulePart::RParen if first_letter => initial -= 1,
-                    ModulePart::RParen => rest -= 1,
-                    ModulePart::LParen => rest += 1,
+                    FuncPart::RParen if first_letter => initial -= 1,
+                    FuncPart::RParen => rest -= 1,
+                    FuncPart::LParen => rest += 1,
                     _ => {}
                 }
                 first_letter = false;
