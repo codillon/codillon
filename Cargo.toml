@@ -27,6 +27,7 @@ palette = "0.7.6"
 thousands = "0.2.0"
 smallvec = { version = "1.15.1", features = ["union"] }
 arrayvec = "0.7.6"
+derive_more = { version = "2.1.1", features = ["add", "add_assign"] }
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

@@ -13,6 +13,7 @@ use crate::{
     utils::find_comment,
 };
 use anyhow::{Result, bail};
+use derive_more::{Add, Sub, SubAssign};
 use std::{cell::Cell, mem::swap};
 use web_sys::{HtmlBrElement, HtmlDivElement, HtmlSpanElement};
 
@@ -164,25 +165,61 @@ impl WithElement for CodeLine {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Add, Sub, SubAssign)]
+pub struct Utf16Offset(usize);
+
+impl Utf16Offset {
+    pub fn new(offset: usize) -> Self {
+        Self(offset)
+    }
+
+    pub fn saturating_sub(self, rhs: Self) -> Self {
+        Self(self.0.saturating_sub(rhs.0))
+    }
+
+    pub fn safe_to_byte_idx(&self, text: &str) -> Result<usize> {
+        let byte_idx = str_indices::utf16::to_byte_idx(text, self.0);
+
+        if str_indices::utf16::from_byte_idx(text, byte_idx) != self.0 {
+            bail!("invalid UTF-16 position (not at char boundary)");
+        }
+        Ok(byte_idx)
+    }
+
+    pub fn safe_from_byte_idx(text: &str, byte_idx: usize) -> Result<Self> {
+        if !text.is_char_boundary(byte_idx) {
+            bail!("invalid byte position (not at UTF-16 boundary)");
+        }
+        Ok(Self(str_indices::utf16::from_byte_idx(text, byte_idx)))
+    }
+}
+
+impl TryFrom<Utf16Offset> for u32 {
+    type Error = std::num::TryFromIntError;
+    fn try_from(value: Utf16Offset) -> std::result::Result<Self, Self::Error> {
+        value.0.try_into()
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Position {
     pub in_instr: bool,
-    pub offset: usize,
+    pub offset: Utf16Offset,
 }
 
 impl Position {
     pub fn begin() -> Position {
-        Position::instr(0)
+        Position::instr(Utf16Offset::new(0))
     }
 
-    fn instr(offset: usize) -> Position {
+    fn instr(offset: Utf16Offset) -> Position {
         Position {
             in_instr: true,
             offset,
         }
     }
 
-    fn comment(offset: usize) -> Position {
+    fn comment(offset: Utf16Offset) -> Position {
         Position {
             in_instr: false,
             offset,
@@ -259,7 +296,7 @@ impl CodeLine {
             && self.comment().get().chars().all(|c| c.is_whitespace())
     }
 
-    pub fn position_to_absolute_utf16_offset(&self, pos: Position) -> Result<usize> {
+    pub fn position_to_absolute_utf16_offset(&self, pos: Position) -> Result<Utf16Offset> {
         if pos.in_instr {
             if pos.offset > self.instr().len_utf16() {
                 bail!("invalid instr offset");
@@ -273,7 +310,7 @@ impl CodeLine {
         }
     }
 
-    pub fn absolute_utf16_offset_to_position(&self, offset: usize) -> Result<Position> {
+    pub fn absolute_utf16_offset_to_position(&self, offset: Utf16Offset) -> Result<Position> {
         if offset <= self.instr().len_utf16() {
             Ok(Position {
                 in_instr: true,
@@ -302,19 +339,20 @@ impl CodeLine {
             });
         }
 
+        let utf16_offset = Utf16Offset::new(offset);
         // Position in instruction or comment text nodes.
         if node.is_same_node(self.instr()) {
-            if offset > self.instr().len_utf16() {
+            if utf16_offset > self.instr().len_utf16() {
                 bail!("invalid offset");
             }
-            return Ok(Position::instr(offset));
+            return Ok(Position::instr(utf16_offset));
         } else if node.is_same_node(self.comment()) {
-            if offset > self.comment().len_utf16() {
+            if utf16_offset > self.comment().len_utf16() {
                 bail!("invalid offset");
             }
             return Ok(match offset {
                 0 => instr_end,
-                _ => Position::comment(offset),
+                _ => Position::comment(utf16_offset),
             });
         }
 
@@ -471,8 +509,8 @@ impl CodeLine {
     }
 
     // Make the instr/comment split, the kind, and the CSS presentation consistent with the text contents.
-    // This needs to happen when the text changes. Returns number of whitespace bytes trimmed from start.
-    fn conform_to_text(&mut self) -> Result<usize> {
+    // This needs to happen when the text changes. Returns number of UTF-16 units trimmed from start.
+    fn conform_to_text(&mut self) -> Result<Utf16Offset> {
         // Re-split text nodes at beginning of line comment (if any)
         match find_comment(self.instr().get(), self.comment().get()) {
             None if self.comment().is_empty() => {}
@@ -494,6 +532,7 @@ impl CodeLine {
                 .get()
                 .trim_start_matches(|x: char| x.is_whitespace() && x != '\n')
                 .len();
+        let ws_utf16 = Utf16Offset::safe_from_byte_idx(self.instr().get(), ws_bytes)?;
         if ws_bytes != 0 {
             self.instr_mut().replace_range_bytes(0, ws_bytes, "")?;
         }
@@ -501,7 +540,7 @@ impl CodeLine {
         self.info.kind = parse_line(self.instr().get());
         self.info.symbols = parse_line_symbols(self.instr().get(), &self.info.kind);
         self.conform();
-        Ok(ws_bytes)
+        Ok(ws_utf16)
     }
 
     // Activate or deactivate the line.
@@ -538,11 +577,15 @@ impl CodeLine {
 
     pub fn first_newline(&self) -> Result<Option<Position>> {
         Ok(if let Some(idx) = self.instr().get().find('\n') {
-            Some(Position::instr(self.instr().safe_byte_idx_to_utf16(idx)?))
+            Some(Position::instr(Utf16Offset::safe_from_byte_idx(
+                self.instr().get(),
+                idx,
+            )?))
         } else if let Some(idx) = self.comment().get().find('\n') {
-            Some(Position::comment(
-                self.comment().safe_byte_idx_to_utf16(idx)?,
-            ))
+            Some(Position::comment(Utf16Offset::safe_from_byte_idx(
+                self.comment().get(),
+                idx,
+            )?))
         } else {
             None
         })
@@ -560,17 +603,17 @@ impl CodeLine {
         if a == b && a.in_instr && string == ";" {
             string = ";;"; // type the whole ";;" separator on one ";" keystroke
         } else if a == b
-            && b == Position::comment(2)
+            && b == Position::comment(Utf16Offset::new(2))
             && self.comment().get().starts_with(";;")
             && string == ";"
         {
             string = ""; // if user types two ";" characters, give them two total (ignore second one)
-        } else if a == Position::comment(1)
-            && b == Position::comment(2)
+        } else if a == Position::comment(Utf16Offset::new(1))
+            && b == Position::comment(Utf16Offset::new(2))
             && string.is_empty()
             && self.comment().get().starts_with(";;")
         {
-            a = Position::comment(0); // if user deletes from end of ";;", delete both
+            a = Position::comment(Utf16Offset::new(0)); // if user deletes from end of ";;", delete both
         }
 
         // Do the replacement in the appropriate components (text or comment).
@@ -583,7 +626,8 @@ impl CodeLine {
                         .replace_range(a.offset, b.offset, string)?
             }
             (true, false) => {
-                self.comment_mut().replace_range(0, b.offset, "")?;
+                self.comment_mut()
+                    .replace_range(Utf16Offset::new(0), b.offset, "")?;
                 let instr_len = self.instr().len_utf16();
                 self.instr_mut()
                     .replace_range(a.offset, instr_len, string)?
