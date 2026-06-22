@@ -1144,8 +1144,10 @@ impl Editor {
                 selection.focus_offset(),
             )?;
 
-            if pos.in_instr && pos.offset < accepted.len() {
-                self.replace_range(&selection, &accepted[pos.offset..])?;
+            if pos.in_instr
+                && let Ok(byte_idx) = pos.offset.safe_to_byte_idx(accepted)
+            {
+                self.replace_range(&selection, &accepted[byte_idx..])?;
             }
         }
         self.autocomplete_mut().update("");
@@ -1153,7 +1155,6 @@ impl Editor {
     }
 
     fn show_autocomplete(&mut self) -> Result<()> {
-        use str_indices::utf16::to_byte_idx;
         let selection = get_selection();
         if !selection.is_collapsed() {
             self.autocomplete_mut().update("");
@@ -1170,7 +1171,7 @@ impl Editor {
         }
 
         let instruction = self.line(line_idx).instr().get();
-        let prefix = instruction[..to_byte_idx(instruction, pos.offset)].to_string();
+        let prefix = instruction[..pos.offset.safe_to_byte_idx(instruction)?].to_string();
         self.autocomplete_mut().update(&prefix);
         Ok(())
     }

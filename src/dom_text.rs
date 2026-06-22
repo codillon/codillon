@@ -3,6 +3,7 @@
 // string, and enforces that the DOM contents will match the Rust contents.
 
 use crate::jet::{AccessToken, Component, TextHandle, WithNode};
+use crate::line::Utf16Offset;
 use anyhow::{Result, bail};
 
 #[derive(Default)]
@@ -33,41 +34,25 @@ impl DomText {
         std::mem::take(&mut self.contents)
     }
 
-    pub fn insert_at_char(&mut self, char_idx: usize, string: &str) -> Result<usize> {
+    pub fn insert_at_char(&mut self, char_idx: usize, string: &str) -> Result<Utf16Offset> {
         let byte_idx = str_indices::chars::to_byte_idx(&self.contents, char_idx);
         let utf16_idx = str_indices::utf16::from_byte_idx(&self.contents, byte_idx);
         self.contents.insert_str(byte_idx, string);
         self.text_node.insert_data(utf16_idx.try_into()?, string);
         let utf16_inserted = str_indices::utf16::count(string);
-        Ok(utf16_idx + utf16_inserted)
+        Ok(Utf16Offset::new(utf16_idx + utf16_inserted))
     }
 
-    fn safe_utf16_to_byte_idx(&self, utf16_idx: usize) -> Result<usize> {
-        let byte_idx = str_indices::utf16::to_byte_idx(&self.contents, utf16_idx);
-
-        if utf16_idx != str_indices::utf16::from_byte_idx(&self.contents, byte_idx) {
-            bail!("invalid UTF-16 position (not at char boundary)");
-        }
-
-        Ok(byte_idx)
-    }
-
-    pub fn safe_byte_idx_to_utf16(&self, byte_idx: usize) -> Result<usize> {
-        let utf16_idx = str_indices::utf16::from_byte_idx(&self.contents, byte_idx);
-
-        if byte_idx != str_indices::utf16::to_byte_idx(&self.contents, utf16_idx) {
-            bail!("invalid byte position (not at UTF-16 boundary)");
-        }
-
-        Ok(utf16_idx)
-    }
-
-    pub fn insert_at_utf16_pos(&mut self, utf16_idx: usize, string: &str) -> Result<usize> {
-        let byte_idx = self.safe_utf16_to_byte_idx(utf16_idx)?;
+    pub fn insert_at_utf16_pos(
+        &mut self,
+        utf16_idx: Utf16Offset,
+        string: &str,
+    ) -> Result<Utf16Offset> {
+        let byte_idx = utf16_idx.safe_to_byte_idx(&self.contents)?;
         self.contents.insert_str(byte_idx, string);
         self.text_node.insert_data(utf16_idx.try_into()?, string);
         let utf16_inserted = str_indices::utf16::count(string);
-        Ok(utf16_idx + utf16_inserted)
+        Ok(utf16_idx + Utf16Offset::new(utf16_inserted))
     }
 
     pub fn replace_range_bytes(
@@ -75,20 +60,20 @@ impl DomText {
         byte_start_idx: usize,
         byte_end_idx: usize,
         string: &str,
-    ) -> Result<usize> {
-        let utf16_start_idx = self.safe_byte_idx_to_utf16(byte_start_idx)?;
-        let utf16_end_idx = self.safe_byte_idx_to_utf16(byte_end_idx)?;
+    ) -> Result<Utf16Offset> {
+        let utf16_start_idx = Utf16Offset::safe_from_byte_idx(&self.contents, byte_start_idx)?;
+        let utf16_end_idx = Utf16Offset::safe_from_byte_idx(&self.contents, byte_end_idx)?;
         self.replace_range(utf16_start_idx, utf16_end_idx, string)
     }
 
     pub fn replace_range(
         &mut self,
-        utf16_start_idx: usize,
-        utf16_end_idx: usize,
+        utf16_start_idx: Utf16Offset,
+        utf16_end_idx: Utf16Offset,
         string: &str,
-    ) -> Result<usize> {
-        let byte_start_idx = self.safe_utf16_to_byte_idx(utf16_start_idx)?;
-        let byte_end_idx = self.safe_utf16_to_byte_idx(utf16_end_idx)?;
+    ) -> Result<Utf16Offset> {
+        let byte_start_idx = utf16_start_idx.safe_to_byte_idx(&self.contents)?;
+        let byte_end_idx = utf16_end_idx.safe_to_byte_idx(&self.contents)?;
         if utf16_start_idx > utf16_end_idx || byte_start_idx > byte_end_idx {
             bail!("invalid range");
         }
@@ -101,11 +86,11 @@ impl DomText {
             string,
         )?;
         let utf16_inserted = str_indices::utf16::count(string);
-        Ok(utf16_start_idx + utf16_inserted)
+        Ok(utf16_start_idx + Utf16Offset::new(utf16_inserted))
     }
 
-    pub fn len_utf16(&self) -> usize {
-        str_indices::utf16::count(&self.contents)
+    pub fn len_utf16(&self) -> Utf16Offset {
+        Utf16Offset::new(str_indices::utf16::count(&self.contents))
     }
 
     pub fn len_bytes(&self) -> usize {
@@ -120,8 +105,8 @@ impl DomText {
         &self.contents
     }
 
-    pub fn suffix_utf16(&self, utf16_start_idx: usize) -> Result<&str> {
-        let byte_start_idx = self.safe_utf16_to_byte_idx(utf16_start_idx)?;
+    pub fn suffix_utf16(&self, utf16_start_idx: Utf16Offset) -> Result<&str> {
+        let byte_start_idx = utf16_start_idx.safe_to_byte_idx(self.get())?;
         Ok(&self.contents[byte_start_idx..])
     }
 }
