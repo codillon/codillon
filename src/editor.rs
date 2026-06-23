@@ -287,11 +287,6 @@ impl Editor {
                     error: Some(msg),
                     ..
                 } => (*line_num, msg),
-                ExecutionStatus {
-                    line_num: Some(line_num),
-                    termination: TerminationType::HitBadImport,
-                    ..
-                } => (*line_num, "called unknown import"),
                 _ => return None,
             })
         }
