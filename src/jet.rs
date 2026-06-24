@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use delegate::delegate;
 use std::{
     collections::HashMap,
-    ops::{Deref, DerefMut},
+    ops::{Add, Deref, DerefMut, Sub},
 };
 use wasm_bindgen::{JsValue, closure::Closure};
 use web_sys::{
@@ -124,17 +124,15 @@ impl TextHandle {
     pub fn set_data(&self, value: &str);
     #[unwrap] // no return value anyway
     pub fn append_data(&self, data: &str);
-    #[unwrap] // no return value anyway
-    pub fn insert_data(&self, offset: u32, data: &str);
-
-    #[expr($.fmt_err())]
-    pub fn replace_data(
-    &self,
-        offset: u32,
-        count: u32,
-        data: &str,
-    ) -> Result<()>;
     }
+    }
+
+    pub fn insert_data(&self, offset: WebOffset, data: &str) {
+        self.0.insert_data(offset.0, data).unwrap() // no return value anyway
+    }
+
+    pub fn replace_data(&self, offset: WebOffset, count: WebOffset, data: &str) -> Result<()> {
+        self.0.replace_data(offset.0, count.0, data).fmt_err()
     }
 }
 
@@ -743,10 +741,12 @@ pub struct StaticRangeHandle(web_sys::Range);
 impl StaticRangeHandle {
     delegate! {
         to self.0 {
+        #[expr(WebOffset($))]
         #[unwrap]
-        pub fn start_offset(&self) -> u32;
+        pub fn start_offset(&self) -> WebOffset;
+        #[expr(WebOffset($))]
         #[unwrap]
-        pub fn end_offset(&self) -> u32;
+        pub fn end_offset(&self) -> WebOffset;
         pub fn collapsed(&self) -> bool;
         #[expr(Ok(NodeRef($.fmt_err()?)))]
         pub fn start_container(&self) -> Result<NodeRef>;
@@ -812,12 +812,46 @@ pub fn compare_document_position(a: &impl WithNode, b: &impl WithNode) -> std::c
     }
 }
 
+// Wrapper type to represent an "offset" on the Web platform.
+// This is generally in units of nodes, or within a text node,
+// in units of UTF-16 code units.
+#[derive(Copy, Clone, Debug, Ord, PartialOrd, PartialEq, Eq)]
+pub struct WebOffset(u32);
+
+impl Add for WebOffset {
+    type Output = WebOffset;
+    fn add(self, rhs: Self) -> Self {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl Sub for WebOffset {
+    type Output = WebOffset;
+    fn sub(self, rhs: Self) -> Self {
+        Self(self.0 - rhs.0)
+    }
+}
+
+impl WebOffset {
+    pub fn new_from_usize(val: usize) -> Self {
+        Self(val.try_into().unwrap())
+    }
+
+    pub fn u32(&self) -> u32 {
+        self.0
+    }
+
+    pub fn usize(&self) -> usize {
+        self.u32().try_into().unwrap()
+    }
+}
+
 // Set the cursor position or selection
 pub fn set_selection_range(
     anchor: &impl WithNode,
-    anchor_offset: u32,
+    anchor_offset: WebOffset,
     focus: &impl WithNode,
-    focus_offset: u32,
+    focus_offset: WebOffset,
 ) {
     anchor.with_node(
         |anchor_node| {
@@ -828,7 +862,12 @@ pub fn set_selection_range(
                         .get_selection()
                         .expect("selection error")
                         .expect("selection not found")
-                        .set_base_and_extent(anchor_node, anchor_offset, focus_node, focus_offset)
+                        .set_base_and_extent(
+                            anchor_node,
+                            anchor_offset.0,
+                            focus_node,
+                            focus_offset.0,
+                        )
                         .expect("set_base_and_extent")
                 },
                 TOKEN,
@@ -853,8 +892,10 @@ pub struct SelectionHandle(web_sys::Selection);
 impl SelectionHandle {
     delegate! {
         to self.0 {
-        pub fn anchor_offset(&self) -> u32;
-        pub fn focus_offset(&self) -> u32;
+        #[expr(WebOffset($))]
+        pub fn anchor_offset(&self) -> WebOffset;
+        #[expr(WebOffset($))]
+        pub fn focus_offset(&self) -> WebOffset;
         pub fn is_collapsed(&self) -> bool;
         #[expr($.map(From::from))]
         pub fn anchor_node(&self) -> Option<NodeRef>;
@@ -913,8 +954,8 @@ impl StorageHandle {
 pub trait RangeLike {
     fn node1(&self) -> Option<NodeRef>;
     fn node2(&self) -> Option<NodeRef>;
-    fn offset1(&self) -> u32;
-    fn offset2(&self) -> u32;
+    fn offset1(&self) -> WebOffset;
+    fn offset2(&self) -> WebOffset;
 }
 
 impl RangeLike for SelectionHandle {
@@ -924,10 +965,10 @@ impl RangeLike for SelectionHandle {
     fn node2(&self) -> Option<NodeRef> {
         self.focus_node()
     }
-    fn offset1(&self) -> u32 {
+    fn offset1(&self) -> WebOffset {
         self.anchor_offset()
     }
-    fn offset2(&self) -> u32 {
+    fn offset2(&self) -> WebOffset {
         self.focus_offset()
     }
 }
@@ -939,10 +980,10 @@ impl RangeLike for StaticRangeHandle {
     fn node2(&self) -> Option<NodeRef> {
         self.end_container().ok()
     }
-    fn offset1(&self) -> u32 {
+    fn offset1(&self) -> WebOffset {
         self.start_offset()
     }
-    fn offset2(&self) -> u32 {
+    fn offset2(&self) -> WebOffset {
         self.end_offset()
     }
 }
