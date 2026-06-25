@@ -7,7 +7,10 @@ use crate::{
     dom_struct::DomStruct,
     dom_text::DomText,
     graphics::indent_px,
-    jet::{AccessToken, Component, ElementFactory, NodeRef, WithElement, set_selection_range},
+    jet::{
+        AccessToken, Component, ElementFactory, NodeRef, WebOffset, WithElement,
+        set_selection_range,
+    },
     symbolic::{LineSymbols, parse_line_symbols},
     syntax::{FuncPart, InstrKind, LineKind, ModulePart, SyntheticWasm, parse_line},
     utils::find_comment,
@@ -167,7 +170,7 @@ impl WithElement for CodeLine {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Position {
     pub in_instr: bool,
-    pub offset: usize,
+    pub offset: usize, // bytes
 }
 
 impl Position {
@@ -248,9 +251,9 @@ impl CodeLine {
 
     pub fn end_position(&self) -> Position {
         if self.comment().is_empty() {
-            Position::instr(self.instr().len_utf16())
+            Position::instr(self.instr().len())
         } else {
-            Position::comment(self.comment().len_utf16())
+            Position::comment(self.comment().len())
         }
     }
 
@@ -259,43 +262,43 @@ impl CodeLine {
             && self.comment().get().chars().all(|c| c.is_whitespace())
     }
 
-    pub fn position_to_absolute_utf16_offset(&self, pos: Position) -> Result<usize> {
+    pub fn position_to_absolute_offset(&self, pos: Position) -> Result<usize> {
         if pos.in_instr {
-            if pos.offset > self.instr().len_utf16() {
+            if pos.offset > self.instr().len() {
                 bail!("invalid instr offset");
             }
             Ok(pos.offset)
         } else {
-            if pos.offset > self.comment().len_utf16() {
+            if pos.offset > self.comment().len() {
                 bail!("invalid comment offset");
             }
-            Ok(self.instr().len_utf16() + pos.offset)
+            Ok(self.instr().len() + pos.offset)
         }
     }
 
-    pub fn absolute_utf16_offset_to_position(&self, offset: usize) -> Result<Position> {
-        if offset <= self.instr().len_utf16() {
+    pub fn absolute_offset_to_position(&self, offset: usize) -> Result<Position> {
+        if offset <= self.instr().len() {
             Ok(Position {
                 in_instr: true,
                 offset,
             })
-        } else if offset <= self.instr().len_utf16() + self.comment().len_utf16() {
+        } else if offset <= self.instr().len() + self.comment().len() {
             Ok(Position {
                 in_instr: false,
-                offset: offset - self.instr().len_utf16(),
+                offset: offset - self.instr().len(),
             })
         } else {
             bail!("invalid absolute offset");
         }
     }
 
-    pub fn get_position(&self, node: NodeRef, offset: usize) -> Result<Position> {
-        let instr_end = Position::instr(self.instr().len_utf16());
+    pub fn get_position(&self, node: NodeRef, offset: WebOffset) -> Result<Position> {
+        let instr_end = Position::instr(self.instr().len());
 
         // If the position is in the top-level div element, the offset counts nodes
         // within the line.
         if node.is_same_node(&self.contents) {
-            return Ok(match offset {
+            return Ok(match offset.u32() {
                 0 => Position::begin(),
                 1 => instr_end,
                 _ => self.end_position(),
@@ -304,37 +307,32 @@ impl CodeLine {
 
         // Position in instruction or comment text nodes.
         if node.is_same_node(self.instr()) {
-            if offset > self.instr().len_utf16() {
-                bail!("invalid offset");
-            }
-            return Ok(Position::instr(offset));
+            return Ok(Position::instr(self.instr().utf16_to_byte_idx(offset)?));
         } else if node.is_same_node(self.comment()) {
-            if offset > self.comment().len_utf16() {
-                bail!("invalid offset");
-            }
-            return Ok(match offset {
-                0 => instr_end,
-                _ => Position::comment(offset),
+            return Ok(if offset.u32() == 0 {
+                instr_end
+            } else {
+                Position::comment(self.comment().utf16_to_byte_idx(offset)?)
             });
         }
 
         // Position in the instruction or comment spans.
         if node.is_same_node(&self.contents.get().0) {
-            return Ok(match offset {
+            return Ok(match offset.u32() {
                 0 => Position::begin(),
                 1 => instr_end,
-                _ => bail!("unexpected instr span position {offset}"),
+                _ => bail!("unexpected instr span position {offset:?}"),
             });
         } else if node.is_same_node(&self.contents.get().1.0) {
-            return Ok(match offset {
+            return Ok(match offset.u32() {
                 0 => instr_end,
                 1 => self.end_position(),
-                _ => bail!("unexpected comment span position {offset}"),
+                _ => bail!("unexpected comment span position {offset:?}"),
             });
         } else if node.is_same_node(&self.contents.get().1.1.0) {
-            return Ok(match offset {
+            return Ok(match offset.u32() {
                 0 => self.end_position(),
-                _ => bail!("unexpected debug span position {offset}"),
+                _ => bail!("unexpected debug span position {offset:?}"),
             });
         }
 
@@ -480,7 +478,7 @@ impl CodeLine {
                 let comment = self.comment_mut().take();
                 self.instr_mut().push_str(&comment);
             }
-            Some(x) if x == self.instr().len_bytes() => {}
+            Some(x) if x == self.instr().len() => {}
             Some(x) => {
                 let concat = self.instr().get().to_owned() + self.comment().get();
                 self.instr_mut().set_data(&concat[0..x]);
@@ -488,14 +486,14 @@ impl CodeLine {
             }
         }
         // Trim whitespace at front of instruction
-        let ws_bytes = self.instr().len_bytes()
+        let ws_bytes = self.instr().len()
             - self
                 .instr()
                 .get()
                 .trim_start_matches(|x: char| x.is_whitespace() && x != '\n')
                 .len();
         if ws_bytes != 0 {
-            self.instr_mut().replace_range_bytes(0, ws_bytes, "")?;
+            self.instr_mut().replace_range(0, ws_bytes, "")?;
         }
         // Update kind, symbols, commentary, and active status
         self.info.kind = parse_line(self.instr().get());
@@ -531,21 +529,17 @@ impl CodeLine {
 
     pub fn suffix(&self, pos: Position) -> Result<String> {
         Ok(match pos.in_instr {
-            true => String::from(self.instr().suffix_utf16(pos.offset)?) + self.comment().get(),
-            false => self.comment().suffix_utf16(pos.offset)?.to_string(),
+            true => String::from(self.instr().suffix(pos.offset)) + self.comment().get(),
+            false => self.comment().suffix(pos.offset).to_string(),
         })
     }
 
-    pub fn first_newline(&self) -> Result<Option<Position>> {
-        Ok(if let Some(idx) = self.instr().get().find('\n') {
-            Some(Position::instr(self.instr().safe_byte_idx_to_utf16(idx)?))
-        } else if let Some(idx) = self.comment().get().find('\n') {
-            Some(Position::comment(
-                self.comment().safe_byte_idx_to_utf16(idx)?,
-            ))
+    pub fn first_newline(&self) -> Option<Position> {
+        if let Some(idx) = self.instr().get().find('\n') {
+            Some(Position::instr(idx))
         } else {
-            None
-        })
+            self.comment().get().find('\n').map(Position::comment)
+        }
     }
 
     // Modify the contents. This calls replace_range on one of the inner DomTexts (or both), then
@@ -577,14 +571,14 @@ impl CodeLine {
         let mut total_pos = match (a.in_instr, b.in_instr) {
             (true, true) => self.instr_mut().replace_range(a.offset, b.offset, string)?,
             (false, false) => {
-                self.instr().len_utf16()
+                self.instr().len()
                     + self
                         .comment_mut()
                         .replace_range(a.offset, b.offset, string)?
             }
             (true, false) => {
                 self.comment_mut().replace_range(0, b.offset, "")?;
-                let instr_len = self.instr().len_utf16();
+                let instr_len = self.instr().len();
                 self.instr_mut()
                     .replace_range(a.offset, instr_len, string)?
             }
@@ -593,20 +587,20 @@ impl CodeLine {
 
         total_pos = total_pos.saturating_sub(self.conform_to_text()?);
 
-        Ok(if total_pos <= self.instr().len_utf16() {
+        Ok(if total_pos <= self.instr().len() {
             Position::instr(total_pos)
         } else {
-            let comment_pos = total_pos - self.instr().len_utf16();
-            debug_assert!(comment_pos <= self.comment().len_utf16());
+            let comment_pos = total_pos - self.instr().len();
+            debug_assert!(comment_pos <= self.comment().len());
             Position::comment(comment_pos)
         })
     }
 
-    pub fn set_cursor_position(&self, pos: Position) {
-        let node = self.position_to_node(pos);
-        let offset = pos.offset.try_into().expect("offset -> u32");
+    pub fn set_cursor_position(&self, pos: Position) -> Result<()> {
+        let (node, offset) = self.position_to_node_and_weboffset(pos)?;
         set_selection_range(node, offset, node, offset);
         self.contents.scroll_into_view();
+        Ok(())
     }
 
     pub fn info(&self) -> &LineInfo {
@@ -621,11 +615,14 @@ impl CodeLine {
         swap(&mut self.info.id, &mut other.info.id);
     }
 
-    pub fn position_to_node(&self, pos: Position) -> &DomText {
-        match pos.in_instr {
-            true => self.instr(),
-            false => self.comment(),
-        }
+    pub fn position_to_node_and_weboffset(&self, pos: Position) -> Result<(&DomText, WebOffset)> {
+        Ok(match pos.in_instr {
+            true => (self.instr(), self.instr().byte_idx_to_utf16(pos.offset)?),
+            false => (
+                self.comment(),
+                self.comment().byte_idx_to_utf16(pos.offset)?,
+            ),
+        })
     }
 
     // Returns whether the indentation of nonempty text was changed (used to trigger animations)

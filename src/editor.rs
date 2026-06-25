@@ -10,7 +10,7 @@ use crate::{
     graphics::{DomImage, FractionInfo},
     jet::{
         AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
-        RangeLike, ReactiveComponent, StorageHandle, WindowHandle, WithElement,
+        RangeLike, ReactiveComponent, StorageHandle, WebOffset, WindowHandle, WithElement,
         compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position, PositionRange},
@@ -411,10 +411,9 @@ impl Editor {
 
     fn get_lines_and_positions(&self, range: &impl RangeLike) -> Result<PositionRange> {
         let (start_line, start_pos) =
-            self.find_idx_and_utf16_pos(range.node1().unwrap(), range.offset1())?;
+            self.find_idx_and_pos(range.node1().unwrap(), range.offset1())?;
 
-        let (end_line, end_pos) =
-            self.find_idx_and_utf16_pos(range.node2().unwrap(), range.offset2())?;
+        let (end_line, end_pos) = self.find_idx_and_pos(range.node2().unwrap(), range.offset2())?;
 
         Ok(PositionRange {
             start_line,
@@ -519,7 +518,7 @@ impl Editor {
             // move text between instr and comment and will invalidate existing Position.
             let start_pos_absolute = self
                 .line(start_line)
-                .position_to_absolute_utf16_offset(start_pos)?;
+                .position_to_absolute_offset(start_pos)?;
 
             self.line_mut(start_line)
                 .replace_range(start_pos, end_pos_in_line, &s)?;
@@ -527,7 +526,7 @@ impl Editor {
             // Recompute start_pos based on new line contents
             let start_pos = self
                 .line(start_line)
-                .absolute_utf16_offset_to_position(start_pos_absolute)?;
+                .absolute_offset_to_position(start_pos_absolute)?;
 
             // Step 2: Remove all lines after the start.
             self.text_mut().remove_range(start_line + 1, end_line + 1);
@@ -547,9 +546,9 @@ impl Editor {
         let mut fixup_line = start_line;
         let mut absolute_new_cursor_pos = self
             .line(fixup_line)
-            .position_to_absolute_utf16_offset(new_cursor_pos)?;
+            .position_to_absolute_offset(new_cursor_pos)?;
         loop {
-            let pos: Option<Position> = self.line(fixup_line).first_newline()?;
+            let pos: Option<Position> = self.line(fixup_line).first_newline();
             match pos {
                 None => break,
                 Some(pos) => {
@@ -558,14 +557,14 @@ impl Editor {
                     let rest = the_line.suffix(pos)?;
                     let end_pos = the_line.end_position();
 
-                    let olen = the_line.position_to_absolute_utf16_offset(end_pos)?;
+                    let olen = the_line.position_to_absolute_offset(end_pos)?;
                     the_line.replace_range(pos, end_pos, "")?;
 
                     let mut newline = CodeLine::new(&rest[1..], &self.factory);
-                    let nlen = newline.position_to_absolute_utf16_offset(newline.end_position())?;
+                    let nlen = newline.position_to_absolute_offset(newline.end_position())?;
                     // may truncate initial whitespace
 
-                    absolute_new_cursor_pos -= olen - nlen;
+                    absolute_new_cursor_pos = absolute_new_cursor_pos.saturating_sub(olen - nlen);
 
                     // preserve identity in one special case
                     if pos == Position::begin() {
@@ -579,12 +578,12 @@ impl Editor {
         }
         new_cursor_pos = self
             .line(fixup_line)
-            .absolute_utf16_offset_to_position(absolute_new_cursor_pos)?;
+            .absolute_offset_to_position(absolute_new_cursor_pos)?;
 
         // Is the new module well-formed and "validizable"? Otherwise, revert this entire change.
         match self.on_change() {
             Ok(()) => {
-                self.line(fixup_line).set_cursor_position(new_cursor_pos);
+                self.line(fixup_line).set_cursor_position(new_cursor_pos)?;
                 let mut new_lines = Vec::new();
                 for i in start_line..=fixup_line {
                     new_lines.push(self.line(i).suffix(Position::begin())?);
@@ -621,16 +620,13 @@ impl Editor {
 
                 // restore selection
                 let start_line = self.line(saved_selection.start_line);
-                let new_start_node = start_line.position_to_node(saved_selection.start_pos);
+                let (new_start_node, new_start_off) =
+                    start_line.position_to_node_and_weboffset(saved_selection.start_pos)?;
                 let end_line = self.line(saved_selection.end_line);
-                let new_end_node = end_line.position_to_node(saved_selection.end_pos);
+                let (new_end_node, new_end_off) =
+                    end_line.position_to_node_and_weboffset(saved_selection.end_pos)?;
 
-                set_selection_range(
-                    new_start_node,
-                    saved_selection.start_pos.offset.try_into().unwrap(),
-                    new_end_node,
-                    saved_selection.end_pos.offset.try_into().unwrap(),
-                );
+                set_selection_range(new_start_node, new_start_off, new_end_node, new_end_off);
             }
         }
 
@@ -683,7 +679,7 @@ impl Editor {
             "ArrowRight" => {
                 let selection = get_selection();
                 if selection.is_collapsed() {
-                    let (line_idx, pos) = self.find_idx_and_utf16_pos(
+                    let (line_idx, pos) = self.find_idx_and_pos(
                         selection.focus_node().context("focus")?,
                         selection.focus_offset(),
                     )?;
@@ -691,7 +687,7 @@ impl Editor {
                     {
                         ev.prevent_default();
                         self.line(line_idx + 1)
-                            .set_cursor_position(Position::begin());
+                            .set_cursor_position(Position::begin())?;
                     }
                 }
             }
@@ -699,14 +695,14 @@ impl Editor {
             "ArrowDown" => {
                 let selection = get_selection();
                 if selection.is_collapsed() {
-                    let (line_idx, _) = self.find_idx_and_utf16_pos(
+                    let (line_idx, _) = self.find_idx_and_pos(
                         selection.focus_node().context("focus")?,
                         selection.focus_offset(),
                     )?;
                     if line_idx + 1 == self.text().len() {
                         ev.prevent_default();
                         self.line(line_idx)
-                            .set_cursor_position(self.line(line_idx).end_position());
+                            .set_cursor_position(self.line(line_idx).end_position())?;
                     }
                 }
             }
@@ -714,14 +710,14 @@ impl Editor {
             "ArrowLeft" => {
                 let selection = get_selection();
                 if selection.is_collapsed() {
-                    let (line_idx, pos) = self.find_idx_and_utf16_pos(
+                    let (line_idx, pos) = self.find_idx_and_pos(
                         selection.focus_node().context("focus")?,
                         selection.focus_offset(),
                     )?;
                     if line_idx > 0 && pos == Position::begin() {
                         ev.prevent_default();
                         self.line(line_idx - 1)
-                            .set_cursor_position(self.line(line_idx - 1).end_position());
+                            .set_cursor_position(self.line(line_idx - 1).end_position())?;
                     }
                 }
             }
@@ -748,25 +744,23 @@ impl Editor {
         Ok(())
     }
 
-    // Given a node and offset, find the line index and (UTF-16) position within that line.
+    // Given a node and offset, find the line index and position within that line.
     // There are several possibilities for the node (e.g. the div element, the span element,
     // or the text node).
-    fn find_idx_and_utf16_pos(&self, node: NodeRef, offset: u32) -> Result<(usize, Position)> {
-        let offset = offset as usize;
-
+    fn find_idx_and_pos(&self, node: NodeRef, offset: WebOffset) -> Result<(usize, Position)> {
         // If the position is "in" the div element, make sure the offset matches expectations
         // (either 0 for the very beginning, or #lines for the very end).
         if node.is_same_node(self.text()) {
             let line_count = self.text().len();
-            return Ok(if offset == 0 {
+            return Ok(if offset.u32() == 0 {
                 (0, Position::begin())
-            } else if offset < line_count {
-                (offset, Position::begin())
-            } else if offset == line_count {
+            } else if offset.usize() < line_count {
+                (offset.usize(), Position::begin())
+            } else if offset.usize() == line_count {
                 let last_line_idx = line_count.checked_sub(1).context("last line idx")?;
                 (last_line_idx, self.line(last_line_idx).end_position())
             } else {
-                bail!("unexpected offset {offset} in textentry div")
+                bail!("unexpected offset {offset:?} in textentry div")
             });
         }
 
@@ -1095,14 +1089,13 @@ impl Editor {
         let start_index = min(selection_after.start_line, document_length);
         let end_index = min(selection_after.end_line, document_length);
         // Restore caret position
-        set_selection_range(
-            self.line(start_index)
-                .position_to_node(selection_after.start_pos),
-            selection_after.start_pos.offset.try_into().unwrap(),
-            self.line(end_index)
-                .position_to_node(selection_after.end_pos),
-            selection_after.end_pos.offset.try_into().unwrap(),
-        );
+        let (start_node, start_off) = self
+            .line(start_index)
+            .position_to_node_and_weboffset(selection_after.start_pos)?;
+        let (end_node, end_off) = self
+            .line(end_index)
+            .position_to_node_and_weboffset(selection_after.end_pos)?;
+        set_selection_range(start_node, start_off, end_node, end_off);
         Ok(())
     }
 
@@ -1139,7 +1132,7 @@ impl Editor {
     fn accept_autocomplete(&mut self, accepted: &str) -> Result<()> {
         let selection = get_selection();
         if selection.is_collapsed() {
-            let (_, pos) = self.find_idx_and_utf16_pos(
+            let (_, pos) = self.find_idx_and_pos(
                 selection.focus_node().context("focus")?,
                 selection.focus_offset(),
             )?;
@@ -1159,7 +1152,7 @@ impl Editor {
             return Ok(());
         }
 
-        let (line_idx, pos) = self.find_idx_and_utf16_pos(
+        let (line_idx, pos) = self.find_idx_and_pos(
             selection.focus_node().context("focus")?,
             selection.focus_offset(),
         )?;
