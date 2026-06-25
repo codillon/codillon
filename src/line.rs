@@ -534,12 +534,12 @@ impl CodeLine {
         })
     }
 
-    pub fn first_newline(&self) -> Result<Option<Position>> {
-        Ok(if let Some(idx) = self.instr().get().find('\n') {
+    pub fn first_newline(&self) -> Option<Position> {
+        if let Some(idx) = self.instr().get().find('\n') {
             Some(Position::instr(idx))
         } else {
             self.comment().get().find('\n').map(Position::comment)
-        })
+        }
     }
 
     // Modify the contents. This calls replace_range on one of the inner DomTexts (or both), then

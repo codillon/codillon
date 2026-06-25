@@ -548,7 +548,7 @@ impl Editor {
             .line(fixup_line)
             .position_to_absolute_offset(new_cursor_pos)?;
         loop {
-            let pos: Option<Position> = self.line(fixup_line).first_newline()?;
+            let pos: Option<Position> = self.line(fixup_line).first_newline();
             match pos {
                 None => break,
                 Some(pos) => {
