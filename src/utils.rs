@@ -1795,6 +1795,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
 
         // connect "bad connections"
         let mut stranded: Vec<Coordinate> = Vec::new();
+        let mut accessible_heights = vec![0];
         for (
             Aligned {
                 position_id,
@@ -1806,6 +1807,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
         {
             for (operand_num, slot) in inputs.iter().enumerate().rev() {
                 if cx.connections[slot.usize()].written.is_none()
+                    && stranded.len() > *accessible_heights.last().unwrap()
                     && let Some(where_written) = stranded.pop()
                 {
                     cx.bad_connections.push((
@@ -1818,8 +1820,13 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
                 }
             }
 
-            if *op == Operator::End {
-                stranded.clear();
+            match op {
+                Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. } => {
+                    accessible_heights.push(stranded.len())
+                }
+                Operator::End => stranded.truncate(accessible_heights.pop().unwrap()),
+                Operator::Else => stranded.truncate(*accessible_heights.last().unwrap()),
+                _ => (),
             }
 
             for (operand_num, idx) in outputs.iter().enumerate() {
@@ -3972,6 +3979,31 @@ pub(crate) mod tests {
             );
             assert_eq!(connections.first_slot_of_func, vec![SlotUse::new(0)]);
             assert!(connections.bad_connections.is_empty());
+        }
+
+        {
+            // bad connections can span a block
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("f32.const 2");
+            editor.push_line("block");
+            editor.push_line("end");
+            editor.push_line("i32.eqz");
+            editor.push_line(")");
+            let EditorOutput { connections, .. } = test_editor_flow(&mut editor)?;
+            assert_eq!(
+                connections.bad_connections,
+                vec![(
+                    Coordinate {
+                        position_id: 1,
+                        operand_num: 0
+                    },
+                    Coordinate {
+                        position_id: 4,
+                        operand_num: 0
+                    }
+                )]
+            );
         }
 
         {
