@@ -21,8 +21,9 @@ use crate::{
         fix_syntax,
     },
     utils::{
-        AnnotatedOperatorType, FmtError, OperatorType, RawModule, SlotConnections, SlotInfo,
-        TypedModule, ValidModule, find_connections, indent_and_frame, str_to_binary,
+        AnnotatedOperatorType, ConnectionSource, FmtError, OperatorType, RawModule,
+        SlotConnections, SlotInfo, TypedModule, ValidModule, find_connections, indent_and_frame,
+        str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -170,14 +171,9 @@ impl FrameInfosMut for Editor {
         }
     }
 
-    fn set_frames(&mut self, frames: Vec<FrameInfo>) {
-        let mut tagged_frames = HashMap::with_capacity(frames.len());
-        for frame in frames {
-            let id = self.line(frame.start).id();
-            tagged_frames.insert(id, frame);
-        }
-        let animated = self.component.get_attribute("class") == Some("animated");
-        self.image_mut().set_frames(tagged_frames, animated);
+    fn set_frames(&mut self, frames: HashMap<u32, FrameInfo>) {
+        let smooth = self.component.get_attribute("class") == Some("animated");
+        self.image_mut().set_frames(frames, smooth);
     }
 }
 
@@ -308,13 +304,13 @@ impl Editor {
 
         for (slot_idx, value) in self.execution_state.slots.iter().enumerate() {
             let value = value.last().unwrap_or(&None);
-            let where_written = &self.slot_connections.connections[slot_idx].written;
-            if let Some(coord) = where_written {
+            if let ConnectionSource::Written(coord) =
+                &self.slot_connections.connections[slot_idx].written
+            {
                 get_mut!(self.component, image).set_slot_value(coord, false, value);
             }
 
-            let where_read = &self.slot_connections.connections[slot_idx].read;
-            if let Some(coord) = where_read {
+            if let Some(coord) = &self.slot_connections.connections[slot_idx].read {
                 get_mut!(self.component, image).set_slot_value(coord, true, value);
             }
         }
@@ -852,7 +848,7 @@ impl Editor {
         // set types of globals
         for (global, global_type) in zip_eq(&validized.globals, &types.globals) {
             tagged_types.insert(
-                self.line(global.line_idx).id(),
+                global.position_id,
                 FractionInfo {
                     line_no: global.line_idx,
                     indent: 0,
@@ -879,7 +875,7 @@ impl Editor {
                     })
                     .collect();
                 tagged_types.insert(
-                    self.line(func.lines.0).id(),
+                    func.positions.0,
                     FractionInfo {
                         line_no: func.lines.0,
                         indent: 0,
@@ -907,7 +903,7 @@ impl Editor {
                             // flush
                             let indent = self.line(line_idx).info().indent.unwrap_or(0);
                             tagged_types.insert(
-                                self.line(line_idx).id(),
+                                local.position_id,
                                 FractionInfo {
                                     line_no: line_idx,
                                     indent,
@@ -961,9 +957,10 @@ impl Editor {
                     .iter()
                     .map(|x| SlotInfo {
                         slot: types.slots[x.usize()].clone(),
-                        used: self.slot_connections.connections[x.usize()]
-                            .written
-                            .is_some(),
+                        used: matches!(
+                            self.slot_connections.connections[x.usize()].written,
+                            ConnectionSource::Written(_)
+                        ),
                     })
                     .collect();
                 let mut all_used = true;
@@ -993,7 +990,7 @@ impl Editor {
                     }
                 } else {
                     tagged_types.insert(
-                        self.line(op.line_idx).id(),
+                        op.position_id,
                         FractionInfo {
                             line_no: op.line_idx,
                             indent,
@@ -1005,7 +1002,7 @@ impl Editor {
         }
 
         self.image_mut().set_types(tagged_types, true);
-        get_mut!(self.component, image).set_connections(&self.slot_connections);
+        get_mut!(self.component, image).set_connections(&self.slot_connections.connections);
         Ok(())
     }
 

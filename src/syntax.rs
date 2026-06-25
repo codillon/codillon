@@ -9,7 +9,7 @@ use crate::{
     utils::{HelperImportKind, check_import},
 };
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use wast::{
     Error,
     core::{
@@ -107,7 +107,7 @@ pub struct FrameInfo {
 
 pub trait FrameInfosMut: LineInfos {
     fn set_indent(&mut self, index: usize, num: u16);
-    fn set_frames(&mut self, frames: Vec<FrameInfo>);
+    fn set_frames(&mut self, frames: HashMap<u32, FrameInfo>);
 }
 
 impl LineKind {
