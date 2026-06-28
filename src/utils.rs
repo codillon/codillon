@@ -1713,6 +1713,18 @@ pub struct SlotConnection {
     pub read: Option<Coordinate>,
 }
 
+impl SlotConnection {
+    pub fn is_connected(&self) -> Option<(&Coordinate, &Coordinate)> {
+        match self {
+            SlotConnection {
+                written: ConnectionSource::Written(src) | ConnectionSource::Mismatch(src),
+                read: Some(dst),
+            } => Some((src, dst)),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct SlotConnections {
     pub connections: Vec<SlotConnection>, // same index space as Slot #

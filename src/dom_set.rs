@@ -43,10 +43,11 @@ impl<Child: Component, Element: AnyElement, Key: Eq + Hash> DomSet<Child, Elemen
         self.free_list.push_back(idx);
     }
 
-    pub fn rehome(&mut self, cur_id: &Key, new_id: Key) {
+    pub fn rehome(&mut self, cur_id: &Key, new_id: Key) -> &mut Child {
         assert!(!self.mapping.contains_key(&new_id));
         let idx = self.mapping.remove(cur_id).unwrap();
         self.mapping.insert(new_id, idx);
+        &mut self.contents[idx]
     }
 
     pub fn len(&self) -> usize {
@@ -61,9 +62,9 @@ impl<Child: Component, Element: AnyElement, Key: Eq + Hash> DomSet<Child, Elemen
         self.mapping.get(id).and_then(|idx| self.contents.get(*idx))
     }
 
-    pub fn get_mut(&mut self, id: Key) -> Option<&mut Child> {
+    pub fn get_mut(&mut self, id: &Key) -> Option<&mut Child> {
         self.mapping
-            .get(&id)
+            .get(id)
             .and_then(|idx| self.contents.get_mut(*idx))
     }
 
@@ -71,7 +72,7 @@ impl<Child: Component, Element: AnyElement, Key: Eq + Hash> DomSet<Child, Elemen
         self.mapping.keys()
     }
 
-    pub fn for_each(&mut self, mut f: impl FnMut(&Key, &Child)) {
+    pub fn for_each(&self, mut f: impl FnMut(&Key, &Child)) {
         for (id, idx) in self.mapping.iter() {
             f(id, &self.contents[*idx])
         }

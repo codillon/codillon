@@ -568,7 +568,7 @@ type SVGDefs = DomStruct<
 >;
 type CodillonBlocks = DomSet<FrameLine, SvggElement, u32>; // the lines themselves
 type Fractions = DomSet<OperatorFraction, SvggElement, u32>;
-type Connections = DomSet<ElementHandle<SvgPathElement>, SvggElement, Coordinate>;
+type Connections = DomSet<RenderedConnection, SvggElement, Coordinate>;
 type CodillonSVG = DomStruct<
     (
         SVGDefs,
@@ -577,13 +577,32 @@ type CodillonSVG = DomStruct<
     SvgElement,
 >;
 
+struct RenderedConnection {
+    connection: SlotConnection,
+    path: ElementHandle<SvgPathElement>,
+}
+
+impl WithElement for RenderedConnection {
+    type Element = SvgPathElement;
+    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
+        self.path.with_element(f, g)
+    }
+}
+
+impl Component for RenderedConnection {
+    #[cfg(debug_assertions)]
+    fn audit(&self) {
+        self.path.audit()
+    }
+}
+
 pub struct DomImage {
     contents: CodillonSVG,
     height: usize,
     width: u16,
     factory: ElementFactory,
     pending_delete: HashMap<u32, f64>, // frame identity -> timestamp to delete
-    connection_dsts: HashMap<Coordinate /* dst */, Coordinate /* src */>,
+    connection_dst2src: HashMap<Coordinate /* dst */, Coordinate /* src */>,
 }
 
 impl WithElement for DomImage {
@@ -597,6 +616,18 @@ impl Component for DomImage {
     #[cfg(debug_assertions)]
     fn audit(&self) {
         self.contents.audit();
+        let mut src_hit = HashSet::new();
+        let mut dst_hit = HashSet::new();
+        self.connections().for_each(|src, cx| {
+            let (the_src, the_dst) = cx.connection.is_connected().unwrap();
+            assert_eq!(src, the_src);
+            assert!(src_hit.insert(the_src.clone()));
+            assert!(dst_hit.insert(the_dst.clone()));
+            assert_eq!(self.connection_dst2src[the_dst], src.clone());
+        });
+        for other_dst in self.connection_dst2src.keys() {
+            assert!(dst_hit.contains(other_dst));
+        }
     }
 }
 
@@ -668,7 +699,7 @@ impl DomImage {
         get_mut!(self.contents, defs)
     }
 
-    fn connections(&mut self) -> &Connections {
+    fn connections(&self) -> &Connections {
         get!(self.contents, connections)
     }
 
@@ -761,7 +792,7 @@ impl DomImage {
             width: 0,
             factory: factory.clone(),
             pending_delete: Default::default(),
-            connection_dsts: Default::default(),
+            connection_dst2src: Default::default(),
         };
 
         ret.arrow_mut()
@@ -1136,61 +1167,6 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    fn make_connection(
-        &mut self,
-        src: &Coordinate,
-        dst: &Coordinate,
-        is_bad: bool, // adjust trajectory to fit through openings in the "empty" reader symbols
-    ) {
-        let src_frac = &self.fractions()[src.position_id];
-        let dst_frac = &self.fractions()[dst.position_id];
-        let (write_base, read_base) = (src_frac.target, dst_frac.target);
-        let (x, write_scale, src_ty) = src_frac.output_locations_scales_and_types[src.operand_num];
-
-        let write_x = write_base.0 + x;
-        let (relative_x, read_scale, dst_ty) =
-            dst_frac.input_locations_scales_and_types[dst.operand_num];
-
-        let reader_offset = if is_bad {
-            0.6 * icon_height(dst_ty)
-        } else {
-            icon_height(dst_ty)
-        };
-
-        let read_x = read_base.0 + relative_x;
-        let write_y = write_base.1 + 10.0 * write_scale;
-        let read_y = read_base.1 - reader_offset * read_scale;
-        let first_control_height = write_y + 1.0;
-        let slope = (write_x - read_x) / (write_y - read_y);
-        let second_control_x = if is_bad { read_x + 1.5 * slope } else { read_x };
-        let second_control_height = if is_bad {
-            write_y - 0.4 * icon_height(dst_ty)
-        } else {
-            write_y
-        };
-
-        let mut cx = self.factory.svg_path();
-        if is_bad {
-            cx.set_attribute("stroke", ty_to_color(&src_ty.as_ref()));
-            cx.set_attr_num("stroke-dasharray", "1");
-            cx.set_attr_num("stroke-width", 1.0);
-        } else {
-            cx.set_attribute("stroke", &ty_to_muted(&src_ty.as_ref()));
-            cx.remove_attribute("stroke-dasharray");
-            cx.set_attr_num("stroke-width", 10.0 * read_scale);
-        }
-        cx.set_attribute("fill", "none");
-        cx.set_attribute(
-            "d",
-            &format!(
-                "M {write_x} {write_y}
-C {write_x},{first_control_height} {second_control_x},{second_control_height}, {read_x},{read_y}"
-            ),
-        );
-
-        self.connections_mut().insert(src.clone(), cx);
-    }
-
     pub fn set_connections(&mut self, connections: &Vec<SlotConnection>) {
         /* rehome connections when possible */
         let cx_sources: HashSet<Coordinate> = connections
@@ -1202,30 +1178,52 @@ C {write_x},{first_control_height} {second_control_x},{second_control_height}, {
             if let Some(src) = new_conn.written.source()
                 && let Some(dst) = &new_conn.read
                 && self.connections().get(src).is_none()
-                && let Some(cur_src) = self.connection_dsts.get(dst)
+                && let Some(cur_src) = self.connection_dst2src.get(dst)
                 && !cx_sources.contains(cur_src)
             {
-                get_mut!(self.contents, connections).rehome(cur_src, src.clone());
+                get_mut!(self.contents, connections)
+                    .rehome(cur_src, src.clone())
+                    .connection
+                    .written = new_conn.written.clone();
+                self.connection_dst2src
+                    .insert(dst.clone(), src.clone())
+                    .unwrap();
             }
         }
 
         /* delete connections that no longer exist */
         {
-            let mut to_vanish: Vec<Coordinate> = vec![];
-            for id in self.connections().ids() {
-                if !cx_sources.contains(id) {
-                    to_vanish.push(id.clone());
+            let mut to_vanish: Vec<(Coordinate, Coordinate)> = vec![];
+            get!(self.contents, connections).for_each(|src, cx| {
+                if !cx_sources.contains(src) {
+                    to_vanish.push((src.clone(), cx.connection.read.clone().unwrap()))
                 }
-            }
-            for id in to_vanish {
-                get_mut!(self.contents, connections).remove(id, self.factory.svg_path());
+            });
+            for (src, dst) in to_vanish {
+                get_mut!(self.contents, connections)
+                    .remove(src, RenderedConnection::new(&self.factory));
+                self.connection_dst2src.remove(&dst).unwrap();
             }
         }
 
         /* add connections from given SlotConnections */
-        for SlotConnection { written, read } in connections {
-            if let (Some(src), Some(dst)) = (written.source(), read) {
-                self.make_connection(src, dst, written.is_mismatch());
+        for new_conn in connections {
+            let Some((src, dst)) = new_conn.is_connected() else {
+                continue;
+            };
+            let (_, (conns, (fracs, _))) = self.contents.get_mut();
+
+            if let Some(cur_conn) = conns.get_mut(src) {
+                self.connection_dst2src
+                    .remove(cur_conn.connection.read.as_ref().unwrap())
+                    .unwrap();
+                self.connection_dst2src.insert(dst.clone(), src.clone());
+                cur_conn.update(new_conn.clone(), fracs);
+            } else {
+                let mut cx = RenderedConnection::new(&self.factory);
+                cx.update(new_conn.clone(), self.fractions());
+                self.connection_dst2src.insert(dst.clone(), src.clone());
+                self.connections_mut().insert(src.clone(), cx);
             }
         }
     }
@@ -1590,5 +1588,67 @@ impl Component for OperatorFraction {
     #[cfg(debug_assertions)]
     fn audit(&self) {
         self.symbols.audit();
+    }
+}
+
+impl RenderedConnection {
+    fn new(factory: &ElementFactory) -> Self {
+        Self {
+            connection: SlotConnection::default(),
+            path: factory.svg_path(),
+        }
+    }
+
+    fn update(&mut self, connection: SlotConnection, locations: &Fractions) {
+        self.connection = connection;
+        let (src, dst) = self.connection.is_connected().unwrap();
+        let is_bad = self.connection.written.is_mismatch();
+
+        let src_frac = &locations[src.position_id];
+        let dst_frac = &locations[dst.position_id];
+        let (write_base, read_base) = (src_frac.target, dst_frac.target);
+        let (x, write_scale, src_ty) = src_frac.output_locations_scales_and_types[src.operand_num];
+
+        let write_x = write_base.0 + x;
+        let (relative_x, read_scale, dst_ty) =
+            dst_frac.input_locations_scales_and_types[dst.operand_num];
+
+        let reader_offset = if is_bad {
+            0.6 * icon_height(dst_ty)
+        } else {
+            icon_height(dst_ty)
+        };
+
+        let read_x = read_base.0 + relative_x;
+        let write_y = write_base.1 + 10.0 * write_scale;
+        let read_y = read_base.1 - reader_offset * read_scale;
+        let first_control_height = write_y + 1.0;
+        let slope = (write_x - read_x) / (write_y - read_y);
+        let second_control_x = if is_bad { read_x + 1.5 * slope } else { read_x };
+        let second_control_height = if is_bad {
+            write_y - 0.4 * icon_height(dst_ty)
+        } else {
+            write_y
+        };
+
+        if is_bad {
+            self.path
+                .set_attribute("stroke", ty_to_color(&src_ty.as_ref()));
+            self.path.set_attr_num("stroke-dasharray", "1");
+            self.path.set_attr_num("stroke-width", 1.0);
+        } else {
+            self.path
+                .set_attribute("stroke", &ty_to_muted(&src_ty.as_ref()));
+            self.path.remove_attribute("stroke-dasharray");
+            self.path.set_attr_num("stroke-width", 10.0 * read_scale);
+        }
+        self.path.set_attribute("fill", "none");
+        self.path.set_attribute(
+            "d",
+            &format!(
+                "M {write_x} {write_y}
+C {write_x},{first_control_height} {second_control_x},{second_control_height}, {read_x},{read_y}"
+            ),
+        );
     }
 }
