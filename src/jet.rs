@@ -1043,9 +1043,15 @@ pub trait Component: WithNode {
     where
         Self: Sized,
     {
+        #[cfg(debug_assertions)]
+        let was_connected = self.is_connected();
         self.replace_with(&mut other, TOKEN);
         std::mem::swap(self, &mut other);
-        debug_assert!(self.is_connected());
+
+        #[cfg(debug_assertions)]
+        if was_connected {
+            debug_assert!(self.is_connected());
+        }
         debug_assert!(!other.is_connected());
     }
 }

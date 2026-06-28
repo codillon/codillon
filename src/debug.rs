@@ -495,12 +495,9 @@ impl ExecutionState {
             CallFrameOp::EnterBlock(block_idx) => {
                 let (lower, upper) = connections.blocks[*block_idx as usize];
                 for slot_idx in lower.usize()..upper.usize() {
-                    let cur_but_old = self.slots[slot_idx]
-                        .last()
-                        .copied()
-                        .flatten()
-                        .map(|SlotContents { val, .. }| SlotContents { val, old: true });
-                    *self.slots[slot_idx].last_mut().unwrap() = cur_but_old;
+                    self.slots[slot_idx]
+                        .last_mut()
+                        .map(|x| x.as_mut().map(|y| y.old = true));
                 }
             }
         }

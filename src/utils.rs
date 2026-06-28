@@ -1680,15 +1680,36 @@ pub struct TypedModule {
     pub funcs: Vec<TypedFunction>,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub struct Coordinate {
     pub position_id: u32,
     pub operand_num: usize,
 }
 
 #[derive(Default, Debug, PartialEq, Clone)]
+pub enum ConnectionSource {
+    #[default]
+    None,
+    Written(Coordinate),
+    Mismatch(Coordinate),
+}
+
+impl ConnectionSource {
+    pub fn source(&self) -> Option<&Coordinate> {
+        match self {
+            ConnectionSource::None => None,
+            ConnectionSource::Written(x) | ConnectionSource::Mismatch(x) => Some(x),
+        }
+    }
+
+    pub fn is_mismatch(&self) -> bool {
+        matches!(self, ConnectionSource::Mismatch(_))
+    }
+}
+
+#[derive(Default, Debug, PartialEq, Clone)]
 pub struct SlotConnection {
-    pub written: Option<Coordinate>,
+    pub written: ConnectionSource,
     pub read: Option<Coordinate>,
 }
 
@@ -1697,7 +1718,6 @@ pub struct SlotConnections {
     pub connections: Vec<SlotConnection>, // same index space as Slot #
     pub first_slot_of_func: Vec<SlotUse>, // indexed by "local" function idx (not including func imports)
     pub blocks: Vec<(SlotUse, SlotUse)>,
-    pub bad_connections: Vec<(Coordinate, Coordinate)>,
 }
 
 impl SlotConnections {
@@ -1731,19 +1751,18 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
     let mut cx = SlotConnections {
         connections: vec![
             SlotConnection {
-                written: None,
+                written: ConnectionSource::None,
                 read: None
             };
             tys.slots.len()
         ],
         first_slot_of_func: Vec::with_capacity(tys.funcs.len()),
         blocks: tys.blocks.clone(),
-        bad_connections: vec![],
     };
 
     // locate globals
     for (Aligned { position_id, .. }, slot_idx) in zip_eq(&module.globals, &tys.globals) {
-        cx.connections[slot_idx.usize()].written = Some(Coordinate {
+        cx.connections[slot_idx.usize()].written = ConnectionSource::Written(Coordinate {
             position_id: *position_id,
             operand_num: 0,
         });
@@ -1769,7 +1788,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
                 local_counter.0 = Some(*position_id);
                 local_counter.1 = 0;
             }
-            cx.connections[slot_idx.usize()].written = Some(Coordinate {
+            cx.connections[slot_idx.usize()].written = ConnectionSource::Written(Coordinate {
                 position_id: *position_id,
                 operand_num: local_counter.1,
             });
@@ -1779,7 +1798,7 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
             zip_eq(&func.operators, &func_tys.ops)
         {
             for (operand_num, idx) in outputs.iter().enumerate() {
-                cx.connections[idx.usize()].written = Some(Coordinate {
+                cx.connections[idx.usize()].written = ConnectionSource::Written(Coordinate {
                     position_id: *position_id,
                     operand_num,
                 });
@@ -1805,18 +1824,13 @@ pub fn find_connections(module: &ValidModule, tys: &TypedModule) -> SlotConnecti
             OperatorType { inputs, outputs },
         ) in zip_eq(&func.operators, &func_tys.ops)
         {
-            for (operand_num, slot) in inputs.iter().enumerate().rev() {
-                if cx.connections[slot.usize()].written.is_none()
+            for slot in inputs.iter().rev() {
+                let conn = cx.connections.get_mut(slot.usize()).unwrap();
+                if conn.written == ConnectionSource::None
                     && stranded.len() > *accessible_heights.last().unwrap()
                     && let Some(where_written) = stranded.pop()
                 {
-                    cx.bad_connections.push((
-                        where_written,
-                        Coordinate {
-                            position_id: *position_id,
-                            operand_num,
-                        },
-                    ));
+                    conn.written = ConnectionSource::Mismatch(where_written);
                 }
             }
 
@@ -1875,21 +1889,30 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
         slots: Vec<SlotUse>,
     }
 
-    let mut frames: Vec<FrameInfo> = module
+    let mut frames: HashMap<u32, FrameInfo> = module
         .functions
         .iter()
-        .map(|ValidFunction { lines, .. }| FrameInfo {
-            indent: 0,
-            start: lines.0,
-            end: lines.1,
-            unclosed: false,
-            kind: InstrKind::OtherStructured,
-            wide: !code
-                .info(lines.0)
-                .synthetic_before
-                .module_field_syntax
-                .is_empty(),
-        })
+        .map(
+            |ValidFunction {
+                 lines, positions, ..
+             }| {
+                (
+                    positions.0,
+                    FrameInfo {
+                        indent: 0,
+                        start: lines.0,
+                        end: lines.1,
+                        unclosed: false,
+                        kind: InstrKind::OtherStructured,
+                        wide: !code
+                            .info(lines.0)
+                            .synthetic_before
+                            .module_field_syntax
+                            .is_empty(),
+                    },
+                )
+            },
+        )
         .collect();
     let mut frame_stack: Vec<OpenFrame> = Vec::new();
 
@@ -2023,28 +2046,34 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                             Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. }
                         ));
                         let f = frame_stack.pop().expect("malformed frame stack");
-                        frames.push(FrameInfo {
-                            indent: f.indent,
-                            start: line_no,
-                            end: f.end,
-                            unclosed: f.synthetic,
-                            kind,
-                            wide: false,
-                        });
+                        frames.insert(
+                            typed_op.0.position_id,
+                            FrameInfo {
+                                indent: f.indent,
+                                start: line_no,
+                                end: f.end,
+                                unclosed: f.synthetic,
+                                kind,
+                                wide: false,
+                            },
+                        );
                         instr_indent = f.indent + BLOCK_BOUNDARY_INDENT;
                         process_outputs(&mut slot_map, &f.slots); // clear open slots
                     }
                     InstrKind::Else => {
                         debug_assert!(typed_op.0.inner.op == Operator::Else);
                         let f = frame_stack.pop().expect("malformed frame stack");
-                        frames.push(FrameInfo {
-                            indent: f.indent,
-                            start: line_no,
-                            end: f.end,
-                            unclosed: f.synthetic,
-                            kind,
-                            wide: false,
-                        });
+                        frames.insert(
+                            typed_op.0.position_id,
+                            FrameInfo {
+                                indent: f.indent,
+                                start: line_no,
+                                end: f.end,
+                                unclosed: f.synthetic,
+                                kind,
+                                wide: false,
+                            },
+                        );
                         process_outputs(&mut slot_map, &f.slots); // clear open slots
                         frame_stack.push(OpenFrame {
                             end: line_no,
@@ -2827,7 +2856,7 @@ pub(crate) mod tests {
 
     impl FrameInfosMut for FakeTextBuffer {
         fn set_indent(&mut self, _index: usize, _num: u16) {}
-        fn set_frames(&mut self, _frames: Vec<FrameInfo>) {}
+        fn set_frames(&mut self, _frames: HashMap<u32, FrameInfo>) {}
     }
 
     struct EditorOutput {
@@ -3904,21 +3933,24 @@ pub(crate) mod tests {
                 connections.connections,
                 vec![
                     SlotConnection {
-                        written: Some(Coordinate {
+                        written: ConnectionSource::Written(Coordinate {
                             position_id: 1,
                             operand_num: 0
                         }),
                         read: None
                     },
                     SlotConnection {
-                        written: None,
+                        written: ConnectionSource::Mismatch(Coordinate {
+                            position_id: 1,
+                            operand_num: 0
+                        }),
                         read: Some(Coordinate {
                             position_id: 2,
                             operand_num: 0
                         })
                     },
                     SlotConnection {
-                        written: Some(Coordinate {
+                        written: ConnectionSource::Written(Coordinate {
                             position_id: 2,
                             operand_num: 0
                         }),
@@ -3927,19 +3959,6 @@ pub(crate) mod tests {
                 ]
             );
             assert_eq!(connections.first_slot_of_func, vec![SlotUse::new(0)]);
-            assert_eq!(
-                connections.bad_connections,
-                vec![(
-                    Coordinate {
-                        position_id: 1,
-                        operand_num: 0
-                    },
-                    Coordinate {
-                        position_id: 2,
-                        operand_num: 0
-                    }
-                )]
-            );
         }
 
         {
@@ -3955,21 +3974,21 @@ pub(crate) mod tests {
                 connections.connections,
                 vec![
                     SlotConnection {
-                        written: Some(Coordinate {
+                        written: ConnectionSource::Written(Coordinate {
                             position_id: 2,
                             operand_num: 0
                         }),
                         read: None
                     },
                     SlotConnection {
-                        written: None,
+                        written: ConnectionSource::None,
                         read: Some(Coordinate {
                             position_id: 4,
                             operand_num: 0
                         })
                     },
                     SlotConnection {
-                        written: Some(Coordinate {
+                        written: ConnectionSource::Written(Coordinate {
                             position_id: 4,
                             operand_num: 0
                         }),
@@ -3978,7 +3997,6 @@ pub(crate) mod tests {
                 ]
             );
             assert_eq!(connections.first_slot_of_func, vec![SlotUse::new(0)]);
-            assert!(connections.bad_connections.is_empty());
         }
 
         {
@@ -3992,17 +4010,33 @@ pub(crate) mod tests {
             editor.push_line(")");
             let EditorOutput { connections, .. } = test_editor_flow(&mut editor)?;
             assert_eq!(
-                connections.bad_connections,
-                vec![(
-                    Coordinate {
-                        position_id: 1,
-                        operand_num: 0
+                connections.connections,
+                vec![
+                    SlotConnection {
+                        written: ConnectionSource::Written(Coordinate {
+                            position_id: 1,
+                            operand_num: 0
+                        }),
+                        read: None
                     },
-                    Coordinate {
-                        position_id: 4,
-                        operand_num: 0
-                    }
-                )]
+                    SlotConnection {
+                        written: ConnectionSource::Mismatch(Coordinate {
+                            position_id: 1,
+                            operand_num: 0
+                        }),
+                        read: Some(Coordinate {
+                            position_id: 4,
+                            operand_num: 0
+                        })
+                    },
+                    SlotConnection {
+                        written: ConnectionSource::Written(Coordinate {
+                            position_id: 4,
+                            operand_num: 0
+                        }),
+                        read: None
+                    },
+                ]
             );
         }
 
@@ -4549,9 +4583,9 @@ pub(crate) mod tests {
             let log = test_execution(&binary, &[], &mut [])?;
             assert_eq!(TerminationType::HitInvalid, log.termination_type());
             assert_eq!(connections.connections.len(), 2);
-            assert!(connections.connections[0].written.is_none());
+            assert_eq!(connections.connections[0].written, ConnectionSource::None);
             assert!(connections.connections[0].read.is_none());
-            assert!(connections.connections[1].written.is_none());
+            assert_eq!(connections.connections[1].written, ConnectionSource::None);
             assert!(connections.connections[1].read.is_none());
         }
 

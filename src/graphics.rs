@@ -11,15 +11,15 @@ use crate::{
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement, now_ms},
     line::INDENT_PX,
     syntax::{FrameInfo, InstrKind},
-    utils::{
-        AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, Coordinate, SlotConnection, SlotConnections,
-        SlotInfo,
-    },
+    utils::{AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, Coordinate, SlotConnection, SlotInfo},
 };
 use anyhow::Result;
 use delegate::delegate;
 use palette::{Mix, Srgb};
-use std::{collections::HashMap, str::FromStr};
+use std::{
+    collections::{HashMap, HashSet},
+    str::FromStr,
+};
 use thousands::Separable;
 use wasmparser::ValType;
 use web_sys::{
@@ -566,9 +566,9 @@ type SVGDefs = DomStruct<
     ),
     SvgDefsElement,
 >;
-type CodillonBlocks = DomSet<FrameLine, SvggElement>; // the lines themselves
-type Fractions = DomSet<OperatorFraction, SvggElement>;
-type Connections = DomVec<ElementHandle<SvgPathElement>, SvggElement>;
+type CodillonBlocks = DomSet<FrameLine, SvggElement, u32>; // the lines themselves
+type Fractions = DomSet<OperatorFraction, SvggElement, u32>;
+type Connections = DomSet<ElementHandle<SvgPathElement>, SvggElement, Coordinate>;
 type CodillonSVG = DomStruct<
     (
         SVGDefs,
@@ -583,6 +583,7 @@ pub struct DomImage {
     width: u16,
     factory: ElementFactory,
     pending_delete: HashMap<u32, f64>, // frame identity -> timestamp to delete
+    connection_dsts: HashMap<Coordinate /* dst */, Coordinate /* src */>,
 }
 
 impl WithElement for DomImage {
@@ -665,6 +666,10 @@ macro_rules! field {
 impl DomImage {
     fn defs_mut(&mut self) -> &mut SVGDefs {
         get_mut!(self.contents, defs)
+    }
+
+    fn connections(&mut self) -> &Connections {
+        get!(self.contents, connections)
     }
 
     fn connections_mut(&mut self) -> &mut Connections {
@@ -756,6 +761,7 @@ impl DomImage {
             width: 0,
             factory: factory.clone(),
             pending_delete: Default::default(),
+            connection_dsts: Default::default(),
         };
 
         ret.arrow_mut()
@@ -1042,7 +1048,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             smooth = true;
         }
         for (id, info) in &frames {
-            let Some(old_block) = self.blocks().get(*id) else {
+            let Some(old_block) = self.blocks().get(id) else {
                 smooth = true;
                 break;
             };
@@ -1065,9 +1071,9 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
 
         /* smoothly vanish frames that no longer exist */
         get_mut!(self.contents, blocks).for_each_mut(|id, block| {
-            if !frames.contains_key(&id) {
+            if !frames.contains_key(id) {
                 block.set_visibility(true, false, false);
-                self.pending_delete.insert(id, now + 1000.0);
+                self.pending_delete.insert(*id, now + 1000.0);
             }
         });
 
@@ -1076,7 +1082,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             self.make_height_at_least(info.end + 2);
             self.make_width_at_least(info.indent);
 
-            if self.blocks().get(id).is_none() {
+            if self.blocks().get(&id).is_none() {
                 get_mut!(self.contents, blocks).insert(id, FrameLine::new(&self.factory));
             }
 
@@ -1115,7 +1121,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             self.make_height_at_least(line_no + 2);
             self.make_width_at_least(indent);
 
-            if self.fractions().get(id).is_none() {
+            if self.fractions().get(&id).is_none() {
                 get_mut!(self.contents, fractions)
                     .insert(id, OperatorFraction::new(&self.factory, line_no, indent));
             }
@@ -1132,7 +1138,6 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
 
     fn make_connection(
         &mut self,
-        connection_idx: usize,
         src: &Coordinate,
         dst: &Coordinate,
         is_bad: bool, // adjust trajectory to fit through openings in the "empty" reader symbols
@@ -1164,11 +1169,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             write_y
         };
 
-        while connection_idx >= self.connections_mut().len() {
-            let newpath = self.factory.svg_path();
-            self.connections_mut().push(newpath);
-        }
-        let cx = &mut self.connections_mut()[connection_idx];
+        let mut cx = self.factory.svg_path();
         if is_bad {
             cx.set_attribute("stroke", ty_to_color(&src_ty.as_ref()));
             cx.set_attr_num("stroke-dasharray", "1");
@@ -1186,23 +1187,47 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
 C {write_x},{first_control_height} {second_control_x},{second_control_height}, {read_x},{read_y}"
             ),
         );
+
+        self.connections_mut().insert(src.clone(), cx);
     }
 
-    pub fn set_connections(&mut self, connections: &SlotConnections) {
-        let mut connection_idx = 0;
-        for (src, dst) in &connections.bad_connections {
-            self.make_connection(connection_idx, src, dst, true);
-            connection_idx += 1;
-        }
-        for SlotConnection { written, read } in &connections.connections {
-            let (Some(src), Some(dst)) = (written, read) else {
-                continue;
-            };
+    pub fn set_connections(&mut self, connections: &Vec<SlotConnection>) {
+        /* rehome connections when possible */
+        let cx_sources: HashSet<Coordinate> = connections
+            .iter()
+            .filter_map(|c| c.read.as_ref().and_then(|_| c.written.source().cloned()))
+            .collect();
 
-            self.make_connection(connection_idx, src, dst, false);
-            connection_idx += 1;
+        for new_conn in connections {
+            if let Some(src) = new_conn.written.source()
+                && let Some(dst) = &new_conn.read
+                && self.connections().get(src).is_none()
+                && let Some(cur_src) = self.connection_dsts.get(dst)
+                && !cx_sources.contains(cur_src)
+            {
+                get_mut!(self.contents, connections).rehome(cur_src, src.clone());
+            }
         }
-        self.connections_mut().truncate(connection_idx);
+
+        /* delete connections that no longer exist */
+        {
+            let mut to_vanish: Vec<Coordinate> = vec![];
+            for id in self.connections().ids() {
+                if !cx_sources.contains(id) {
+                    to_vanish.push(id.clone());
+                }
+            }
+            for id in to_vanish {
+                get_mut!(self.contents, connections).remove(id, self.factory.svg_path());
+            }
+        }
+
+        /* add connections from given SlotConnections */
+        for SlotConnection { written, read } in connections {
+            if let (Some(src), Some(dst)) = (written.source(), read) {
+                self.make_connection(src, dst, written.is_mismatch());
+            }
+        }
     }
 
     pub fn set_slot_value(
