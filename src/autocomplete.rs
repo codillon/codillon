@@ -1,10 +1,9 @@
 use crate::{
+    delegate_element_component,
     dom_struct::DomStruct,
     dom_text::DomText,
     dom_vec::DomVec,
-    jet::{
-        AccessToken, Component, ControlHandlers, ElementFactory, ReactiveComponent, WithElement,
-    },
+    jet::{AccessToken, ControlHandlers, ElementFactory, ReactiveComponent},
 };
 use std::{rc::Rc, sync::OnceLock};
 use wasmparser::for_each_operator;
@@ -124,16 +123,4 @@ impl Autocomplete {
     }
 }
 
-impl Component for Autocomplete {
-    #[cfg(debug_assertions)]
-    fn audit(&self) {
-        self.bar.audit();
-    }
-}
-
-impl WithElement for Autocomplete {
-    type Element = HtmlDivElement;
-    fn with_element<T, F: FnMut(&HtmlDivElement) -> T>(&self, f: F, g: AccessToken) -> T {
-        self.bar.with_element(f, g)
-    }
-}
+delegate_element_component!(Autocomplete, bar, HtmlDivElement);

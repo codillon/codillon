@@ -5,7 +5,7 @@ use crate::{
     jet::{AccessToken, AnyElement, Component, ElementHandle, WithElement},
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, VecDeque, hash_map::Iter},
     hash::Hash,
     ops::{Index, IndexMut},
 };
@@ -72,15 +72,16 @@ impl<Child: Component, Element: AnyElement, Key: Eq + Hash> DomSet<Child, Elemen
         self.mapping.keys()
     }
 
-    pub fn for_each(&self, mut f: impl FnMut(&Key, &Child)) {
-        for (id, idx) in self.mapping.iter() {
-            f(id, &self.contents[*idx])
-        }
-    }
-
     pub fn for_each_mut(&mut self, mut f: impl FnMut(&Key, &mut Child)) {
         for (id, idx) in self.mapping.iter() {
             f(id, &mut self.contents[*idx])
+        }
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Key, &Child)> {
+        DomSetIter {
+            iter: self.mapping.iter(),
+            domset: self,
         }
     }
 }
@@ -107,6 +108,10 @@ impl<Child: Component, Element: AnyElement, Key> Component for DomSet<Child, Ele
     #[cfg(debug_assertions)]
     fn audit(&self) {
         self.contents.audit();
+        assert_eq!(
+            self.mapping.len() + self.free_list.len(),
+            self.contents.len()
+        );
     }
 }
 
@@ -114,5 +119,21 @@ impl<Child: Component, Element: AnyElement, Key> WithElement for DomSet<Child, E
     type Element = Element;
     fn with_element<T, F: FnMut(&Element) -> T>(&self, f: F, g: AccessToken) -> T {
         self.contents.with_element(f, g)
+    }
+}
+
+pub struct DomSetIter<'a, Child: Component, Element: AnyElement, Key> {
+    iter: Iter<'a, Key, usize>,
+    domset: &'a DomSet<Child, Element, Key>,
+}
+
+impl<'a, Child: Component, Element: AnyElement, Key> Iterator
+    for DomSetIter<'a, Child, Element, Key>
+{
+    type Item = (&'a Key, &'a Child);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (id, idx) = self.iter.next()?;
+        Some((id, &self.domset.contents[*idx]))
     }
 }

@@ -32,7 +32,7 @@ use regex::Regex;
 use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::{Rc, Weak},
 };
 use wasm_bindgen::closure::Closure;
@@ -107,6 +107,8 @@ struct Editor {
     window: WindowHandle,
     holder: Weak<RefCell<Self>>,
     input_filter: Regex,
+    animation_pending: bool,
+    lines_with_animations: HashSet<usize>,
 }
 
 pub struct EditorHolder(Rc<RefCell<Editor>>);
@@ -167,13 +169,13 @@ impl LineInfosMut for Editor {
 impl FrameInfosMut for Editor {
     fn set_indent(&mut self, index: usize, num: u16) {
         if self.line_mut(index).set_indent(num) {
-            self.component.set_attribute("class", "animated");
+            // animation should be triggered
+            self.lines_with_animations.insert(index);
         }
     }
 
     fn set_frames(&mut self, frames: HashMap<u32, FrameInfo>) {
-        let smooth = self.component.get_attribute("class") == Some("animated");
-        self.image_mut().set_frames(frames, smooth);
+        self.image_mut().set_frames(frames);
     }
 }
 
@@ -260,7 +262,7 @@ impl Editor {
         &mut self,
         step_count: usize,
         current_step: Option<usize>,
-        source_changed: bool,
+        _source_changed: bool,
     ) {
         assert!(step_count > 0);
         let current_step = current_step.unwrap_or(self.current_step());
@@ -323,16 +325,17 @@ impl Editor {
             } = &self.execution_state.status
             && let Some(indent) = &self.text()[*line_num].info().indent.clone()
         {
-            get_mut!(self.component, image).set_arrow_location(
-                !source_changed,
-                Some((*line_num, *below_line, *indent as usize)),
-            );
+            get_mut!(self.component, image).set_arrow_location(Some((
+                *line_num,
+                *below_line,
+                *indent as usize,
+            )));
             if self.scroll_on_next_input {
                 get_mut!(self.component, image).scroll_to_arrow();
                 self.scroll_on_next_input = false;
             }
         } else {
-            get_mut!(self.component, image).set_arrow_location(false, None);
+            get_mut!(self.component, image).set_arrow_location(None);
         }
 
         // display runtime error (and HitBadImport)
@@ -379,7 +382,7 @@ impl Editor {
                 // Move slider to the end if binary changed and it's in the middle
                 if step_count == 0 {
                     ed.slider_mut().inner_mut().hide();
-                    ed.image_mut().set_arrow_location(false, None);
+                    ed.image_mut().set_arrow_location(None);
                     break;
                 }
 
@@ -798,15 +801,38 @@ impl Editor {
         } else if step_count > 0 {
             self.update_live_info(step_count, None, false);
         } else {
-            self.image_mut().set_arrow_location(false, None);
+            self.image_mut().set_arrow_location(None);
         }
 
         self.schedule_save(); // schedule save to local storage
+        self.schedule_animation_if_needed();
 
         #[cfg(debug_assertions)]
         self.audit();
 
         Ok(())
+    }
+
+    fn schedule_animation_if_needed(&mut self) {
+        if self.animation_pending {
+            debug_assert!(!self.lines_with_animations.is_empty());
+            return;
+        }
+        if !self.lines_with_animations.is_empty() {
+            let e = self.holder();
+            self.window
+                .request_animation_frame(move |t| e.borrow_mut().animate(t));
+            self.animation_pending = true;
+        }
+    }
+
+    fn animate(&mut self, t: f64) {
+        debug_assert!(!self.lines_with_animations.is_empty());
+        debug_assert!(self.animation_pending);
+        self.animation_pending = false;
+        self.lines_with_animations
+            .retain(|idx| get_mut!(self.component, textbox).inner_mut()[*idx].animate(t));
+        self.schedule_animation_if_needed();
     }
 
     // get the user-entered text buffer (doesn't include synthetic Wasm)
@@ -1195,6 +1221,8 @@ impl Editor {
             window: WindowHandle::default(),
             holder: Weak::new(),
             input_filter: Regex::new("\r")?,
+            animation_pending: false,
+            lines_with_animations: Default::default(),
         };
 
         let text = ret.textbox_mut();

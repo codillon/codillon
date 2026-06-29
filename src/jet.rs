@@ -11,11 +11,11 @@ use std::{
     collections::HashMap,
     ops::{Add, Deref, DerefMut, Sub},
 };
-use wasm_bindgen::{JsValue, closure::Closure};
+use wasm_bindgen::{closure::Closure, prelude::ScopedClosure};
 use web_sys::{
     BeforeUnloadEvent, Element, FontFaceSetLoadStatus, HtmlBodyElement, HtmlCanvasElement,
-    HtmlElement, HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent, SvgAnimateElement,
-    SvgAnimatedLength, SvgLineElement, SvgTextElement, SvgUseElement, wasm_bindgen::JsCast,
+    HtmlElement, HtmlInputElement, InputEvent, KeyboardEvent, MouseEvent, SvgTextElement,
+    wasm_bindgen::JsCast,
 };
 
 // Traits that give "raw" access to an underlying node or element,
@@ -434,34 +434,6 @@ impl ElementHandle<HtmlInputElement> {
     }
 }
 
-impl ElementHandle<SvgAnimateElement> {
-    delegate! {
-    to self.elem {
-        pub fn begin_element(&self) -> Result<(), JsValue>;
-    }
-    }
-}
-
-impl ElementHandle<SvgLineElement> {
-    delegate! {
-    to self.elem {
-        pub fn x1(&self) -> SvgAnimatedLength;
-        pub fn x2(&self) -> SvgAnimatedLength;
-        pub fn y1(&self) -> SvgAnimatedLength;
-        pub fn y2(&self) -> SvgAnimatedLength;
-    }
-    }
-}
-
-impl ElementHandle<SvgUseElement> {
-    delegate! {
-    to self.elem {
-        pub fn x(&self) -> SvgAnimatedLength;
-        pub fn y(&self) -> SvgAnimatedLength;
-    }
-    }
-}
-
 impl ElementHandle<SvgTextElement> {
     pub fn compute_text_width(&self) -> Option<f32> {
         if self.is_connected()
@@ -602,10 +574,6 @@ impl ElementFactory {
 
     pub fn svg_line(&self) -> ElementHandle<web_sys::SvgLineElement> {
         ElementHandle::new(self.create_svg_element("line"))
-    }
-
-    pub fn svg_animate(&self) -> ElementHandle<web_sys::SvgAnimateElement> {
-        ElementHandle::new(self.create_svg_element("animate"))
     }
 
     pub fn svg_defs(&self) -> ElementHandle<web_sys::SvgDefsElement> {
@@ -1027,6 +995,14 @@ impl WindowHandle {
             .expect("set_timeout")
     }
 
+    pub fn request_animation_frame(&self, handler: impl Fn(f64) + 'static) {
+        let closure: ScopedClosure<'_, dyn Fn(f64)> = Closure::new(handler);
+        self.window
+            .request_animation_frame(closure.as_ref().unchecked_ref())
+            .unwrap();
+        closure.forget();
+    }
+
     #[cfg(debug_assertions)]
     pub fn audit(&self) {
         audit_handler(&self.onbeforeunload, self.window.onbeforeunload());
@@ -1056,6 +1032,26 @@ pub trait Component: WithNode {
     }
 }
 
-// ElementComponent is a trait for a "Component" that is also an HTML Element (e.g. not Text).
+// ElementComponent is a trait for a "Component" that is also an Element (e.g. not Text).
 pub trait ElementComponent: Component + WithElement {}
 impl<U: Component + WithElement> ElementComponent for U {}
+
+#[macro_export]
+macro_rules! delegate_element_component {
+    ($outer:ty, $field:tt, $elem_ty:ty) => {
+        impl $crate::jet::WithElement for $outer {
+            type Element = $elem_ty;
+
+            fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
+                self.$field.with_element(f, g)
+            }
+        }
+
+        impl $crate::jet::Component for $outer {
+            #[cfg(debug_assertions)]
+            fn audit(&self) {
+                self.$field.audit()
+            }
+        }
+    };
+}

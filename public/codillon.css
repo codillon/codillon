@@ -100,10 +100,6 @@ div.textentry:focus {
     content: "\1d160        ";
 }
 
-.animated .instr {
-    transition: 0.2s;
-}
-
 span.comment {
     color: darkblue;
     font-family: 'MLMSansDemiCond10-Regular';

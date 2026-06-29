@@ -2213,6 +2213,68 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
     }
 }
 
+const ANIMATION_DURATION: f64 = 200.0; // milliseconds
+
+#[derive(Default)]
+pub enum Tween {
+    #[default]
+    Pre,
+    Armed(f64, f64),             // origin, target
+    Ongoing(f64, f64, f64, f64), // origin, target, start_time, current_value
+    Post(f64),                   // target
+}
+
+impl Tween {
+    pub fn prepare(origin: f64, target: f64) -> Self {
+        Tween::Armed(origin, target)
+    }
+
+    pub fn snap(target: f64) -> Self {
+        Tween::Post(target)
+    }
+
+    pub fn animate(&mut self, t: f64) {
+        fn tweener(trel: f64) -> (f64, f64) {
+            let target_weight = 1.0
+                + f64::powf(trel - ANIMATION_DURATION, 3.0) / f64::powf(ANIMATION_DURATION, 3.0);
+            (1.0 - target_weight, target_weight)
+        }
+
+        use Tween::*;
+
+        *self = match self {
+            Pre => panic!("animation not yet begun"),
+            Armed(origin, target) => Ongoing(*origin, *target, t, *origin),
+            Ongoing(_, target, start_t, _) if t >= *start_t + ANIMATION_DURATION => Post(*target),
+            Ongoing(origin, target, start_time, _) => {
+                debug_assert!(t >= *start_time);
+                let (origin_weight, target_weight) = tweener(t - *start_time);
+                Ongoing(
+                    *origin,
+                    *target,
+                    *start_time,
+                    origin_weight * *origin + target_weight * *target,
+                )
+            }
+            Post(_) => panic!("animation already finished"),
+        }
+    }
+
+    pub fn value(&self) -> Option<f64> {
+        use Tween::*;
+        match self {
+            Pre => None,
+            Armed(origin, _) => Some(*origin),
+            Ongoing(_, _, _, current_value) => Some(*current_value),
+            Post(target) => Some(*target),
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self, Tween::Armed(..) | Tween::Ongoing(..))
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
