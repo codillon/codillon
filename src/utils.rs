@@ -2213,7 +2213,7 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod tests {
     use super::*;
     use crate::debug::{

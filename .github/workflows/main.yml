@@ -61,6 +61,32 @@ jobs:
         toolchain: ${{ matrix.rust }}
     - run: cargo test --locked --all ${{ matrix.flags }}
 
+  test-browser:
+    name: Test browser
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox]
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        submodules: true
+    - uses: ./.github/actions/install-rust
+    - run: rustup target add wasm32-unknown-unknown
+    - uses: taiki-e/install-action@9ba3ac3fd006a70c6e186a683577abc1ccf0ff3a
+      with:
+        tool: wasm-bindgen@0.2.122
+    - name: Webdrivers
+      run: |
+        if [ "${{ matrix.browser }}" = chrome ]; then
+          echo "CHROMEDRIVER=$CHROMEWEBDRIVER/chromedriver" >> "$GITHUB_ENV"
+        else
+          echo "GECKODRIVER=$GECKOWEBDRIVER/geckodriver" >> "$GITHUB_ENV"
+        fi
+    - run: RUSTFLAGS='--cfg getrandom_backend="wasm_js"' cargo test --target wasm32-unknown-unknown --locked
+    
+
   rustfmt:
     name: Rustfmt
     runs-on: ubuntu-latest
