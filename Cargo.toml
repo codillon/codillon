@@ -30,4 +30,8 @@ arrayvec = "0.7.6"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
-wasmtime = "45.0.0"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+wasmtime="46.0.1"
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.76"
