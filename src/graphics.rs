@@ -12,7 +12,10 @@ use crate::{
     jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement},
     line::INDENT_PX,
     syntax::{FrameInfo, InstrKind},
-    utils::{AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, Coordinate, SlotConnection, SlotInfo},
+    utils::{
+        AnimationRequest, AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, Coordinate, SlotConnection,
+        SlotInfo, Tween,
+    },
 };
 use anyhow::Result;
 use delegate::delegate;
@@ -24,8 +27,8 @@ use std::{
 use thousands::Separable;
 use wasmparser::ValType;
 use web_sys::{
-    SvgDefsElement, SvgElement, SvgLineElement, SvgLinearGradientElement, SvgPathElement,
-    SvgStopElement, SvgTextElement, SvgUseElement, SvggElement, console::log_1,
+    SvgDefsElement, SvgElement, SvgLinearGradientElement, SvgPathElement, SvgStopElement,
+    SvgTextElement, SvgUseElement, SvggElement, console::log_1,
 };
 
 const SYM_HW: f32 = 15.0;
@@ -37,20 +40,11 @@ pub struct FractionInfo {
     pub ty: AnnotatedOperatorType,
 }
 
-struct AnimLine(ElementHandle<SvgLineElement>);
-delegate_element_component!(AnimLine, 0, SvgLineElement);
-
 // One "line" representing a Wasm frame boundary.
 type DomLine = DomStruct<
     (
-        AnimLine,
-        (
-            AnimLine,
-            (
-                AnimLine,
-                (SymbolUse, ()), // an optional symbol for "unclosed" frames
-            ),
-        ),
+        ElementHandle<SvgPathElement>,
+        (SymbolUse, ()), // an optional symbol for "unclosed" frames
     ),
     SvggElement,
 >;
@@ -72,7 +66,7 @@ impl SymbolUse {
         self.0.set_attr_num("opacity", visible as usize);
     }
 
-    fn goto(&mut self, x: usize, y: usize) {
+    fn goto(&mut self, x: f32, y: f32) {
         self.0.set_attr_num("x", x);
         self.0.set_attr_num("y", y);
     }
@@ -85,7 +79,7 @@ struct FrameLine {
 
 const X_OFFSET_PX: usize = 101 + 4 * INDENT_PX;
 const LINE_OFFSET_PX: usize = 8;
-const WIDTH: usize = 4;
+const WIDTH: usize = 2;
 const MARGIN: usize = 8;
 
 struct FrameLimits {
@@ -116,69 +110,30 @@ impl FrameLimits {
     }
 }
 
-impl AnimLine {
-    fn new_line(factory: &ElementFactory) -> Self {
-        let mut ret = Self(factory.svg_line());
-
-        ret.0.set_attribute("stroke-width", &format!("{WIDTH}px"));
-        ret.0.set_attribute("stroke-opacity", "0");
-
-        ret
-    }
-
-    fn vert(&mut self, x: usize, y1: usize, y2: usize) {
-        self.0.set_attr_num("x1", x);
-        self.0.set_attr_num("x2", x);
-        self.0.set_attr_num("y1", y1);
-        self.0.set_attr_num("y2", y2);
-    }
-
-    fn horiz(&mut self, x1: usize, x2: usize, y: usize) {
-        self.0.set_attr_num("x1", x1);
-        self.0.set_attr_num("x2", x2);
-        self.0.set_attr_num("y1", y);
-        self.0.set_attr_num("y2", y);
-    }
-
-    fn set_visibility(&mut self, visible: bool) {
-        self.0.set_attr_num("stroke-opacity", visible as usize);
-    }
-}
-
 impl FrameLine {
-    fn line1(&mut self) -> &mut AnimLine {
+    fn line(&mut self) -> &mut ElementHandle<SvgPathElement> {
         &mut self.elem.get_mut().0
     }
 
-    fn line2(&mut self) -> &mut AnimLine {
+    fn symbol(&mut self) -> &mut SymbolUse {
         &mut self.elem.get_mut().1.0
     }
 
-    fn line3(&mut self) -> &mut AnimLine {
-        &mut self.elem.get_mut().1.1.0
-    }
-
-    fn symbol(&mut self) -> &mut SymbolUse {
-        &mut self.elem.get_mut().1.1.1.0
-    }
-
     fn new(factory: &ElementFactory) -> Self {
-        Self {
+        let mut ret = Self {
             info: None,
             elem: DomStruct::new(
-                (
-                    AnimLine::new_line(factory),
-                    (
-                        AnimLine::new_line(factory),
-                        (
-                            AnimLine::new_line(factory),
-                            (SymbolUse::new_symbol(factory), ()),
-                        ),
-                    ),
-                ),
+                (factory.svg_path(), (SymbolUse::new_symbol(factory), ())),
                 factory.svg_g(),
             ),
-        }
+        };
+
+        ret.line()
+            .set_attribute("stroke-width", &format!("{WIDTH}px"));
+
+        ret.line().set_attribute("fill", "none");
+
+        ret
     }
 
     // Make the DOM SVG element reflect the new Wasm FrameInfo that it represents.
@@ -191,29 +146,35 @@ impl FrameLine {
             y_bot,
         } = FrameLimits::new(&info);
 
-        if let Some(current_info) = &self.info {
-            if info == *current_info {
-                return Ok(());
-            }
-        } else {
-            self.symbol().goto(x_left, y_bot);
+        if let Some(current_info) = &self.info
+            && info == *current_info
+        {
+            return Ok(());
         }
 
-        if info.kind == InstrKind::Else {
-            self.line1()
-                .horiz(x_left - WIDTH / 2, x_left - WIDTH / 2, y_top);
+        let width = x_right - x_left;
+        let height = (y_bot - y_top) as f32;
+        let hheight = if info.unclosed {
+            0.5 * height - 0.29 * LINE_SPACING as f32
         } else {
-            self.line1().horiz(x_right, x_left - WIDTH / 2, y_top);
-        }
-        self.line2().vert(x_left, y_top, y_bot);
-        self.symbol().goto(x_left, y_bot);
+            0.5 * height
+        };
+        const BACKUP: f32 = 30.0;
+
+        let dist1 = (hheight * 0.95).min(LINE_SPACING as f32 * 0.5 * 0.95);
+        let dist2 = hheight - dist1;
 
         if info.unclosed {
-            self.line3()
-                .horiz(x_left - WIDTH / 2, x_left - WIDTH / 2, y_bot);
+            let w3 = 0.5 * BACKUP;
+            self.line().set_attribute("d", &format!("M {x_right},{y_top} h -{width} c -{BACKUP},0 -{BACKUP},{dist1} -{BACKUP},{hheight} c 0,{dist2} 0,{hheight} {w3},{hheight} h 0"));
         } else {
-            self.line3().horiz(x_left - WIDTH / 2, x_right, y_bot);
+            self.line().set_attribute("d", &format!("M {x_right},{y_top} h -{width} c -{BACKUP},0 -{BACKUP},{dist1} -{BACKUP},{hheight} c 0,{dist2} 0,{hheight} {BACKUP},{hheight} h {width}"));
         }
+
+        self.symbol().goto(
+            x_left as f32 - 0.5 * BACKUP,
+            y_bot as f32 - 0.55 * LINE_SPACING as f32,
+        );
 
         self.set_color(&info);
         self.info = Some(info);
@@ -222,52 +183,119 @@ impl FrameLine {
     }
 
     fn set_color(&mut self, info: &FrameInfo) {
+        if info.unclosed {
+            self.line().set_attribute("stroke", "darkred");
+            return;
+        }
+
         match info.kind {
             InstrKind::OtherStructured => {
-                self.line1().0.set_attribute("stroke", "darkgray");
-                self.line2().0.set_attribute("stroke", "darkgray");
-                self.line3().0.set_attribute("stroke", "darkgray");
+                self.line().set_attribute("stroke", "darkgray");
             }
             InstrKind::If => {
-                self.line1().0.set_attribute("stroke", "green");
-                self.line2().0.set_attribute("stroke", "green");
-                self.line3().0.set_attribute("stroke", "purple");
+                self.line().set_attribute("stroke", "green");
             }
             InstrKind::Else => {
-                self.line1().0.set_attribute("stroke", "purple");
-                self.line2().0.set_attribute("stroke", "blue");
-                self.line3().0.set_attribute("stroke", "blue");
+                self.line().set_attribute("stroke", "purple");
             }
             InstrKind::Loop => {
-                self.line1().0.set_attribute("stroke", "pink");
-                self.line2().0.set_attribute("stroke", "pink");
-                self.line3().0.set_attribute("stroke", "pink");
+                self.line().set_attribute("stroke", "pink");
             }
             InstrKind::Other | InstrKind::End => panic!("unexpected frame kind"),
         }
     }
 
     fn set_visibility(&mut self, visible: bool, unclosed: bool) {
-        self.line1().set_visibility(visible);
-        self.line2().set_visibility(visible);
-        self.line3().set_visibility(visible);
+        self.line().set_attr_num("opacity", visible as usize);
         self.symbol().set_visibility(unclosed);
     }
 }
 
 delegate_element_component!(FrameLine, elem, <DomLine as WithElement>::Element);
 
-struct Arrow(ElementHandle<SvgUseElement>);
-delegate_element_component!(Arrow, 0, SvgUseElement);
+type ArrowElem = DomStruct<
+    (
+        ElementHandle<SvgUseElement>,
+        (ElementHandle<SvgUseElement>, ()),
+    ),
+    SvggElement,
+>;
+
+struct Arrow {
+    elem: ArrowElem,
+    x: Tween,
+    y: Tween,
+}
+delegate_element_component!(Arrow, elem, SvggElement);
 
 impl Arrow {
-    fn new_arrow(factory: &ElementFactory) -> Self {
-        Self(factory.svg_use())
+    fn new(factory: &ElementFactory) -> Self {
+        let mut ret = Self {
+            elem: DomStruct::new(
+                (factory.svg_use(), (factory.svg_use(), ())),
+                factory.svg_g(),
+            ),
+            x: Default::default(),
+            y: Default::default(),
+        };
+        ret.target_elem().set_attribute("class", "arrow-target");
+        ret
     }
 
-    fn goto(&mut self, x: usize, y: usize) {
-        self.0.set_attr_num("x", x);
-        self.0.set_attr_num("y", y);
+    fn arrow_elem(&mut self) -> &mut ElementHandle<SvgUseElement> {
+        &mut self.elem.get_mut().0
+    }
+
+    fn target_elem(&mut self) -> &mut ElementHandle<SvgUseElement> {
+        &mut self.elem.get_mut().1.0
+    }
+
+    fn goto(&mut self, smooth: bool, loc: Option<(usize, bool, usize)>) -> AnimationRequest {
+        let Some((line_idx, below_line, indent)) = loc else {
+            self.arrow_elem().remove_attribute("href");
+            return AnimationRequest(false);
+        };
+
+        self.arrow_elem().set_attribute("href", "#arrow");
+
+        let target_x = X_OFFSET_PX + indent * INDENT_PX - 4;
+        let target_y = line_idx * LINE_SPACING
+            + LINE_SPACING / 2
+            + LINE_OFFSET_PX
+            + if below_line { LINE_SPACING / 2 } else { 0 };
+
+        if smooth {
+            self.x.approach(target_x as f64);
+            self.y.approach(target_y as f64);
+            return AnimationRequest(true);
+        }
+
+        // otherwise, snap change
+        self.arrow_elem().set_attr_num("x", target_x);
+        self.arrow_elem().set_attr_num("y", target_y);
+        self.x.snap(target_x as f64);
+        self.y.snap(target_y as f64);
+        AnimationRequest(false)
+    }
+
+    fn animate(&mut self, t: f64) -> AnimationRequest {
+        self.x.animate(t);
+        self.y.animate(t);
+        let (x, y) = (self.x.value().unwrap(), self.y.value().unwrap());
+        self.arrow_elem().set_attr_num("x", x);
+        self.arrow_elem().set_attr_num("y", y);
+        debug_assert_eq!(self.x.is_pending(), self.y.is_pending());
+        self.x.is_pending()
+    }
+
+    fn scroll_to_target(&mut self) {
+        if let Some(target_x) = self.x.target()
+            && let Some(target_y) = self.y.target()
+        {
+            self.elem.get_mut().1.0.set_attr_num("x", target_x);
+            self.elem.get_mut().1.0.set_attr_num("y", target_y);
+            self.elem.get().1.0.scroll_into_view();
+        }
     }
 }
 
@@ -484,7 +512,7 @@ impl DomImage {
                             DomSet::new(factory.svg_g()),
                             (
                                 CodillonBlocks::new(factory.svg_g()),
-                                (Arrow::new_arrow(&factory), ()),
+                                (Arrow::new(&factory), ()),
                             ),
                         ),
                     ),
@@ -496,8 +524,6 @@ impl DomImage {
             factory: factory.clone(),
             connection_dst2src: Default::default(),
         };
-
-        ret.arrow_mut().0.set_attribute("class", "arrow-target");
 
         // The "unclosed" symbol looks like a ⊘ (Circled Division Slash)
         // character, or like an "End of All Prohibitions"
@@ -883,6 +909,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
 
         /* add connections from given SlotConnections */
+        let mut dst_deletion_count: HashMap<Coordinate, i32> = HashMap::new();
         for new_conn in connections {
             let Some((src, dst)) = new_conn.is_connected() else {
                 continue;
@@ -890,9 +917,12 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             let (_, (conns, (fracs, _))) = self.contents.get_mut();
 
             if let Some(cur_conn) = conns.get_mut(src) {
-                self.connection_dst2src
-                    .remove(cur_conn.connection.read.as_ref().unwrap())
-                    .unwrap();
+                let (_cur_src, cur_dst) = cur_conn.connection.is_connected().unwrap();
+                debug_assert_eq!(_cur_src, src);
+                if cur_conn.connection != *new_conn {
+                    *dst_deletion_count.entry(cur_dst.clone()).or_insert(0) += 1;
+                    *dst_deletion_count.entry(dst.clone()).or_insert(0) -= 1;
+                }
                 self.connection_dst2src.insert(dst.clone(), src.clone());
                 cur_conn.update(new_conn.clone(), fracs);
             } else {
@@ -900,6 +930,15 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
                 cx.update(new_conn.clone(), self.fractions());
                 self.connection_dst2src.insert(dst.clone(), src.clone());
                 self.connections_mut().insert(src.clone(), cx);
+                *dst_deletion_count.entry(dst.clone()).or_insert(0) -= 1;
+            }
+        }
+
+        /* delete dst->src entries that no longer exist */
+        for (dst, delcount) in dst_deletion_count {
+            debug_assert!(delcount <= 1);
+            if delcount == 1 {
+                self.connection_dst2src.remove(&dst).unwrap();
             }
         }
     }
@@ -931,22 +970,20 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    pub fn set_arrow_location(&mut self, loc: Option<(usize, bool, usize)>) {
-        let Some((line_idx, below_line, indent)) = loc else {
-            self.arrow_mut().0.remove_attribute("href");
-            return;
-        };
+    pub fn set_arrow_location(
+        &mut self,
+        smooth: bool,
+        loc: Option<(usize, bool, usize)>,
+    ) -> AnimationRequest {
+        self.arrow_mut().goto(smooth, loc)
+    }
 
-        self.arrow_mut().0.set_attribute("href", "#arrow");
-        let below_line_offset = if below_line { LINE_SPACING / 2 } else { 0 };
-        self.arrow_mut().goto(
-            X_OFFSET_PX + indent * INDENT_PX - 4,
-            line_idx * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX + below_line_offset,
-        );
+    pub fn animate_arrow(&mut self, t: f64) -> AnimationRequest {
+        self.arrow_mut().animate(t)
     }
 
     pub fn scroll_to_arrow(&mut self) {
-        self.arrow_mut().0.scroll_into_view();
+        self.arrow_mut().scroll_to_target()
     }
 
     delegate! {
@@ -1179,12 +1216,16 @@ impl OperatorFraction {
         let left_edge_out = -SYM_HW * (out_len - 1) as f32;
 
         fn render(info: &SlotInfo, is_input: bool) -> String {
-            let name = info.slot.ty.map(|x| x.to_string());
+            let name = info.slot.ty().map(|x| x.to_string());
             format!(
                 "#{}_{}{}",
                 name.unwrap_or(String::from("mystery")),
                 if is_input { "in" } else { "out" },
-                if !info.used && is_input { "_empty" } else { "" }
+                if !info.used && is_input && info.slot != crate::utils::Slot::Polymorphic {
+                    "_empty"
+                } else {
+                    ""
+                }
             )
         }
 
@@ -1194,9 +1235,9 @@ impl OperatorFraction {
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &render(ty, true));
             self.input_locations_scales_and_types
-                .push((in_scale * x, in_scale, ty.slot.ty));
+                .push((in_scale * x, in_scale, ty.slot.ty()));
 
-            let height = icon_height(ty.slot.ty) - 1.25;
+            let height = icon_height(ty.slot.ty()) - 1.25;
             let text = &mut self.inputs()[i].get_mut().1.0;
 
             text.set_pos(x, -height / 2.0);
@@ -1227,10 +1268,10 @@ impl OperatorFraction {
             sym.set_attribute("href", &render(ty, false));
 
             self.output_locations_scales_and_types
-                .push((out_scale * x, out_scale, ty.slot.ty));
+                .push((out_scale * x, out_scale, ty.slot.ty()));
 
-            let height = icon_height(ty.slot.ty)
-                + match ty.slot.ty {
+            let height = icon_height(ty.slot.ty())
+                + match ty.slot.ty() {
                     Some(ValType::F32) => 6.5,
                     _ => 3.5,
                 };

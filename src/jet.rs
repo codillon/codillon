@@ -995,12 +995,10 @@ impl WindowHandle {
             .expect("set_timeout")
     }
 
-    pub fn request_animation_frame(&self, handler: impl Fn(f64) + 'static) {
-        let closure: ScopedClosure<'_, dyn Fn(f64)> = Closure::new(handler);
+    pub fn request_animation_frame(&self, closure: &ScopedClosure<'_, dyn Fn(f64)>) {
         self.window
             .request_animation_frame(closure.as_ref().unchecked_ref())
             .unwrap();
-        closure.forget();
     }
 
     #[cfg(debug_assertions)]

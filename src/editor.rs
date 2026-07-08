@@ -21,9 +21,9 @@ use crate::{
         fix_syntax,
     },
     utils::{
-        AnnotatedOperatorType, ConnectionSource, FmtError, OperatorType, RawModule,
-        SlotConnections, SlotInfo, TypedModule, ValidModule, find_connections, indent_and_frame,
-        str_to_binary,
+        AnimationRequest, AnnotatedOperatorType, ConnectionSource, FmtError, OperatorType,
+        RawModule, SlotConnections, SlotInfo, TypedModule, ValidModule, find_connections,
+        indent_and_frame, str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -35,7 +35,7 @@ use std::{
     collections::{HashMap, HashSet},
     rc::{Rc, Weak},
 };
-use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{closure::Closure, prelude::ScopedClosure};
 use web_sys::{BeforeUnloadEvent, HtmlDivElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
@@ -91,6 +91,19 @@ const STORAGE_ID: &str = "codillon_content";
 const SCHEDULE_STORE_MS: i32 = 500;
 const RETRY_STORE_MS: i32 = 2000;
 
+#[derive(Default)]
+struct PendingAnimations {
+    live_info: AnimationRequest,
+    arrow: AnimationRequest,
+    lines: HashSet<usize>,
+}
+
+impl PendingAnimations {
+    fn has_pending(&self) -> bool {
+        self.live_info.0 || self.arrow.0 || !self.lines.is_empty()
+    }
+}
+
 struct Editor {
     component: ComponentType,
     factory: ElementFactory,
@@ -107,8 +120,9 @@ struct Editor {
     window: WindowHandle,
     holder: Weak<RefCell<Self>>,
     input_filter: Regex,
+    animation_handler: ScopedClosure<'static, dyn Fn(f64)>,
     animation_pending: bool,
-    lines_with_animations: HashSet<usize>,
+    animations: PendingAnimations,
 }
 
 pub struct EditorHolder(Rc<RefCell<Editor>>);
@@ -168,9 +182,9 @@ impl LineInfosMut for Editor {
 
 impl FrameInfosMut for Editor {
     fn set_indent(&mut self, index: usize, num: u16) {
-        if self.line_mut(index).set_indent(num) {
+        if self.line_mut(index).set_indent(num).0 {
             // animation should be triggered
-            self.lines_with_animations.insert(index);
+            self.animations.lines.insert(index);
         }
     }
 
@@ -262,8 +276,9 @@ impl Editor {
         &mut self,
         step_count: usize,
         current_step: Option<usize>,
-        _source_changed: bool,
+        source_changed: bool,
     ) {
+        self.animations.live_info = AnimationRequest(false);
         assert!(step_count > 0);
         let current_step = current_step.unwrap_or(self.current_step());
         if step_count > 1 {
@@ -325,17 +340,16 @@ impl Editor {
             } = &self.execution_state.status
             && let Some(indent) = &self.text()[*line_num].info().indent.clone()
         {
-            get_mut!(self.component, image).set_arrow_location(Some((
-                *line_num,
-                *below_line,
-                *indent as usize,
-            )));
+            self.animations.arrow = get_mut!(self.component, image).set_arrow_location(
+                !source_changed,
+                Some((*line_num, *below_line, *indent as usize)),
+            );
             if self.scroll_on_next_input {
                 get_mut!(self.component, image).scroll_to_arrow();
                 self.scroll_on_next_input = false;
             }
         } else {
-            get_mut!(self.component, image).set_arrow_location(None);
+            self.animations.arrow = get_mut!(self.component, image).set_arrow_location(false, None);
         }
 
         // display runtime error (and HitBadImport)
@@ -348,6 +362,8 @@ impl Editor {
             get_mut!(component, textbox).inner_mut()[line_no]
                 .set_runtime_error(Some(msg.to_string()));
         }
+
+        self.schedule_animation_if_needed();
     }
 
     fn current_step(&self) -> usize {
@@ -382,7 +398,7 @@ impl Editor {
                 // Move slider to the end if binary changed and it's in the middle
                 if step_count == 0 {
                     ed.slider_mut().inner_mut().hide();
-                    ed.image_mut().set_arrow_location(None);
+                    ed.animations.arrow = ed.image_mut().set_arrow_location(false, None);
                     break;
                 }
 
@@ -801,7 +817,7 @@ impl Editor {
         } else if step_count > 0 {
             self.update_live_info(step_count, None, false);
         } else {
-            self.image_mut().set_arrow_location(None);
+            self.animations.arrow = self.image_mut().set_arrow_location(false, None);
         }
 
         self.schedule_save(); // schedule save to local storage
@@ -815,23 +831,29 @@ impl Editor {
 
     fn schedule_animation_if_needed(&mut self) {
         if self.animation_pending {
-            debug_assert!(!self.lines_with_animations.is_empty());
             return;
         }
-        if !self.lines_with_animations.is_empty() {
-            let e = self.holder();
-            self.window
-                .request_animation_frame(move |t| e.borrow_mut().animate(t));
+        if self.animations.has_pending() {
+            self.window.request_animation_frame(&self.animation_handler);
             self.animation_pending = true;
         }
     }
 
     fn animate(&mut self, t: f64) {
-        debug_assert!(!self.lines_with_animations.is_empty());
         debug_assert!(self.animation_pending);
         self.animation_pending = false;
-        self.lines_with_animations
-            .retain(|idx| get_mut!(self.component, textbox).inner_mut()[*idx].animate(t));
+        if self.animations.live_info.0 {
+            self.update_live_info(RUN_LOG.with(|r| r.step_count()), None, false);
+            debug_assert!(!self.animations.live_info.0);
+        }
+        if self.animations.arrow.0 {
+            self.animations.arrow = self.image_mut().animate_arrow(t);
+        }
+        self.animations.lines.retain(|idx| {
+            get_mut!(self.component, textbox).inner_mut()[*idx]
+                .animate(t)
+                .0
+        });
         self.schedule_animation_if_needed();
     }
 
@@ -947,7 +969,7 @@ impl Editor {
                             );
 
                             local_line_idx = Some(local.line_idx);
-                            local_slots.truncate(0);
+                            local_slots.clear();
                             local_slots.push(*slot_idx);
                         }
                     }
@@ -1221,8 +1243,9 @@ impl Editor {
             window: WindowHandle::default(),
             holder: Weak::new(),
             input_filter: Regex::new("\r")?,
+            animation_handler: Closure::new(|_| {}),
             animation_pending: false,
-            lines_with_animations: Default::default(),
+            animations: Default::default(),
         };
 
         let text = ret.textbox_mut();
@@ -1247,6 +1270,9 @@ impl Editor {
         self.holder = holder;
 
         let e = self.holder();
+        self.animation_handler = Closure::new(move |t| e.borrow_mut().animate(t));
+
+        let e = self.holder();
         self.textbox_mut()
             .set_onbeforeinput(move |ev| e.borrow_mut().handle_input(ev).unwrap());
 
@@ -1263,9 +1289,11 @@ impl Editor {
             .set_handler(move |accepted| e.borrow_mut().accept_autocomplete(accepted).unwrap());
 
         let e = self.holder();
-        self.slider_mut().set_oninput(move |_| {
-            e.borrow_mut()
-                .update_live_info(RUN_LOG.with(|r| r.step_count()), None, false)
+        self.slider_mut().set_oninput(move |ev| {
+            let mut e = e.borrow_mut();
+            e.animations.live_info = AnimationRequest(true);
+            e.schedule_animation_if_needed();
+            ev.prevent_default();
         });
 
         let e = self.holder();

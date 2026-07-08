@@ -13,7 +13,7 @@ use crate::{
     },
     symbolic::{LineSymbols, parse_line_symbols},
     syntax::{FuncPart, InstrKind, LineKind, ModulePart, SyntheticWasm, parse_line},
-    utils::{Tween, find_comment},
+    utils::{AnimationRequest, Tween, find_comment},
 };
 use anyhow::{Result, bail};
 use std::{cell::Cell, mem::swap};
@@ -150,7 +150,7 @@ impl LineInfo {
 #[derive(Default)]
 struct AnimationState {
     browser_animation: BrowserAnimation,
-    indent_animation: Tween,
+    indent: Tween,
 }
 
 #[derive(Default)]
@@ -634,49 +634,48 @@ impl CodeLine {
     }
 
     // Returns whether future animation is desired
-    pub fn set_indent(&mut self, val: u16) -> bool {
+    pub fn set_indent(&mut self, val: u16) -> AnimationRequest {
         if let Some(cur_indent) = self.info.indent
             && !self.all_whitespace()
-            && (cur_indent != val || self.animation_state.indent_animation.is_pending())
+            && (cur_indent != val || self.animation_state.indent.is_pending().0)
         {
             // animate change
-            self.animation_state.indent_animation = Tween::prepare(
-                self.animation_state.indent_animation.value().unwrap(),
-                indent_px(4 + val) as f64,
-            );
+            self.animation_state
+                .indent
+                .approach(indent_px(4 + val) as f64);
             self.info.indent = Some(val);
-            return true;
+            return AnimationRequest(true);
         }
 
         // otherwise, snap change
         self.info.indent = Some(val);
-        self.animation_state.indent_animation = Tween::snap(indent_px(4 + val) as f64);
+        self.animation_state.indent.snap(indent_px(4 + val) as f64);
         self.contents.get_mut().0.set_attribute(
             "style",
             &format!(
                 "margin-left: {}px;",
-                self.animation_state.indent_animation.value().unwrap()
+                self.animation_state.indent.value().unwrap()
             ),
         );
-        false
+        AnimationRequest(false)
     }
 
     pub fn unset_indent(&mut self) {
         self.info.indent = None;
-        self.animation_state.indent_animation = Default::default();
+        self.animation_state.indent = Default::default();
     }
 
-    pub fn animate(&mut self, t: f64) -> bool {
-        self.animation_state.indent_animation.animate(t);
+    pub fn animate(&mut self, t: f64) -> AnimationRequest {
+        self.animation_state.indent.animate(t);
         self.contents.get_mut().0.set_attribute(
             "style",
             &format!(
                 "margin-left: {}px;",
-                self.animation_state.indent_animation.value().unwrap()
+                self.animation_state.indent.value().unwrap()
             ),
         );
 
-        self.animation_state.indent_animation.is_pending()
+        self.animation_state.indent.is_pending()
     }
 
     pub fn set_invalid(&mut self, reason: Option<String>) {

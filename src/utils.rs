@@ -9,8 +9,7 @@ use itertools::{Itertools, zip_eq};
 use std::{
     cmp::{max, min},
     collections::HashMap,
-    fmt::{Debug, Formatter},
-    num::NonZeroU32,
+    fmt::Debug,
     ops::Range,
 };
 use wasm_encoder::{
@@ -823,7 +822,11 @@ impl SimulatedStack {
                     if is_select && i == 2 && pop_count - 1 < accessible_operands {
                         self.slot_idx_stack[pre_instr_height + i - pop_count]
                     } else {
-                        slots.push(Slot { ty: None });
+                        slots.push(if untyped {
+                            Slot::Unknown
+                        } else {
+                            Slot::Polymorphic
+                        });
                         SlotUse::new(slots.len() - 1)
                     }
                 } else {
@@ -854,13 +857,15 @@ impl SimulatedStack {
 
         let outputs = (0..push_count)
             .map(|i| {
-                slots.push(Slot {
-                    ty: if is_select {
-                        // XXX should handle in more principled/general way
-                        slots.get(inputs[0].usize()).and_then(|y| y.ty)
+                slots.push(if is_select {
+                    // XXX should handle in more principled/general way
+                    slots.get(inputs[0].usize()).unwrap().clone()
+                } else {
+                    if let Some(ty) = validator.get_operand_type(push_count - i - 1).unwrap() {
+                        Slot::Normal(ty)
                     } else {
-                        validator.get_operand_type(push_count - i - 1).flatten()
-                    },
+                        Slot::Polymorphic
+                    }
                 });
                 self.slot_idx_stack.push(SlotUse::new(slots.len() - 1));
                 // XXX: advisory connection to "original" global or local slot for a {global/local}.get?
@@ -902,9 +907,7 @@ impl<'a> ValidModule<'a> {
             ..
         } in &self.globals
         {
-            ret.slots.push(Slot {
-                ty: Some(*content_type),
-            });
+            ret.slots.push(Slot::Normal(*content_type));
             ret.globals.push(SlotUse::new(ret.slots.len() - 1));
         }
 
@@ -941,15 +944,13 @@ impl<'a> ValidModule<'a> {
         };
 
         for param_ty in valid_func.params.iter() {
-            slots.push(Slot {
-                ty: Some(param_ty.inner),
-            });
+            slots.push(Slot::Normal(param_ty.inner));
             ret.params.push(SlotUse::new(slots.len() - 1));
         }
 
         for ty in &valid_func.locals {
             func_validator.define_locals(DUMMY_OFFSET, 1, ty.inner)?;
-            slots.push(Slot { ty: Some(ty.inner) });
+            slots.push(Slot::Normal(ty.inner));
             ret.locals.push(SlotUse::new(slots.len() - 1));
         }
 
@@ -971,6 +972,7 @@ impl<'a> ValidModule<'a> {
             let operator_ty = stack.op(&op.inner.op, func_validator, slots, op.inner.untyped)?;
 
             if op.line_idx == valid_func.lines.1 && op.inner.info != OpInfo::FuncEnd {
+                // don't give type to synthetic else or end at end of function
                 debug_assert!(
                     (op.inner.op == Operator::End)
                         || (op.inner.op == Operator::Else
@@ -980,7 +982,13 @@ impl<'a> ValidModule<'a> {
                 ret.ops.push(OperatorType {
                     inputs: vec![],
                     outputs: vec![],
-                }); // don't give type to synthetic else or end
+                });
+            } else if op.inner.info == OpInfo::SyntheticElse {
+                // don't give outputs to a synthetic else (inputs okay since the end has the same ones)
+                ret.ops.push(OperatorType {
+                    outputs: vec![],
+                    ..operator_ty
+                });
             } else {
                 ret.ops.push(operator_ty);
             }
@@ -1108,7 +1116,7 @@ impl<'a> ValidModule<'a> {
                 for OperatorType { outputs, .. } in &func.ops {
                     let results = outputs
                         .iter()
-                        .filter_map(|idx| types.slots[idx.usize()].ty)
+                        .filter_map(|idx| types.slots[idx.usize()].ty())
                         .collect::<Vec<_>>();
                     if !results.is_empty() && !result_types_to_func_idx.contains_key(&results) {
                         // Make function-section entry for new "transparent" instrumentation function
@@ -1314,17 +1322,20 @@ impl<'a> ValidModule<'a> {
 
         let transparent_record_results =
             |f: &mut wasm_encoder::Function, results: &Vec<SlotUse>| {
-                if results.is_empty() || results.iter().any(|x| types.slots[x.usize()].ty.is_none())
+                if results.is_empty()
+                    || results
+                        .iter()
+                        .any(|x| types.slots[x.usize()].ty().is_none())
                 {
                     return;
                 }
                 for slot_use in results {
-                    f.instruction(&I32Const(slot_use.i32()));
+                    f.instruction(&I32Const(slot_use.0.try_into().unwrap()));
                 }
                 f.instruction(&Call(
                     info.result_types_to_func_idx[&results
                         .iter()
-                        .filter_map(|slot_idx| types.slots[slot_idx.usize()].ty)
+                        .filter_map(|slot_idx| types.slots[slot_idx.usize()].ty())
                         .collect::<Vec<_>>()],
                 ));
             };
@@ -1332,7 +1343,7 @@ impl<'a> ValidModule<'a> {
         let primitive_record = |f: &mut wasm_encoder::Function, operand: &SlotUse| {
             use InstrImports::*;
             use ValType::*;
-            let rec_function = match types.slots[operand.usize()].ty {
+            let rec_function = match types.slots[operand.usize()].ty() {
                 Some(I32) => RecordI32,
                 Some(F32) => RecordF32,
                 Some(I64) => RecordI64,
@@ -1340,7 +1351,7 @@ impl<'a> ValidModule<'a> {
                 None => return Ok(()), /* don't try to record unknown types in unreachable code */
                 _ => bail!("unhandled ValType for primitive_record"),
             };
-            f.instruction(&I32Const(operand.u32().try_into().unwrap()));
+            f.instruction(&I32Const(operand.0.try_into().unwrap()));
             f.instruction(&Call(rec_function as u32));
             Ok(())
         };
@@ -1612,51 +1623,41 @@ fn bounds_check_info(op: &Operator<'_>) -> Option<(u32, u64, i32, Option<Encoder
 
 // Slot represents anywhere that a value can go, e.g. a global, local, or stack operand.
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub struct Slot {
-    pub ty: Option<ValType>,
+pub enum Slot {
+    Normal(ValType),
+    Polymorphic, // valid input to unreachable instruction
+    Unknown,
+}
+
+impl Slot {
+    pub fn ty(&self) -> Option<ValType> {
+        if let Slot::Normal(ty) = self {
+            Some(*ty)
+        } else {
+            None
+        }
+    }
 }
 
 // A SlotUse represents any input from, or output to, a slot (identified by its global index).
-// We use a somewhat fancy representation so that Option<SlotUse> (representing the unknown
-// params to an untyped operator, or a valid operator after unreachable) can fit in 4 bytes.
-#[derive(PartialEq, Eq, Copy, Clone, Hash)]
-pub struct SlotUse(NonZeroU32);
+#[derive(PartialEq, Eq, Copy, Clone, Hash, Debug)]
+pub struct SlotUse(u32);
 
 impl SlotUse {
     pub fn new(idx: usize) -> Self {
-        let idx_as_u32: u32 = idx.try_into().unwrap();
-        let inner = NonZeroU32::new(!idx_as_u32).unwrap();
-        Self(inner)
-    }
-
-    pub fn u32(&self) -> u32 {
-        !self.0.get()
+        Self(idx.try_into().unwrap())
     }
 
     pub fn usize(&self) -> usize {
-        self.u32().try_into().unwrap()
-    }
-
-    pub fn i32(&self) -> i32 {
-        self.u32().try_into().unwrap()
-    }
-}
-
-impl Debug for SlotUse {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "SlotUse({})", self.u32())
+        self.0.try_into().unwrap()
     }
 }
 
 #[test]
 fn assert_slot_use_small() {
-    assert_eq!(core::mem::size_of::<Option<SlotUse>>(), 4);
+    assert_eq!(core::mem::size_of::<Slot>(), 8);
+    assert_eq!(core::mem::size_of::<SlotUse>(), 4);
 }
-
-// An Expression represents a collection of Slots that are initiatialized on entry and restored on exit.
-// E.g. local Slots live in an Expression for the function's entire body, and stack operands
-// live in an Expression that might be smaller than the function's body.
-// pub struct Expression(Vec<usize>);
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct OperatorType {
@@ -2147,15 +2148,15 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
 
                 /* handle synthetic ends-of-frames */
                 for _ in 0..ends_before {
-                    let frame_indent = match frame_stack.last() {
-                        Some(OpenFrame { indent, .. }) => *indent,
-                        None => 0,
+                    let next_indent = match frame_stack.last() {
+                        Some(OpenFrame { indent, .. }) => *indent + BLOCK_BOUNDARY_INDENT,
+                        None => 1,
                     };
 
                     frame_stack.push(OpenFrame {
                         end: line_no,
                         synthetic: true,
-                        indent: frame_indent + 1,
+                        indent: next_indent,
                         slots: vec![],
                     });
 
@@ -2213,50 +2214,78 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
     }
 }
 
+#[must_use]
+#[derive(Default, PartialEq, Debug)]
+pub struct AnimationRequest(pub bool);
+
 const ANIMATION_DURATION: f64 = 200.0; // milliseconds
+
+pub struct OngoingTween {
+    origin: f64,
+    target: f64,
+    start_time: f64,
+    last_time: f64,
+}
+
+impl OngoingTween {
+    fn value(&self) -> f64 {
+        let t = self.last_time - self.start_time;
+        let tw = 1.0 + f64::powf(t - ANIMATION_DURATION, 3.0) / f64::powf(ANIMATION_DURATION, 3.0);
+        (1.0 - tw) * self.origin + tw * self.target
+    }
+}
 
 #[derive(Default)]
 pub enum Tween {
     #[default]
     Pre,
-    Armed(f64, f64),             // origin, target
-    Ongoing(f64, f64, f64, f64), // origin, target, start_time, current_value
-    Post(f64),                   // target
+    Armed(f64, f64), // origin, target
+    Ongoing(OngoingTween),
+    Post(f64), // target
 }
 
 impl Tween {
-    pub fn prepare(origin: f64, target: f64) -> Self {
-        Tween::Armed(origin, target)
-    }
-
-    pub fn snap(target: f64) -> Self {
-        Tween::Post(target)
-    }
-
-    pub fn animate(&mut self, t: f64) {
-        fn tweener(trel: f64) -> (f64, f64) {
-            let target_weight = 1.0
-                + f64::powf(trel - ANIMATION_DURATION, 3.0) / f64::powf(ANIMATION_DURATION, 3.0);
-            (1.0 - target_weight, target_weight)
-        }
-
+    pub fn approach(&mut self, new_target: f64) {
         use Tween::*;
 
         *self = match self {
+            Pre => Post(new_target),
+            Armed(origin, _old_target) => Armed(*origin, new_target),
+            Ongoing(tween) => Ongoing(OngoingTween {
+                origin: tween.value(),
+                target: new_target,
+                start_time: tween.last_time,
+                last_time: tween.last_time,
+            }),
+            Post(current) => Armed(*current, new_target),
+        }
+    }
+
+    pub fn snap(&mut self, new_target: f64) {
+        *self = Tween::Post(new_target);
+    }
+
+    pub fn animate(&mut self, t: f64) {
+        use Tween::*;
+
+        *self = match *self {
             Pre => panic!("animation not yet begun"),
-            Armed(origin, target) => Ongoing(*origin, *target, t, *origin),
-            Ongoing(_, target, start_t, _) if t >= *start_t + ANIMATION_DURATION => Post(*target),
-            Ongoing(origin, target, start_time, _) => {
-                debug_assert!(t >= *start_time);
-                let (origin_weight, target_weight) = tweener(t - *start_time);
-                Ongoing(
-                    *origin,
-                    *target,
-                    *start_time,
-                    origin_weight * *origin + target_weight * *target,
-                )
+            Armed(origin, target) => Ongoing(OngoingTween {
+                origin,
+                target,
+                start_time: t,
+                last_time: t,
+            }),
+            Ongoing(ref tween) if t >= tween.start_time + ANIMATION_DURATION => Post(tween.target),
+            Ongoing(ref tween) => {
+                debug_assert!(t >= tween.start_time);
+                debug_assert!(t >= tween.last_time);
+                Ongoing(OngoingTween {
+                    last_time: t,
+                    ..*tween
+                })
             }
-            Post(_) => panic!("animation already finished"),
+            Post(x) => Post(x),
         }
     }
 
@@ -2265,13 +2294,23 @@ impl Tween {
         match self {
             Pre => None,
             Armed(origin, _) => Some(*origin),
-            Ongoing(_, _, _, current_value) => Some(*current_value),
+            Ongoing(tween) => Some(tween.value()),
             Post(target) => Some(*target),
         }
     }
 
-    pub fn is_pending(&self) -> bool {
-        matches!(self, Tween::Armed(..) | Tween::Ongoing(..))
+    pub fn target(&self) -> Option<f64> {
+        use Tween::*;
+        match self {
+            Pre => None,
+            Armed(_, target) => Some(*target),
+            Ongoing(tween) => Some(tween.target),
+            Post(target) => Some(*target),
+        }
+    }
+
+    pub fn is_pending(&self) -> AnimationRequest {
+        AnimationRequest(matches!(self, Tween::Armed(..) | Tween::Ongoing(..)))
     }
 }
 
@@ -2346,7 +2385,7 @@ pub(crate) mod tests {
         }
 
         fn os(ty: ValType) -> Slot {
-            Slot { ty: Some(ty) }
+            Slot::Normal(ty)
         }
 
         fn force_valid(raw: RawModule<'_>) -> ValidModule<'_> {
