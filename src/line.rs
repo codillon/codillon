@@ -633,6 +633,10 @@ impl CodeLine {
         })
     }
 
+    pub fn animated_indent(&self) -> Option<f64> {
+        self.animation_state.indent.value()
+    }
+
     // Returns whether future animation is desired
     pub fn set_indent(&mut self, val: u16) -> AnimationRequest {
         if let Some(cur_indent) = self.info.indent

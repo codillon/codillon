@@ -189,7 +189,13 @@ impl FrameInfosMut for Editor {
     }
 
     fn set_frames(&mut self, frames: HashMap<u32, FrameInfo>) {
-        self.image_mut().set_frames(frames);
+        let animated_indents = self
+            .animations
+            .lines
+            .iter()
+            .map(|idx| (*idx, self.line(*idx).animated_indent().unwrap()))
+            .collect();
+        self.image_mut().set_frames(frames, animated_indents);
     }
 }
 
@@ -854,6 +860,20 @@ impl Editor {
                 .animate(t)
                 .0
         });
+        let animated_indents: HashMap<usize, f64> = self
+            .animations
+            .lines
+            .iter()
+            .map(|idx| {
+                (
+                    *idx,
+                    get!(self.component, textbox).inner()[*idx]
+                        .animated_indent()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        self.image_mut().animate_frames(animated_indents);
         self.schedule_animation_if_needed();
     }
 

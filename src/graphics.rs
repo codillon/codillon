@@ -17,7 +17,6 @@ use crate::{
         SlotInfo, Tween,
     },
 };
-use anyhow::Result;
 use delegate::delegate;
 use palette::{Mix, Srgb};
 use std::{
@@ -71,43 +70,20 @@ impl SymbolUse {
         self.0.set_attr_num("y", y);
     }
 }
-// Store the FrameInfo alongside each line so that it can skip updates if there is no change.
 struct FrameLine {
     info: Option<FrameInfo>,
+    animated_indent: Option<f64>,
     elem: DomLine,
 }
 
-const X_OFFSET_PX: usize = 101 + 4 * INDENT_PX;
+const BASE_X_OFFSET_PX: usize = 101;
+const X_OFFSET_PX: usize = BASE_X_OFFSET_PX + 4 * INDENT_PX;
 const LINE_OFFSET_PX: usize = 8;
 const WIDTH: usize = 2;
 const MARGIN: usize = 8;
 
-struct FrameLimits {
-    x_left: usize,
-    x_right: usize,
-    y_top: usize,
-    y_bot: usize,
-}
-
 pub fn indent_px(indent: u16) -> usize {
     (indent as usize) * INDENT_PX
-}
-
-impl FrameLimits {
-    fn new(info: &FrameInfo) -> Self {
-        let x_offset = if info.indent > 0 {
-            X_OFFSET_PX
-        } else {
-            X_OFFSET_PX - indent_px(BLOCK_BOUNDARY_INDENT)
-        };
-        let top_offset = if info.wide { 0 } else { LINE_SPACING / 2 };
-        Self {
-            x_left: x_offset + indent_px(info.indent),
-            x_right: x_offset + indent_px(info.indent + BLOCK_BOUNDARY_INDENT) - MARGIN,
-            y_top: info.start * LINE_SPACING + top_offset + LINE_OFFSET_PX,
-            y_bot: info.end * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX,
-        }
-    }
 }
 
 impl FrameLine {
@@ -122,6 +98,7 @@ impl FrameLine {
     fn new(factory: &ElementFactory) -> Self {
         let mut ret = Self {
             info: None,
+            animated_indent: None,
             elem: DomStruct::new(
                 (factory.svg_path(), (SymbolUse::new_symbol(factory), ())),
                 factory.svg_g(),
@@ -130,30 +107,62 @@ impl FrameLine {
 
         ret.line()
             .set_attribute("stroke-width", &format!("{WIDTH}px"));
-
         ret.line().set_attribute("fill", "none");
 
         ret
     }
 
     // Make the DOM SVG element reflect the new Wasm FrameInfo that it represents.
-    // Store the "info" in the FrameLine so that we can short-circuit future updates if there is no change.
-    fn update(&mut self, info: FrameInfo) -> Result<()> {
-        let FrameLimits {
-            x_left,
-            x_right,
-            y_top,
-            y_bot,
-        } = FrameLimits::new(&info);
-
+    fn update(&mut self, info: FrameInfo, animated_indent: Option<f64>) {
         if let Some(current_info) = &self.info
-            && info == *current_info
+            && *current_info == info
+            && self.animated_indent == animated_indent
         {
-            return Ok(());
+            return;
         }
 
+        self.info = Some(info);
+        self.animated_indent = animated_indent;
+
+        self.draw();
+    }
+
+    fn draw(&mut self) {
+        let Self {
+            info: Some(info),
+            animated_indent,
+            elem,
+        } = self
+        else {
+            panic!();
+        };
+        let x_offset = if info.indent > 0 {
+            X_OFFSET_PX
+        } else {
+            X_OFFSET_PX - indent_px(BLOCK_BOUNDARY_INDENT)
+        } as f32;
+        let top_offset = if info.wide { 0 } else { LINE_SPACING / 2 };
+        let x_left = x_offset + indent_px(info.indent) as f32;
+        let y_top = (info.start * LINE_SPACING + top_offset + LINE_OFFSET_PX) as f32;
+        let y_bot = (info.end * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX) as f32;
+        let x_max = x_offset + (indent_px(info.indent + BLOCK_BOUNDARY_INDENT) - MARGIN) as f32;
+        let total_dist = x_max - x_left;
+
+        let x_right = if let Some(actual_indent) = animated_indent
+            && total_dist > 0.0
+            && info.indent > 0
+        {
+            let line_max = *actual_indent as f32 + BASE_X_OFFSET_PX as f32;
+            let distance_to_end = x_max - line_max;
+            let weight = (distance_to_end / total_dist).clamp(0.0, 1.0);
+            let weight = weight * weight;
+            line_max - (MARGIN as f32) * (1.0 - weight)
+        } else {
+            x_max
+        };
+
         let width = x_right - x_left;
-        let height = (y_bot - y_top) as f32;
+        let height = y_bot - y_top;
         let hheight = if info.unclosed {
             0.5 * height - 0.29 * LINE_SPACING as f32
         } else {
@@ -166,23 +175,16 @@ impl FrameLine {
 
         if info.unclosed {
             let w3 = 0.5 * BACKUP;
-            self.line().set_attribute("d", &format!("M {x_right},{y_top} h -{width} c -{BACKUP},0 -{BACKUP},{dist1} -{BACKUP},{hheight} c 0,{dist2} 0,{hheight} {w3},{hheight} h 0"));
+            elem.get_mut().0.set_attribute("d", &format!("M {x_right},{y_top} h -{width} c -{BACKUP},0 -{BACKUP},{dist1} -{BACKUP},{hheight} c 0,{dist2} 0,{hheight} {w3},{hheight} h 0"));
         } else {
-            self.line().set_attribute("d", &format!("M {x_right},{y_top} h -{width} c -{BACKUP},0 -{BACKUP},{dist1} -{BACKUP},{hheight} c 0,{dist2} 0,{hheight} {BACKUP},{hheight} h {width}"));
+            elem.get_mut().0.set_attribute("d", &format!("M {x_right},{y_top} h -{width} c -{BACKUP},0 -{BACKUP},{dist1} -{BACKUP},{hheight} c 0,{dist2} 0,{hheight} {BACKUP},{hheight} h {width}"));
         }
 
-        self.symbol().goto(
-            x_left as f32 - 0.5 * BACKUP,
-            y_bot as f32 - 0.55 * LINE_SPACING as f32,
-        );
+        elem.get_mut()
+            .1
+            .0
+            .goto(x_left - 0.5 * BACKUP, y_bot - 0.55 * LINE_SPACING as f32);
 
-        self.set_color(&info);
-        self.info = Some(info);
-
-        Ok(())
-    }
-
-    fn set_color(&mut self, info: &FrameInfo) {
         if info.unclosed {
             self.line().set_attribute("stroke", "darkred");
             return;
@@ -203,6 +205,13 @@ impl FrameLine {
             }
             InstrKind::Other | InstrKind::End => panic!("unexpected frame kind"),
         }
+    }
+
+    pub fn animate(&mut self, animated_indent: Option<f64>) {
+        if animated_indent != self.animated_indent {
+            self.animated_indent = animated_indent;
+        }
+        self.draw();
     }
 
     fn set_visibility(&mut self, visible: bool, unclosed: bool) {
@@ -796,7 +805,11 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    pub fn set_frames(&mut self, frames: HashMap<u32, FrameInfo>) {
+    pub fn set_frames(
+        &mut self,
+        frames: HashMap<u32, FrameInfo>,
+        animated_indents: HashMap<usize, f64>,
+    ) {
         /* delete frames that no longer exist */
         {
             let mut to_vanish = vec![];
@@ -821,9 +834,22 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
 
             let bl = &mut get_mut!(self.contents, blocks)[id];
             let unclosed = info.unclosed;
-            bl.update(info).unwrap();
+            let animated_indent = animated_indents.get(&info.start).copied();
+            bl.update(info, animated_indent);
             bl.set_visibility(true, unclosed);
         }
+    }
+
+    pub fn animate_frames(&mut self, animated_indents: HashMap<usize, f64>) {
+        get_mut!(self.contents, blocks).for_each_mut(|_, bl| {
+            if let Some(info) = &bl.info
+                && let Some(animated_indent) = animated_indents.get(&info.start)
+            {
+                bl.animate(Some(*animated_indent));
+            } else {
+                bl.animate(None);
+            }
+        });
     }
 
     pub fn set_types(&mut self, types: HashMap<u32, FractionInfo>, _smooth: bool) {

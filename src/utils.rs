@@ -1910,12 +1910,13 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                  lines, positions, ..
              }| {
                 (
-                    positions.0,
+                    2 * positions.0 + 1, // identify function frames with odd numbers
                     FrameInfo {
                         indent: 0,
                         start: lines.0,
                         end: lines.1,
-                        unclosed: false,
+                        unclosed: code.info(lines.1).synthetic_before.module_field_syntax
+                            == vec![FuncPart::RParen],
                         kind: InstrKind::OtherStructured,
                         wide: !code
                             .info(lines.0)
@@ -2060,7 +2061,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                         ));
                         let f = frame_stack.pop().expect("malformed frame stack");
                         frames.insert(
-                            typed_op.0.position_id,
+                            2 * typed_op.0.position_id,
                             FrameInfo {
                                 indent: f.indent,
                                 start: line_no,
