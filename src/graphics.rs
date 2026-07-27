@@ -20,14 +20,15 @@ use crate::{
 use delegate::delegate;
 use palette::{Mix, Srgb};
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     str::FromStr,
 };
 use thousands::Separable;
 use wasmparser::ValType;
 use web_sys::{
-    SvgDefsElement, SvgElement, SvgLinearGradientElement, SvgPathElement, SvgStopElement,
-    SvgTextElement, SvgUseElement, SvggElement, console::log_1,
+    SvgDefsElement, SvgElement, SvgLinearGradientElement, SvgMaskElement, SvgPathElement,
+    SvgStopElement, SvgTextElement, SvgUseElement, SvggElement, console::log_1,
 };
 
 const SYM_HW: f32 = 15.0;
@@ -43,37 +44,71 @@ pub struct FractionInfo {
 type DomLine = DomStruct<
     (
         ElementHandle<SvgPathElement>,
-        (SymbolUse, ()), // an optional symbol for "unclosed" frames
+        (
+            DomStruct<(ElementHandle<SvgPathElement>, ()), SvgMaskElement>,
+            (SymbolUse, ()),
+        ), // an optional symbol for "unclosed" frames
     ),
     SvggElement,
 >;
 
-struct SymbolUse(ElementHandle<SvgUseElement>);
-delegate_element_component!(SymbolUse, 0, SvgUseElement);
+struct SymbolUse {
+    elem: ElementHandle<SvgUseElement>,
+    opacity: Tween,
+}
+delegate_element_component!(SymbolUse, elem, SvgUseElement);
 
 impl SymbolUse {
     fn new_symbol(factory: &ElementFactory) -> Self {
-        let mut ret = Self(factory.svg_use());
+        let mut ret = Self {
+            elem: factory.svg_use(),
+            opacity: Tween::Post(0.0),
+        };
 
-        ret.0.set_attribute("href", "#unclosed");
-        ret.0.set_attribute("opacity", "0");
+        ret.elem.set_attribute("href", "#unclosed");
+        ret.elem
+            .set_attr_num("opacity", ret.opacity.value().unwrap());
 
         ret
     }
 
-    fn set_visibility(&mut self, visible: bool) {
-        self.0.set_attr_num("opacity", visible as usize);
+    fn set_visibility(&mut self, smooth: bool, visible: bool) -> AnimationRequest {
+        if smooth {
+            self.opacity.approach(visible as usize as f64);
+        } else {
+            self.opacity.snap(visible as usize as f64);
+            self.elem
+                .set_attr_num("opacity", self.opacity.value().unwrap());
+        }
+        self.has_pending_animation()
     }
 
-    fn goto(&mut self, x: f32, y: f32) {
-        self.0.set_attr_num("x", x);
-        self.0.set_attr_num("y", y);
+    fn has_pending_animation(&self) -> AnimationRequest {
+        self.opacity.is_pending()
+    }
+
+    fn animate(&mut self, t: f64) {
+        self.opacity.animate(t);
+        self.elem
+            .set_attr_num("opacity", self.opacity.value().unwrap());
+    }
+
+    fn snap_to(&mut self, x: f64, y: f64) {
+        self.elem.set_attr_num("x", x);
+        self.elem.set_attr_num("y", y);
     }
 }
 struct FrameLine {
     info: Option<FrameInfo>,
     animated_indent: Option<f64>,
     elem: DomLine,
+    reveal: Tween,
+
+    x_left: Tween,
+    y_top: Tween,
+    bwidth_factor: Tween,
+    hheight: Tween,
+    w3: Tween,
 }
 
 const BASE_X_OFFSET_PX: usize = 101;
@@ -86,13 +121,29 @@ pub fn indent_px(indent: u16) -> usize {
     (indent as usize) * INDENT_PX
 }
 
+thread_local! {
+    static NEXT_FRAME_ID: Cell<u32> = Default::default();
+}
+
 impl FrameLine {
     fn line(&mut self) -> &mut ElementHandle<SvgPathElement> {
         &mut self.elem.get_mut().0
     }
 
-    fn symbol(&mut self) -> &mut SymbolUse {
+    fn mask(&mut self) -> &mut DomStruct<(ElementHandle<SvgPathElement>, ()), SvgMaskElement> {
         &mut self.elem.get_mut().1.0
+    }
+
+    fn mask_path(&mut self) -> &mut ElementHandle<SvgPathElement> {
+        &mut self.elem.get_mut().1.0.get_mut().0
+    }
+
+    fn symbol(&self) -> &SymbolUse {
+        &self.elem.get().1.1.0
+    }
+
+    fn symbol_mut(&mut self) -> &mut SymbolUse {
+        &mut self.elem.get_mut().1.1.0
     }
 
     fn new(factory: &ElementFactory) -> Self {
@@ -100,123 +151,248 @@ impl FrameLine {
             info: None,
             animated_indent: None,
             elem: DomStruct::new(
-                (factory.svg_path(), (SymbolUse::new_symbol(factory), ())),
+                (
+                    factory.svg_path(),
+                    (
+                        DomStruct::new((factory.svg_path(), ()), factory.svg_mask()),
+                        (SymbolUse::new_symbol(factory), ()),
+                    ),
+                ),
                 factory.svg_g(),
             ),
+            reveal: Tween::Pre,
+            x_left: Tween::Pre,
+            y_top: Tween::Pre,
+            bwidth_factor: Tween::Pre,
+            hheight: Tween::Pre,
+            w3: Tween::Pre,
         };
+
+        let id = NEXT_FRAME_ID.get();
+        NEXT_FRAME_ID.replace(id + 1);
+
+        ret.line()
+            .set_attribute("mask", &format!("url(#mask-{id})"));
+        ret.mask().set_attribute("id", &format!("mask-{id}"));
 
         ret.line()
             .set_attribute("stroke-width", &format!("{WIDTH}px"));
         ret.line().set_attribute("fill", "none");
+        ret.mask_path()
+            .set_attribute("stroke-width", &format!("{WIDTH}px"));
+        ret.mask_path().set_attribute("stroke", "white");
+        ret.mask_path().set_attribute("fill", "none");
+        ret.mask_path().set_attr_num("pathLength", 1);
 
         ret
     }
 
+    fn hide(&mut self, mut smooth: bool) -> AnimationRequest {
+        if let Some(FrameInfo { indent: 0, .. }) = &self.info {
+            smooth = false;
+        }
+        self.reveal.goto(smooth, -1.0)
+    }
+
+    fn natural_origin(info: &FrameInfo) -> f64 {
+        if info.kind == InstrKind::Else {
+            -1.0
+        } else {
+            1.0
+        }
+    }
+
+    const BACKUP: f64 = 30.0; // controls arm of frame vertical
+
     // Make the DOM SVG element reflect the new Wasm FrameInfo that it represents.
-    fn update(&mut self, info: FrameInfo, animated_indent: Option<f64>) {
+    fn update(
+        &mut self,
+        info: FrameInfo,
+        animated_indent: Option<f64>,
+        mut smooth: bool,
+    ) -> AnimationRequest {
+        // force snap transition on functions?
+        if info.indent == 0 {
+            smooth = false;
+        }
+
+        if self.reveal.value().is_none() {
+            self.reveal.snap(Self::natural_origin(&info));
+        }
+        let mut ret = self.reveal.goto(smooth, 0.0);
+
         if let Some(current_info) = &self.info
             && *current_info == info
             && self.animated_indent == animated_indent
         {
-            return;
+            return self.reveal.is_pending();
+        }
+
+        let x_offset = if info.indent > 0 {
+            X_OFFSET_PX
+        } else {
+            X_OFFSET_PX - indent_px(BLOCK_BOUNDARY_INDENT)
+        } as f64;
+        let top_offset = if info.wide { 0 } else { LINE_SPACING / 2 };
+        let x_left = x_offset + indent_px(info.indent) as f64;
+        let y_top = (info.start * LINE_SPACING + top_offset + LINE_OFFSET_PX) as f64;
+        let y_bot = (info.end * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX) as f64;
+
+        let height = y_bot - y_top;
+        let hheight = if info.unclosed {
+            0.5 * height - 0.29 * LINE_SPACING as f64
+        } else {
+            0.5 * height
+        };
+        let bwidth_factor = if info.unclosed { 0.0 } else { 1.0 };
+
+        ret.or(self.x_left.goto(smooth, x_left));
+        ret.or(self.y_top.goto(smooth, y_top));
+        ret.or(self.bwidth_factor.goto(smooth, bwidth_factor));
+        ret.or(self.hheight.goto(smooth, hheight));
+        ret.or(self.w3.goto(
+            smooth,
+            if info.unclosed {
+                0.5 * Self::BACKUP
+            } else {
+                Self::BACKUP
+            },
+        ));
+
+        ret.or(self.symbol_mut().set_visibility(smooth, info.unclosed));
+
+        if info.unclosed {
+            self.line().set_attribute("stroke", "darkred");
+        } else {
+            match info.kind {
+                InstrKind::OtherStructured => {
+                    self.line().set_attribute("stroke", "darkgray");
+                }
+                InstrKind::If => {
+                    self.line().set_attribute("stroke", "green");
+                }
+                InstrKind::Else => {
+                    self.line().set_attribute("stroke", "purple");
+                }
+                InstrKind::Loop => {
+                    self.line().set_attribute("stroke", "pink");
+                }
+                InstrKind::Other | InstrKind::End => panic!("unexpected frame kind"),
+            };
         }
 
         self.info = Some(info);
         self.animated_indent = animated_indent;
 
-        self.draw();
+        ret.or(self.draw());
+
+        ret
     }
 
-    fn draw(&mut self) {
+    fn draw(&mut self) -> AnimationRequest {
         let Self {
             info: Some(info),
             animated_indent,
             elem,
+            reveal,
+            x_left,
+            y_top,
+            bwidth_factor,
+            hheight,
+            w3,
         } = self
         else {
             panic!();
         };
+
+        let (reveal, x_left, y_top, bwidth_factor, hheight, w3) = (
+            reveal.value().unwrap(),
+            x_left.value().unwrap(),
+            y_top.value().unwrap(),
+            bwidth_factor.value().unwrap(),
+            hheight.value().unwrap(),
+            w3.value().unwrap(),
+        );
+
         let x_offset = if info.indent > 0 {
             X_OFFSET_PX
         } else {
             X_OFFSET_PX - indent_px(BLOCK_BOUNDARY_INDENT)
-        } as f32;
-        let top_offset = if info.wide { 0 } else { LINE_SPACING / 2 };
-        let x_left = x_offset + indent_px(info.indent) as f32;
-        let y_top = (info.start * LINE_SPACING + top_offset + LINE_OFFSET_PX) as f32;
-        let y_bot = (info.end * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX) as f32;
-        let x_max = x_offset + (indent_px(info.indent + BLOCK_BOUNDARY_INDENT) - MARGIN) as f32;
+        } as f64;
+
+        let x_max = x_offset + (indent_px(info.indent + BLOCK_BOUNDARY_INDENT) - MARGIN) as f64;
         let total_dist = x_max - x_left;
 
         let x_right = if let Some(actual_indent) = animated_indent
             && total_dist > 0.0
             && info.indent > 0
         {
-            let line_max = *actual_indent as f32 + BASE_X_OFFSET_PX as f32;
+            let line_max = *actual_indent + BASE_X_OFFSET_PX as f64;
             let distance_to_end = x_max - line_max;
             let weight = (distance_to_end / total_dist).clamp(0.0, 1.0);
             let weight = weight * weight;
-            line_max - (MARGIN as f32) * (1.0 - weight)
+            line_max - (MARGIN as f64) * (1.0 - weight)
         } else {
             x_max
         };
 
         let width = x_right - x_left;
-        let height = y_bot - y_top;
-        let hheight = if info.unclosed {
-            0.5 * height - 0.29 * LINE_SPACING as f32
-        } else {
-            0.5 * height
-        };
-        const BACKUP: f32 = 30.0;
-
-        let dist1 = (hheight * 0.95).min(LINE_SPACING as f32 * 0.5 * 0.95);
+        let bwidth = bwidth_factor * width;
+        let dist1 = (hheight * 0.95).min(LINE_SPACING as f64 * 0.5 * 0.95);
         let dist2 = hheight - dist1;
 
-        if info.unclosed {
-            let w3 = 0.5 * BACKUP;
-            elem.get_mut().0.set_attribute("d", &format!("M {x_right},{y_top} h -{width} c -{BACKUP},0 -{BACKUP},{dist1} -{BACKUP},{hheight} c 0,{dist2} 0,{hheight} {w3},{hheight} h 0"));
-        } else {
-            elem.get_mut().0.set_attribute("d", &format!("M {x_right},{y_top} h -{width} c -{BACKUP},0 -{BACKUP},{dist1} -{BACKUP},{hheight} c 0,{dist2} 0,{hheight} {BACKUP},{hheight} h {width}"));
+        let backup = Self::BACKUP;
+
+        let d = &format!(
+            "M {x_right},{y_top} h -{width} c -{backup},0 -{backup},{dist1} -{backup},{hheight} c 0,{dist2} 0,{hheight} {w3},{hheight} h {bwidth}"
+        );
+        elem.get_mut().0.set_attribute("d", d);
+
+        // progressive reveal
+        {
+            let mask_path = &mut elem.get_mut().1.0.get_mut().0;
+            mask_path.set_attribute("d", d);
+            if reveal >= 0.0 {
+                mask_path
+                    .set_attribute("stroke-dasharray", &format!("{} {}", 1.0 - reveal, reveal));
+                mask_path.set_attr_num("opacity", 1);
+            } else {
+                mask_path.set_attribute(
+                    "stroke-dasharray",
+                    &format!("0 {} {}", -reveal, 1.0 + reveal),
+                );
+                mask_path.set_attr_num("opacity", 1.0 + reveal);
+            }
         }
 
-        elem.get_mut()
-            .1
-            .0
-            .goto(x_left - 0.5 * BACKUP, y_bot - 0.55 * LINE_SPACING as f32);
+        self.symbol_mut().snap_to(
+            x_right - width - backup + w3 + bwidth,
+            y_top + 2.0 * hheight,
+        );
 
-        if info.unclosed {
-            self.line().set_attribute("stroke", "darkred");
-            return;
-        }
-
-        match info.kind {
-            InstrKind::OtherStructured => {
-                self.line().set_attribute("stroke", "darkgray");
-            }
-            InstrKind::If => {
-                self.line().set_attribute("stroke", "green");
-            }
-            InstrKind::Else => {
-                self.line().set_attribute("stroke", "purple");
-            }
-            InstrKind::Loop => {
-                self.line().set_attribute("stroke", "pink");
-            }
-            InstrKind::Other | InstrKind::End => panic!("unexpected frame kind"),
-        }
+        self.has_pending_animation()
     }
 
-    pub fn animate(&mut self, animated_indent: Option<f64>) {
+    fn has_pending_animation(&self) -> AnimationRequest {
+        AnimationRequest(
+            self.reveal.is_pending().0
+                || self.x_left.is_pending().0
+                || self.symbol().has_pending_animation().0,
+        )
+    }
+
+    pub fn animate(&mut self, t: f64, animated_indent: Option<f64>) -> AnimationRequest {
         if animated_indent != self.animated_indent {
             self.animated_indent = animated_indent;
         }
-        self.draw();
-    }
-
-    fn set_visibility(&mut self, visible: bool, unclosed: bool) {
-        self.line().set_attr_num("opacity", visible as usize);
-        self.symbol().set_visibility(unclosed);
+        self.symbol_mut().animate(t);
+        self.reveal.animate(t);
+        self.x_left.animate(t);
+        self.y_top.animate(t);
+        self.bwidth_factor.animate(t);
+        self.hheight.animate(t);
+        self.w3.animate(t);
+        self.draw()
     }
 }
 
@@ -337,12 +513,25 @@ struct RenderedConnection {
 
 delegate_element_component!(RenderedConnection, path, SvgPathElement);
 
+#[derive(Default)]
+struct PendingAnimations {
+    frames: HashSet<u32>,
+}
+
+impl PendingAnimations {
+    fn has_pending(&self) -> bool {
+        !self.frames.is_empty()
+    }
+}
+
 pub struct DomImage {
     contents: CodillonSVG,
     height: usize,
     width: u16,
     factory: ElementFactory,
     connection_dst2src: HashMap<Coordinate /* dst */, Coordinate /* src */>,
+    animations: PendingAnimations,
+    last_line_count: usize,
 }
 
 impl WithElement for DomImage {
@@ -532,6 +721,8 @@ impl DomImage {
             width: 0,
             factory: factory.clone(),
             connection_dst2src: Default::default(),
+            animations: Default::default(),
+            last_line_count: Default::default(),
         };
 
         // The "unclosed" symbol looks like a ⊘ (Circled Division Slash)
@@ -809,16 +1000,27 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         &mut self,
         frames: HashMap<u32, FrameInfo>,
         animated_indents: HashMap<usize, f64>,
+        line_count: usize,
     ) {
-        /* delete frames that no longer exist */
+        let smooth = line_count == self.last_line_count;
+        self.last_line_count = line_count;
+
+        /* vanish frames that no longer exist */
+        get_mut!(self.contents, blocks).for_each_mut(|id, block| {
+            if !frames.contains_key(id) && block.hide(smooth).0 {
+                self.animations.frames.insert(*id);
+            }
+        });
+
+        /* delete frames whose vanishing animations have finished */
         {
-            let mut to_vanish = vec![];
-            for id in self.blocks().ids() {
-                if !frames.contains_key(id) {
-                    to_vanish.push(*id);
+            let mut to_delete = vec![];
+            for (id, bl) in self.blocks().iter() {
+                if bl.reveal.value() == Some(-1.0) {
+                    to_delete.push(*id);
                 }
             }
-            for id in to_vanish {
+            for id in to_delete {
                 get_mut!(self.contents, blocks).remove(id, FrameLine::new(&self.factory));
             }
         }
@@ -833,23 +1035,33 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             }
 
             let bl = &mut get_mut!(self.contents, blocks)[id];
-            let unclosed = info.unclosed;
             let animated_indent = animated_indents.get(&info.start).copied();
-            bl.update(info, animated_indent);
-            bl.set_visibility(true, unclosed);
+            if bl.update(info, animated_indent, smooth).0 {
+                self.animations.frames.insert(id);
+            }
         }
     }
 
-    pub fn animate_frames(&mut self, animated_indents: HashMap<usize, f64>) {
-        get_mut!(self.contents, blocks).for_each_mut(|_, bl| {
-            if let Some(info) = &bl.info
+    pub fn animate_frames(&mut self, t: f64, animated_indents: HashMap<usize, f64>) {
+        get_mut!(self.contents, blocks).for_each_mut(|id, bl| {
+            let animation_pending = if let Some(info) = &bl.info
                 && let Some(animated_indent) = animated_indents.get(&info.start)
             {
-                bl.animate(Some(*animated_indent));
+                bl.animate(t, Some(*animated_indent))
             } else {
-                bl.animate(None);
+                bl.animate(t, None) // make sure to finish every animation
+            };
+
+            if animation_pending.0 {
+                self.animations.frames.insert(*id);
+            } else {
+                self.animations.frames.remove(id);
             }
         });
+    }
+
+    pub fn has_pending_animation(&self) -> bool {
+        self.animations.has_pending()
     }
 
     pub fn set_types(&mut self, types: HashMap<u32, FractionInfo>, _smooth: bool) {

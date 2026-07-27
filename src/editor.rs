@@ -195,7 +195,9 @@ impl FrameInfosMut for Editor {
             .iter()
             .map(|idx| (*idx, self.line(*idx).animated_indent().unwrap()))
             .collect();
-        self.image_mut().set_frames(frames, animated_indents);
+        let line_count = self.len();
+        self.image_mut()
+            .set_frames(frames, animated_indents, line_count);
     }
 }
 
@@ -232,6 +234,10 @@ impl Editor {
 
     fn textbox_mut(&mut self) -> &mut ReactiveComponent<TextType> {
         get_mut!(self.component, textbox)
+    }
+
+    fn image(&self) -> &DomImage {
+        get!(self.component, image)
     }
 
     fn image_mut(&mut self) -> &mut DomImage {
@@ -839,7 +845,7 @@ impl Editor {
         if self.animation_pending {
             return;
         }
-        if self.animations.has_pending() {
+        if self.animations.has_pending() || self.image().has_pending_animation() {
             self.window.request_animation_frame(&self.animation_handler);
             self.animation_pending = true;
         }
@@ -873,7 +879,7 @@ impl Editor {
                 )
             })
             .collect();
-        self.image_mut().animate_frames(animated_indents);
+        self.image_mut().animate_frames(t, animated_indents);
         self.schedule_animation_if_needed();
     }
 

@@ -600,6 +600,10 @@ impl ElementFactory {
         ElementHandle::new(self.create_svg_element("path"))
     }
 
+    pub fn svg_mask(&self) -> ElementHandle<web_sys::SvgMaskElement> {
+        ElementHandle::new(self.create_svg_element("mask"))
+    }
+
     pub fn svg_use(&self) -> ElementHandle<web_sys::SvgUseElement> {
         ElementHandle::new(self.create_svg_element("use"))
     }

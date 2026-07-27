@@ -2219,6 +2219,12 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
 #[derive(Default, PartialEq, Debug)]
 pub struct AnimationRequest(pub bool);
 
+impl AnimationRequest {
+    pub fn or(&mut self, other: AnimationRequest) {
+        self.0 |= other.0;
+    }
+}
+
 const ANIMATION_DURATION: f64 = 200.0; // milliseconds
 
 pub struct OngoingTween {
@@ -2246,6 +2252,15 @@ pub enum Tween {
 }
 
 impl Tween {
+    pub fn goto(&mut self, smooth: bool, new_target: f64) -> AnimationRequest {
+        if smooth {
+            self.approach(new_target);
+        } else {
+            self.snap(new_target);
+        }
+        AnimationRequest(true)
+    }
+
     pub fn approach(&mut self, new_target: f64) {
         use Tween::*;
 
