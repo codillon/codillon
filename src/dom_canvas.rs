@@ -1,4 +1,7 @@
-use crate::jet::{AccessToken, Component, ElementHandle, WithElement};
+use crate::{
+    delegate_element_component,
+    jet::{AccessToken, ElementHandle},
+};
 use anyhow::Result;
 use web_sys::{CanvasRenderingContext2d, HtmlCanvasElement};
 
@@ -80,16 +83,4 @@ impl DomCanvas {
     }
 }
 
-impl Component for DomCanvas {
-    #[cfg(debug_assertions)]
-    fn audit(&self) {
-        self.elem.audit();
-    }
-}
-
-impl WithElement for DomCanvas {
-    type Element = HtmlCanvasElement;
-    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
-        self.elem.with_element(f, g)
-    }
-}
+delegate_element_component!(DomCanvas, elem, HtmlCanvasElement);

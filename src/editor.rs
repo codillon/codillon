@@ -21,9 +21,9 @@ use crate::{
         fix_syntax,
     },
     utils::{
-        AnnotatedOperatorType, ConnectionSource, FmtError, OperatorType, RawModule,
-        SlotConnections, SlotInfo, TypedModule, ValidModule, find_connections, indent_and_frame,
-        str_to_binary,
+        AnimationRequest, AnnotatedOperatorType, ConnectionSource, FmtError, OperatorType,
+        RawModule, SlotConnections, SlotInfo, TypedModule, ValidModule, find_connections,
+        indent_and_frame, str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -32,10 +32,10 @@ use regex::Regex;
 use std::{
     cell::{Ref, RefCell, RefMut},
     cmp::min,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     rc::{Rc, Weak},
 };
-use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{closure::Closure, prelude::ScopedClosure};
 use web_sys::{BeforeUnloadEvent, HtmlDivElement, console::log_1};
 
 type TextType = DomVec<CodeLine, HtmlDivElement>;
@@ -91,6 +91,19 @@ const STORAGE_ID: &str = "codillon_content";
 const SCHEDULE_STORE_MS: i32 = 500;
 const RETRY_STORE_MS: i32 = 2000;
 
+#[derive(Default)]
+struct PendingAnimations {
+    live_info: AnimationRequest,
+    arrow: AnimationRequest,
+    lines: HashSet<usize>,
+}
+
+impl PendingAnimations {
+    fn has_pending(&self) -> bool {
+        self.live_info.0 || self.arrow.0 || !self.lines.is_empty()
+    }
+}
+
 struct Editor {
     component: ComponentType,
     factory: ElementFactory,
@@ -107,6 +120,9 @@ struct Editor {
     window: WindowHandle,
     holder: Weak<RefCell<Self>>,
     input_filter: Regex,
+    animation_handler: ScopedClosure<'static, dyn Fn(f64)>,
+    animation_pending: bool,
+    animations: PendingAnimations,
 }
 
 pub struct EditorHolder(Rc<RefCell<Editor>>);
@@ -166,14 +182,22 @@ impl LineInfosMut for Editor {
 
 impl FrameInfosMut for Editor {
     fn set_indent(&mut self, index: usize, num: u16) {
-        if self.line_mut(index).set_indent(num) {
-            self.component.set_attribute("class", "animated");
+        if self.line_mut(index).set_indent(num).0 {
+            // animation should be triggered
+            self.animations.lines.insert(index);
         }
     }
 
     fn set_frames(&mut self, frames: HashMap<u32, FrameInfo>) {
-        let smooth = self.component.get_attribute("class") == Some("animated");
-        self.image_mut().set_frames(frames, smooth);
+        let animated_indents = self
+            .animations
+            .lines
+            .iter()
+            .map(|idx| (*idx, self.line(*idx).animated_indent().unwrap()))
+            .collect();
+        let line_count = self.len();
+        self.image_mut()
+            .set_frames(frames, animated_indents, line_count);
     }
 }
 
@@ -210,6 +234,10 @@ impl Editor {
 
     fn textbox_mut(&mut self) -> &mut ReactiveComponent<TextType> {
         get_mut!(self.component, textbox)
+    }
+
+    fn image(&self) -> &DomImage {
+        get!(self.component, image)
     }
 
     fn image_mut(&mut self) -> &mut DomImage {
@@ -262,6 +290,7 @@ impl Editor {
         current_step: Option<usize>,
         source_changed: bool,
     ) {
+        self.animations.live_info = AnimationRequest(false);
         assert!(step_count > 0);
         let current_step = current_step.unwrap_or(self.current_step());
         if step_count > 1 {
@@ -323,7 +352,7 @@ impl Editor {
             } = &self.execution_state.status
             && let Some(indent) = &self.text()[*line_num].info().indent.clone()
         {
-            get_mut!(self.component, image).set_arrow_location(
+            self.animations.arrow = get_mut!(self.component, image).set_arrow_location(
                 !source_changed,
                 Some((*line_num, *below_line, *indent as usize)),
             );
@@ -332,7 +361,7 @@ impl Editor {
                 self.scroll_on_next_input = false;
             }
         } else {
-            get_mut!(self.component, image).set_arrow_location(false, None);
+            self.animations.arrow = get_mut!(self.component, image).set_arrow_location(false, None);
         }
 
         // display runtime error (and HitBadImport)
@@ -345,6 +374,8 @@ impl Editor {
             get_mut!(component, textbox).inner_mut()[line_no]
                 .set_runtime_error(Some(msg.to_string()));
         }
+
+        self.schedule_animation_if_needed();
     }
 
     fn current_step(&self) -> usize {
@@ -379,7 +410,7 @@ impl Editor {
                 // Move slider to the end if binary changed and it's in the middle
                 if step_count == 0 {
                     ed.slider_mut().inner_mut().hide();
-                    ed.image_mut().set_arrow_location(false, None);
+                    ed.animations.arrow = ed.image_mut().set_arrow_location(false, None);
                     break;
                 }
 
@@ -798,15 +829,58 @@ impl Editor {
         } else if step_count > 0 {
             self.update_live_info(step_count, None, false);
         } else {
-            self.image_mut().set_arrow_location(false, None);
+            self.animations.arrow = self.image_mut().set_arrow_location(false, None);
         }
 
         self.schedule_save(); // schedule save to local storage
+        self.schedule_animation_if_needed();
 
         #[cfg(debug_assertions)]
         self.audit();
 
         Ok(())
+    }
+
+    fn schedule_animation_if_needed(&mut self) {
+        if self.animation_pending {
+            return;
+        }
+        if self.animations.has_pending() || self.image().has_pending_animation() {
+            self.window.request_animation_frame(&self.animation_handler);
+            self.animation_pending = true;
+        }
+    }
+
+    fn animate(&mut self, t: f64) {
+        debug_assert!(self.animation_pending);
+        self.animation_pending = false;
+        if self.animations.live_info.0 {
+            self.update_live_info(RUN_LOG.with(|r| r.step_count()), None, false);
+            debug_assert!(!self.animations.live_info.0);
+        }
+        if self.animations.arrow.0 {
+            self.animations.arrow = self.image_mut().animate_arrow(t);
+        }
+        self.animations.lines.retain(|idx| {
+            get_mut!(self.component, textbox).inner_mut()[*idx]
+                .animate(t)
+                .0
+        });
+        let animated_indents: HashMap<usize, f64> = self
+            .animations
+            .lines
+            .iter()
+            .map(|idx| {
+                (
+                    *idx,
+                    get!(self.component, textbox).inner()[*idx]
+                        .animated_indent()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        self.image_mut().animate_frames(t, animated_indents);
+        self.schedule_animation_if_needed();
     }
 
     // get the user-entered text buffer (doesn't include synthetic Wasm)
@@ -921,7 +995,7 @@ impl Editor {
                             );
 
                             local_line_idx = Some(local.line_idx);
-                            local_slots.truncate(0);
+                            local_slots.clear();
                             local_slots.push(*slot_idx);
                         }
                     }
@@ -1195,6 +1269,9 @@ impl Editor {
             window: WindowHandle::default(),
             holder: Weak::new(),
             input_filter: Regex::new("\r")?,
+            animation_handler: Closure::new(|_| {}),
+            animation_pending: false,
+            animations: Default::default(),
         };
 
         let text = ret.textbox_mut();
@@ -1219,6 +1296,9 @@ impl Editor {
         self.holder = holder;
 
         let e = self.holder();
+        self.animation_handler = Closure::new(move |t| e.borrow_mut().animate(t));
+
+        let e = self.holder();
         self.textbox_mut()
             .set_onbeforeinput(move |ev| e.borrow_mut().handle_input(ev).unwrap());
 
@@ -1235,9 +1315,11 @@ impl Editor {
             .set_handler(move |accepted| e.borrow_mut().accept_autocomplete(accepted).unwrap());
 
         let e = self.holder();
-        self.slider_mut().set_oninput(move |_| {
-            e.borrow_mut()
-                .update_live_info(RUN_LOG.with(|r| r.step_count()), None, false)
+        self.slider_mut().set_oninput(move |ev| {
+            let mut e = e.borrow_mut();
+            e.animations.live_info = AnimationRequest(true);
+            e.schedule_animation_if_needed();
+            ev.prevent_default();
         });
 
         let e = self.holder();

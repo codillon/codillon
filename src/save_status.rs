@@ -1,7 +1,8 @@
 use crate::{
+    delegate_element_component,
     dom_struct::DomStruct,
     dom_text::DomText,
-    jet::{AccessToken, Component, ElementFactory, WithElement, now_ms},
+    jet::{AccessToken, ElementFactory, now_ms},
 };
 use std::time::Duration;
 use web_sys::HtmlDivElement;
@@ -67,16 +68,4 @@ impl SaveStatus {
     }
 }
 
-impl WithElement for SaveStatus {
-    type Element = HtmlDivElement;
-    fn with_element<T, F: FnMut(&HtmlDivElement) -> T>(&self, f: F, g: AccessToken) -> T {
-        self.contents.with_element(f, g)
-    }
-}
-
-impl Component for SaveStatus {
-    #[cfg(debug_assertions)]
-    fn audit(&self) {
-        self.contents.audit()
-    }
-}
+delegate_element_component!(SaveStatus, contents, HtmlDivElement);

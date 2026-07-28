@@ -3,28 +3,32 @@
 
 use crate::{
     debug::SlotContents,
+    delegate_element_component,
     dom_set::DomSet,
     dom_struct::DomStruct,
     dom_text::DomText,
     dom_vec::DomVec,
     editor::LINE_SPACING,
-    jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement, now_ms},
+    jet::{AccessToken, Component, ElementFactory, ElementHandle, WithElement},
     line::INDENT_PX,
     syntax::{FrameInfo, InstrKind},
-    utils::{AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, Coordinate, SlotConnection, SlotInfo},
+    utils::{
+        AnimationRequest, AnnotatedOperatorType, BLOCK_BOUNDARY_INDENT, Coordinate, SlotConnection,
+        SlotInfo, Tween,
+    },
 };
-use anyhow::Result;
 use delegate::delegate;
 use palette::{Mix, Srgb};
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
     str::FromStr,
 };
 use thousands::Separable;
 use wasmparser::ValType;
 use web_sys::{
-    SvgAnimateElement, SvgDefsElement, SvgElement, SvgLineElement, SvgLinearGradientElement,
-    SvgPathElement, SvgStopElement, SvgTextElement, SvgUseElement, SvggElement, console::log_1,
+    SvgDefsElement, SvgElement, SvgLinearGradientElement, SvgMaskElement, SvgPathElement,
+    SvgStopElement, SvgTextElement, SvgUseElement, SvggElement, console::log_1,
 };
 
 const SYM_HW: f32 = 15.0;
@@ -36,522 +40,447 @@ pub struct FractionInfo {
     pub ty: AnnotatedOperatorType,
 }
 
-type AnimLine = DomStruct<
-    (
-        ElementHandle<SvgAnimateElement>,
-        (
-            ElementHandle<SvgAnimateElement>,
-            (
-                ElementHandle<SvgAnimateElement>,
-                (
-                    ElementHandle<SvgAnimateElement>,
-                    (ElementHandle<SvgAnimateElement>, ()),
-                ),
-            ),
-        ),
-    ),
-    SvgLineElement,
->;
-
 // One "line" representing a Wasm frame boundary.
 type DomLine = DomStruct<
     (
-        AnimLine,
+        ElementHandle<SvgPathElement>,
         (
-            AnimLine,
-            (
-                AnimLine,
-                (SymbolUse, ()), // an optional symbol for "unclosed" frames
-            ),
-        ),
+            DomStruct<(ElementHandle<SvgPathElement>, ()), SvgMaskElement>,
+            (SymbolUse, ()),
+        ), // an optional symbol for "unclosed" frames
     ),
     SvggElement,
 >;
 
-type SymbolUse = DomStruct<
-    (
-        ElementHandle<SvgAnimateElement>,
-        (
-            ElementHandle<SvgAnimateElement>,
-            (ElementHandle<SvgAnimateElement>, ()),
-        ),
-    ),
-    SvgUseElement,
->;
+struct SymbolUse {
+    elem: ElementHandle<SvgUseElement>,
+    opacity: Tween,
+}
+delegate_element_component!(SymbolUse, elem, SvgUseElement);
 
 impl SymbolUse {
-    fn anim_x(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().0
-    }
-
-    fn anim_y(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().1.0
-    }
-
-    fn anim_opacity(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().1.1.0
-    }
-
     fn new_symbol(factory: &ElementFactory) -> Self {
-        let mut ret = DomStruct::new(
-            (
-                factory.svg_animate(),
-                (factory.svg_animate(), (factory.svg_animate(), ())),
-            ),
-            factory.svg_use(),
-        );
+        let mut ret = Self {
+            elem: factory.svg_use(),
+            opacity: Tween::Post(0.0),
+        };
 
-        ret.set_attribute("href", "#unclosed");
-        ret.set_attribute("opacity", "0");
-
-        setup_anim(ret.anim_x(), "x");
-        setup_anim(ret.anim_y(), "y");
-        setup_anim(ret.anim_opacity(), "opacity");
+        ret.elem.set_attribute("href", "#unclosed");
+        ret.elem
+            .set_attr_num("opacity", ret.opacity.value().unwrap());
 
         ret
     }
 
-    fn snapshot_xy(&mut self) {
-        let x = self.elem().x().anim_val().value().unwrap().to_string();
-        let y = self.elem().y().anim_val().value().unwrap().to_string();
-        self.anim_x().set_attribute("from", &x);
-        self.anim_y().set_attribute("from", &y);
-    }
-
-    fn snapshot_vis(&mut self) {
-        let old_opacity = self
-            .anim_opacity()
-            .get_attribute("to")
-            .unwrap_or("0.0")
-            .to_string();
-        self.anim_opacity().set_attribute("from", &old_opacity);
-    }
-
-    fn set_visibility(&mut self, smooth: bool, visible: bool) {
+    fn set_visibility(&mut self, smooth: bool, visible: bool) -> AnimationRequest {
         if smooth {
-            self.snapshot_vis();
+            self.opacity.approach(visible as usize as f64);
         } else {
-            self.anim_opacity()
-                .set_attribute("from", if visible { "1" } else { "0" });
+            self.opacity.snap(visible as usize as f64);
+            self.elem
+                .set_attr_num("opacity", self.opacity.value().unwrap());
         }
-
-        self.anim_opacity()
-            .set_attribute("to", if visible { "1" } else { "0" });
-
-        let _ = self.anim_opacity().begin_element();
+        self.has_pending_animation()
     }
 
-    fn goto(&mut self, smooth: bool, x: usize, y: usize) {
-        if smooth {
-            self.snapshot_xy();
-            self.anim_x().set_attribute("to", &x.to_string());
-            self.anim_y().set_attribute("to", &y.to_string());
-            let _ = self.anim_x().begin_element();
-            let _ = self.anim_y().begin_element();
-        } else {
-            self.anim_x().remove_attribute("to");
-            self.anim_y().remove_attribute("to");
-        }
+    fn has_pending_animation(&self) -> AnimationRequest {
+        self.opacity.is_pending()
+    }
 
-        self.set_attribute("x", &x.to_string());
-        self.set_attribute("y", &y.to_string());
+    fn animate(&mut self, t: f64) {
+        self.opacity.animate(t);
+        self.elem
+            .set_attr_num("opacity", self.opacity.value().unwrap());
+    }
+
+    fn snap_to(&mut self, x: f64, y: f64) {
+        self.elem.set_attr_num("x", x);
+        self.elem.set_attr_num("y", y);
     }
 }
-// Store the FrameInfo alongside each line so that it can skip updates if there is no change.
 struct FrameLine {
     info: Option<FrameInfo>,
+    animated_indent: Option<f64>,
     elem: DomLine,
+    reveal: Tween,
+
+    x_left: Tween,
+    y_top: Tween,
+    bwidth_factor: Tween,
+    hheight: Tween,
+    w3: Tween,
 }
 
-const X_OFFSET_PX: usize = 101 + 4 * INDENT_PX;
+const BASE_X_OFFSET_PX: usize = 101;
+const X_OFFSET_PX: usize = BASE_X_OFFSET_PX + 4 * INDENT_PX;
 const LINE_OFFSET_PX: usize = 8;
-const WIDTH: usize = 4;
+const WIDTH: usize = 2;
 const MARGIN: usize = 8;
-
-struct FrameLimits {
-    x_left: usize,
-    x_right: usize,
-    y_top: usize,
-    y_bot: usize,
-}
 
 pub fn indent_px(indent: u16) -> usize {
     (indent as usize) * INDENT_PX
 }
 
-impl FrameLimits {
-    fn new(info: &FrameInfo) -> Self {
-        let x_offset = if info.indent > 0 {
-            X_OFFSET_PX
-        } else {
-            X_OFFSET_PX - indent_px(BLOCK_BOUNDARY_INDENT)
-        };
-        let top_offset = if info.wide { 0 } else { LINE_SPACING / 2 };
-        Self {
-            x_left: x_offset + indent_px(info.indent),
-            x_right: x_offset + indent_px(info.indent + BLOCK_BOUNDARY_INDENT) - MARGIN,
-            y_top: info.start * LINE_SPACING + top_offset + LINE_OFFSET_PX,
-            y_bot: info.end * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX,
-        }
-    }
-}
-
-fn setup_anim(anim: &mut ElementHandle<SvgAnimateElement>, attr: &str) {
-    anim.set_attribute("attributeName", attr);
-    anim.set_attribute("dur", "200ms");
-    anim.set_attribute("fill", "freeze");
-}
-
-impl AnimLine {
-    fn new_line(factory: &ElementFactory) -> Self {
-        let mut ret = DomStruct::new(
-            (
-                factory.svg_animate(),
-                (
-                    factory.svg_animate(),
-                    (
-                        factory.svg_animate(),
-                        (factory.svg_animate(), (factory.svg_animate(), ())),
-                    ),
-                ),
-            ),
-            factory.svg_line(),
-        );
-        ret.set_attribute("stroke-width", &format!("{WIDTH}px"));
-        ret.set_attribute("stroke-opacity", "0");
-
-        setup_anim(ret.anim_x1(), "x1");
-        setup_anim(ret.anim_x2(), "x2");
-        setup_anim(ret.anim_y1(), "y1");
-        setup_anim(ret.anim_y2(), "y2");
-        setup_anim(ret.anim_opacity(), "stroke-opacity");
-
-        ret
-    }
-
-    fn anim_x1(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().0
-    }
-
-    fn anim_x2(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().1.0
-    }
-
-    fn anim_y1(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().1.1.0
-    }
-
-    fn anim_y2(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().1.1.1.0
-    }
-
-    fn anim_opacity(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().1.1.1.1.0
-    }
-
-    fn set(&mut self, name: &str, val: usize) {
-        self.set_attribute(name, &val.to_string());
-    }
-
-    fn snapshot(&mut self) {
-        let x1 = self.elem().x1().anim_val().value().unwrap().to_string();
-        let x2 = self.elem().x2().anim_val().value().unwrap().to_string();
-        let y1 = self.elem().y1().anim_val().value().unwrap().to_string();
-        let y2 = self.elem().y2().anim_val().value().unwrap().to_string();
-        self.anim_x1().set_attribute("from", &x1);
-        self.anim_x2().set_attribute("from", &x2);
-        self.anim_y1().set_attribute("from", &y1);
-        self.anim_y2().set_attribute("from", &y2);
-
-        let old_opacity = self
-            .anim_opacity()
-            .get_attribute("to")
-            .unwrap_or("0")
-            .to_string();
-
-        self.anim_opacity().set_attribute("from", &old_opacity);
-    }
-
-    fn vert(&mut self, smooth: bool, x: usize, y1: usize, y2: usize) {
-        if smooth {
-            self.snapshot();
-            self.anim_x1().set_attribute("to", &x.to_string());
-            self.anim_x2().set_attribute("to", &x.to_string());
-            self.anim_y1().set_attribute("to", &y1.to_string());
-            self.anim_y2().set_attribute("to", &y2.to_string());
-            let _ = self.anim_x1().begin_element();
-            let _ = self.anim_x2().begin_element();
-            let _ = self.anim_y1().begin_element();
-            let _ = self.anim_y2().begin_element();
-        } else {
-            self.anim_x1().remove_attribute("to");
-            self.anim_x2().remove_attribute("to");
-            self.anim_y1().remove_attribute("to");
-            self.anim_y2().remove_attribute("to");
-        }
-
-        self.set("x1", x);
-        self.set("x2", x);
-        self.set("y1", y1);
-        self.set("y2", y2);
-    }
-
-    fn horiz(&mut self, smooth: bool, x1: usize, x2: usize, y: usize) {
-        if smooth {
-            self.snapshot();
-            self.anim_x1().set_attribute("to", &x1.to_string());
-            self.anim_x2().set_attribute("to", &x2.to_string());
-            self.anim_y1().set_attribute("to", &y.to_string());
-            self.anim_y2().set_attribute("to", &y.to_string());
-            let _ = self.anim_x1().begin_element();
-            let _ = self.anim_x2().begin_element();
-            let _ = self.anim_y1().begin_element();
-            let _ = self.anim_y2().begin_element();
-        } else {
-            self.anim_x1().remove_attribute("to");
-            self.anim_x2().remove_attribute("to");
-            self.anim_y1().remove_attribute("to");
-            self.anim_y2().remove_attribute("to");
-        }
-
-        self.set("x1", x1);
-        self.set("x2", x2);
-        self.set("y1", y);
-        self.set("y2", y);
-    }
-
-    fn set_visibility(&mut self, smooth: bool, visible: bool) {
-        if smooth {
-            self.snapshot();
-            self.anim_opacity()
-                .set_attribute("to", if visible { "1" } else { "0" });
-            let _ = self.anim_opacity().begin_element();
-        } else {
-            self.set_attribute("stroke-opacity", if visible { "1" } else { "0" });
-        }
-    }
+thread_local! {
+    static NEXT_FRAME_ID: Cell<u32> = Default::default();
 }
 
 impl FrameLine {
-    fn line1(&mut self) -> &mut AnimLine {
+    fn line(&mut self) -> &mut ElementHandle<SvgPathElement> {
         &mut self.elem.get_mut().0
     }
 
-    fn line2(&mut self) -> &mut AnimLine {
+    fn mask(&mut self) -> &mut DomStruct<(ElementHandle<SvgPathElement>, ()), SvgMaskElement> {
         &mut self.elem.get_mut().1.0
     }
 
-    fn line3(&mut self) -> &mut AnimLine {
+    fn mask_path(&mut self) -> &mut ElementHandle<SvgPathElement> {
+        &mut self.elem.get_mut().1.0.get_mut().0
+    }
+
+    fn symbol(&self) -> &SymbolUse {
+        &self.elem.get().1.1.0
+    }
+
+    fn symbol_mut(&mut self) -> &mut SymbolUse {
         &mut self.elem.get_mut().1.1.0
     }
 
-    fn symbol(&mut self) -> &mut SymbolUse {
-        &mut self.elem.get_mut().1.1.1.0
-    }
-
     fn new(factory: &ElementFactory) -> Self {
-        Self {
+        let mut ret = Self {
             info: None,
+            animated_indent: None,
             elem: DomStruct::new(
                 (
-                    AnimLine::new_line(factory),
+                    factory.svg_path(),
                     (
-                        AnimLine::new_line(factory),
-                        (
-                            AnimLine::new_line(factory),
-                            (SymbolUse::new_symbol(factory), ()),
-                        ),
+                        DomStruct::new((factory.svg_path(), ()), factory.svg_mask()),
+                        (SymbolUse::new_symbol(factory), ()),
                     ),
                 ),
                 factory.svg_g(),
             ),
+            reveal: Tween::Pre,
+            x_left: Tween::Pre,
+            y_top: Tween::Pre,
+            bwidth_factor: Tween::Pre,
+            hheight: Tween::Pre,
+            w3: Tween::Pre,
+        };
+
+        let id = NEXT_FRAME_ID.get();
+        NEXT_FRAME_ID.replace(id + 1);
+
+        ret.line()
+            .set_attribute("mask", &format!("url(#mask-{id})"));
+        ret.mask().set_attribute("id", &format!("mask-{id}"));
+
+        ret.line()
+            .set_attribute("stroke-width", &format!("{WIDTH}px"));
+        ret.line().set_attribute("fill", "none");
+        ret.mask_path()
+            .set_attribute("stroke-width", &format!("{WIDTH}px"));
+        ret.mask_path().set_attribute("stroke", "white");
+        ret.mask_path().set_attribute("fill", "none");
+        ret.mask_path().set_attr_num("pathLength", 1);
+
+        ret
+    }
+
+    fn hide(&mut self, mut smooth: bool) -> AnimationRequest {
+        if let Some(FrameInfo { indent: 0, .. }) = &self.info {
+            smooth = false;
+        }
+        self.reveal.goto(smooth, -1.0)
+    }
+
+    fn natural_origin(info: &FrameInfo) -> f64 {
+        if info.kind == InstrKind::Else {
+            -1.0
+        } else {
+            1.0
         }
     }
+
+    const BACKUP: f64 = 30.0; // controls arm of frame vertical
 
     // Make the DOM SVG element reflect the new Wasm FrameInfo that it represents.
-    // Store the "info" in the FrameLine so that we can short-circuit future updates if there is no change.
-    fn update(&mut self, info: FrameInfo, mut smooth: bool) -> Result<()> {
-        let FrameLimits {
-            x_left,
-            x_right,
-            y_top,
-            y_bot,
-        } = FrameLimits::new(&info);
-
-        if let Some(current_info) = &self.info {
-            if info == *current_info {
-                return Ok(());
-            }
-
-            if info.kind == current_info.kind
-                && info.indent == current_info.indent
-                && info.unclosed == current_info.unclosed
-                && info.end - info.start == current_info.end - current_info.start
-            {
-                smooth = false;
-            }
-        } else {
-            self.symbol().goto(false, x_left, y_bot);
+    fn update(
+        &mut self,
+        info: FrameInfo,
+        animated_indent: Option<f64>,
+        mut smooth: bool,
+    ) -> AnimationRequest {
+        // force snap transition on functions?
+        if info.indent == 0 {
+            smooth = false;
         }
 
-        if info.kind == InstrKind::Else {
-            self.line1()
-                .horiz(smooth, x_left - WIDTH / 2, x_left - WIDTH / 2, y_top);
-        } else {
-            self.line1()
-                .horiz(smooth, x_right, x_left - WIDTH / 2, y_top);
+        if self.reveal.value().is_none() {
+            self.reveal.snap(Self::natural_origin(&info));
         }
-        self.line2().vert(smooth, x_left, y_top, y_bot);
-        self.symbol().goto(smooth, x_left, y_bot);
+        let mut ret = self.reveal.goto(smooth, 0.0);
+
+        if let Some(current_info) = &self.info
+            && *current_info == info
+            && self.animated_indent == animated_indent
+        {
+            return self.reveal.is_pending();
+        }
+
+        let x_offset = if info.indent > 0 {
+            X_OFFSET_PX
+        } else {
+            X_OFFSET_PX - indent_px(BLOCK_BOUNDARY_INDENT)
+        } as f64;
+        let top_offset = if info.wide { 0 } else { LINE_SPACING / 2 };
+        let x_left = x_offset + indent_px(info.indent) as f64;
+        let y_top = (info.start * LINE_SPACING + top_offset + LINE_OFFSET_PX) as f64;
+        let y_bot = (info.end * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX) as f64;
+
+        let height = y_bot - y_top;
+        let hheight = if info.unclosed {
+            0.5 * height - 0.29 * LINE_SPACING as f64
+        } else {
+            0.5 * height
+        };
+        let bwidth_factor = if info.unclosed { 0.0 } else { 1.0 };
+
+        ret.or(self.x_left.goto(smooth, x_left));
+        ret.or(self.y_top.goto(smooth, y_top));
+        ret.or(self.bwidth_factor.goto(smooth, bwidth_factor));
+        ret.or(self.hheight.goto(smooth, hheight));
+        ret.or(self.w3.goto(
+            smooth,
+            if info.unclosed {
+                0.5 * Self::BACKUP
+            } else {
+                Self::BACKUP
+            },
+        ));
+
+        ret.or(self.symbol_mut().set_visibility(smooth, info.unclosed));
 
         if info.unclosed {
-            self.line3()
-                .horiz(smooth, x_left - WIDTH / 2, x_left - WIDTH / 2, y_bot);
+            self.line().set_attribute("stroke", "darkred");
         } else {
-            self.line3()
-                .horiz(smooth, x_left - WIDTH / 2, x_right, y_bot);
+            match info.kind {
+                InstrKind::OtherStructured => {
+                    self.line().set_attribute("stroke", "darkgray");
+                }
+                InstrKind::If => {
+                    self.line().set_attribute("stroke", "green");
+                }
+                InstrKind::Else => {
+                    self.line().set_attribute("stroke", "purple");
+                }
+                InstrKind::Loop => {
+                    self.line().set_attribute("stroke", "pink");
+                }
+                InstrKind::Other | InstrKind::End => panic!("unexpected frame kind"),
+            };
         }
 
-        self.set_color(&info);
         self.info = Some(info);
+        self.animated_indent = animated_indent;
 
-        Ok(())
+        ret.or(self.draw());
+
+        ret
     }
 
-    fn set_color(&mut self, info: &FrameInfo) {
-        match info.kind {
-            InstrKind::OtherStructured => {
-                self.line1().set_attribute("stroke", "darkgray");
-                self.line2().set_attribute("stroke", "darkgray");
-                self.line3().set_attribute("stroke", "darkgray");
+    fn draw(&mut self) -> AnimationRequest {
+        let Self {
+            info: Some(info),
+            animated_indent,
+            elem,
+            reveal,
+            x_left,
+            y_top,
+            bwidth_factor,
+            hheight,
+            w3,
+        } = self
+        else {
+            panic!();
+        };
+
+        let (reveal, x_left, y_top, bwidth_factor, hheight, w3) = (
+            reveal.value().unwrap(),
+            x_left.value().unwrap(),
+            y_top.value().unwrap(),
+            bwidth_factor.value().unwrap(),
+            hheight.value().unwrap(),
+            w3.value().unwrap(),
+        );
+
+        let x_offset = if info.indent > 0 {
+            X_OFFSET_PX
+        } else {
+            X_OFFSET_PX - indent_px(BLOCK_BOUNDARY_INDENT)
+        } as f64;
+
+        let x_max = x_offset + (indent_px(info.indent + BLOCK_BOUNDARY_INDENT) - MARGIN) as f64;
+        let total_dist = x_max - x_left;
+
+        let x_right = if let Some(actual_indent) = animated_indent
+            && total_dist > 0.0
+            && info.indent > 0
+        {
+            let line_max = *actual_indent + BASE_X_OFFSET_PX as f64;
+            let distance_to_end = x_max - line_max;
+            let weight = (distance_to_end / total_dist).clamp(0.0, 1.0);
+            let weight = weight * weight;
+            line_max - (MARGIN as f64) * (1.0 - weight)
+        } else {
+            x_max
+        };
+
+        let width = x_right - x_left;
+        let bwidth = bwidth_factor * width;
+        let dist1 = (hheight * 0.95).min(LINE_SPACING as f64 * 0.5 * 0.95);
+        let dist2 = hheight - dist1;
+
+        let backup = Self::BACKUP;
+
+        let d = &format!(
+            "M {x_right},{y_top} h -{width} c -{backup},0 -{backup},{dist1} -{backup},{hheight} c 0,{dist2} 0,{hheight} {w3},{hheight} h {bwidth}"
+        );
+        elem.get_mut().0.set_attribute("d", d);
+
+        // progressive reveal
+        {
+            let mask_path = &mut elem.get_mut().1.0.get_mut().0;
+            mask_path.set_attribute("d", d);
+            if reveal >= 0.0 {
+                mask_path
+                    .set_attribute("stroke-dasharray", &format!("{} {}", 1.0 - reveal, reveal));
+                mask_path.set_attr_num("opacity", 1);
+            } else {
+                mask_path.set_attribute(
+                    "stroke-dasharray",
+                    &format!("0 {} {}", -reveal, 1.0 + reveal),
+                );
+                mask_path.set_attr_num("opacity", 1.0 + reveal);
             }
-            InstrKind::If => {
-                self.line1().set_attribute("stroke", "green");
-                self.line2().set_attribute("stroke", "green");
-                self.line3().set_attribute("stroke", "purple");
-            }
-            InstrKind::Else => {
-                self.line1().set_attribute("stroke", "purple");
-                self.line2().set_attribute("stroke", "blue");
-                self.line3().set_attribute("stroke", "blue");
-            }
-            InstrKind::Loop => {
-                self.line1().set_attribute("stroke", "pink");
-                self.line2().set_attribute("stroke", "pink");
-                self.line3().set_attribute("stroke", "pink");
-            }
-            InstrKind::Other | InstrKind::End => panic!("unexpected frame kind"),
         }
+
+        self.symbol_mut().snap_to(
+            x_right - width - backup + w3 + bwidth,
+            y_top + 2.0 * hheight,
+        );
+
+        self.has_pending_animation()
     }
 
-    fn set_visibility(&mut self, smooth: bool, visible: bool, unclosed: bool) {
-        self.line1().set_visibility(smooth, visible);
-        self.line2().set_visibility(smooth, visible);
-        self.line3().set_visibility(smooth, visible);
-        self.symbol().set_visibility(smooth, unclosed);
+    fn has_pending_animation(&self) -> AnimationRequest {
+        AnimationRequest(
+            self.reveal.is_pending().0
+                || self.x_left.is_pending().0
+                || self.symbol().has_pending_animation().0,
+        )
+    }
+
+    pub fn animate(&mut self, t: f64, animated_indent: Option<f64>) -> AnimationRequest {
+        if animated_indent != self.animated_indent {
+            self.animated_indent = animated_indent;
+        }
+        self.symbol_mut().animate(t);
+        self.reveal.animate(t);
+        self.x_left.animate(t);
+        self.y_top.animate(t);
+        self.bwidth_factor.animate(t);
+        self.hheight.animate(t);
+        self.w3.animate(t);
+        self.draw()
     }
 }
 
-impl WithElement for FrameLine {
-    type Element = SvggElement;
-    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
-        self.elem.with_element(f, g)
-    }
-}
+delegate_element_component!(FrameLine, elem, <DomLine as WithElement>::Element);
 
-impl Component for FrameLine {
-    #[cfg(debug_assertions)]
-    fn audit(&self) {
-        self.elem.audit();
-    }
-}
-
-type Arrow = DomStruct<
+type ArrowElem = DomStruct<
     (
         ElementHandle<SvgUseElement>,
-        (
-            DomStruct<
-                (
-                    ElementHandle<SvgAnimateElement>,
-                    (ElementHandle<SvgAnimateElement>, ()),
-                ),
-                SvgUseElement,
-            >,
-            (),
-        ),
+        (ElementHandle<SvgUseElement>, ()),
     ),
     SvggElement,
 >;
 
+struct Arrow {
+    elem: ArrowElem,
+    x: Tween,
+    y: Tween,
+}
+delegate_element_component!(Arrow, elem, SvggElement);
+
 impl Arrow {
-    fn anim_x(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().1.0.get_mut().0
-    }
-
-    fn anim_y(&mut self) -> &mut ElementHandle<SvgAnimateElement> {
-        &mut self.get_mut().1.0.get_mut().1.0
-    }
-
-    fn new_arrow(factory: &ElementFactory) -> Self {
-        let mut ret = DomStruct::new(
-            (
-                factory.svg_use(),
-                (
-                    DomStruct::new(
-                        (factory.svg_animate(), (factory.svg_animate(), ())),
-                        factory.svg_use(),
-                    ),
-                    (),
-                ),
+    fn new(factory: &ElementFactory) -> Self {
+        let mut ret = Self {
+            elem: DomStruct::new(
+                (factory.svg_use(), (factory.svg_use(), ())),
+                factory.svg_g(),
             ),
-            factory.svg_g(),
-        );
-        setup_anim(ret.anim_x(), "x");
-        setup_anim(ret.anim_y(), "y");
+            x: Default::default(),
+            y: Default::default(),
+        };
+        ret.target_elem().set_attribute("class", "arrow-target");
         ret
     }
 
-    fn snapshot_xy(&mut self) {
-        let x = self
-            .get()
-            .1
-            .0
-            .elem()
-            .x()
-            .anim_val()
-            .value()
-            .unwrap()
-            .to_string();
-        let y = self
-            .get()
-            .1
-            .0
-            .elem()
-            .y()
-            .anim_val()
-            .value()
-            .unwrap()
-            .to_string();
-        self.anim_x().set_attribute("from", &x);
-        self.anim_y().set_attribute("from", &y);
+    fn arrow_elem(&mut self) -> &mut ElementHandle<SvgUseElement> {
+        &mut self.elem.get_mut().0
     }
 
-    fn goto(&mut self, smooth: bool, x: usize, y: usize) {
+    fn target_elem(&mut self) -> &mut ElementHandle<SvgUseElement> {
+        &mut self.elem.get_mut().1.0
+    }
+
+    fn goto(&mut self, smooth: bool, loc: Option<(usize, bool, usize)>) -> AnimationRequest {
+        let Some((line_idx, below_line, indent)) = loc else {
+            self.arrow_elem().remove_attribute("href");
+            return AnimationRequest(false);
+        };
+
+        self.arrow_elem().set_attribute("href", "#arrow");
+
+        let target_x = X_OFFSET_PX + indent * INDENT_PX - 4;
+        let target_y = line_idx * LINE_SPACING
+            + LINE_SPACING / 2
+            + LINE_OFFSET_PX
+            + if below_line { LINE_SPACING / 2 } else { 0 };
+
         if smooth {
-            self.snapshot_xy();
-            self.anim_x().set_attribute("to", &x.to_string());
-            self.anim_y().set_attribute("to", &y.to_string());
-            let _ = self.anim_x().begin_element();
-            let _ = self.anim_y().begin_element();
-        } else {
-            self.anim_x().remove_attribute("to");
-            self.anim_y().remove_attribute("to");
+            self.x.approach(target_x as f64);
+            self.y.approach(target_y as f64);
+            return AnimationRequest(true);
         }
 
-        self.get_mut().1.0.set_attribute("x", &x.to_string());
-        self.get_mut().1.0.set_attribute("y", &y.to_string());
-        self.get_mut().0.set_attribute("x", &x.to_string());
-        self.get_mut().0.set_attribute("y", &y.to_string());
+        // otherwise, snap change
+        self.arrow_elem().set_attr_num("x", target_x);
+        self.arrow_elem().set_attr_num("y", target_y);
+        self.x.snap(target_x as f64);
+        self.y.snap(target_y as f64);
+        AnimationRequest(false)
+    }
+
+    fn animate(&mut self, t: f64) -> AnimationRequest {
+        self.x.animate(t);
+        self.y.animate(t);
+        let (x, y) = (self.x.value().unwrap(), self.y.value().unwrap());
+        self.arrow_elem().set_attr_num("x", x);
+        self.arrow_elem().set_attr_num("y", y);
+        debug_assert_eq!(self.x.is_pending(), self.y.is_pending());
+        self.x.is_pending()
+    }
+
+    fn scroll_to_target(&mut self) {
+        if let Some(target_x) = self.x.target()
+            && let Some(target_y) = self.y.target()
+        {
+            self.elem.get_mut().1.0.set_attr_num("x", target_x);
+            self.elem.get_mut().1.0.set_attr_num("y", target_y);
+            self.elem.get().1.0.scroll_into_view();
+        }
     }
 }
 
@@ -582,17 +511,16 @@ struct RenderedConnection {
     path: ElementHandle<SvgPathElement>,
 }
 
-impl WithElement for RenderedConnection {
-    type Element = SvgPathElement;
-    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
-        self.path.with_element(f, g)
-    }
+delegate_element_component!(RenderedConnection, path, SvgPathElement);
+
+#[derive(Default)]
+struct PendingAnimations {
+    frames: HashSet<u32>,
 }
 
-impl Component for RenderedConnection {
-    #[cfg(debug_assertions)]
-    fn audit(&self) {
-        self.path.audit()
+impl PendingAnimations {
+    fn has_pending(&self) -> bool {
+        !self.frames.is_empty()
     }
 }
 
@@ -601,8 +529,9 @@ pub struct DomImage {
     height: usize,
     width: u16,
     factory: ElementFactory,
-    pending_delete: HashMap<u32, f64>, // frame identity -> timestamp to delete
     connection_dst2src: HashMap<Coordinate /* dst */, Coordinate /* src */>,
+    animations: PendingAnimations,
+    last_line_count: usize,
 }
 
 impl WithElement for DomImage {
@@ -618,13 +547,13 @@ impl Component for DomImage {
         self.contents.audit();
         let mut src_hit = HashSet::new();
         let mut dst_hit = HashSet::new();
-        self.connections().for_each(|src, cx| {
+        for (src, cx) in self.connections().iter() {
             let (the_src, the_dst) = cx.connection.is_connected().unwrap();
             assert_eq!(src, the_src);
             assert!(src_hit.insert(the_src.clone()));
             assert!(dst_hit.insert(the_dst.clone()));
             assert_eq!(self.connection_dst2src[the_dst], src.clone());
-        });
+        }
         for other_dst in self.connection_dst2src.keys() {
             assert!(dst_hit.contains(other_dst));
         }
@@ -781,7 +710,7 @@ impl DomImage {
                             DomSet::new(factory.svg_g()),
                             (
                                 CodillonBlocks::new(factory.svg_g()),
-                                (Arrow::new_arrow(&factory), ()),
+                                (Arrow::new(&factory), ()),
                             ),
                         ),
                     ),
@@ -791,14 +720,10 @@ impl DomImage {
             height: 0,
             width: 0,
             factory: factory.clone(),
-            pending_delete: Default::default(),
             connection_dst2src: Default::default(),
+            animations: Default::default(),
+            last_line_count: Default::default(),
         };
-
-        ret.arrow_mut()
-            .get_mut()
-            .0
-            .set_attribute("class", "arrow-target");
 
         // The "unclosed" symbol looks like a ⊘ (Circled Division Slash)
         // character, or like an "End of All Prohibitions"
@@ -1071,42 +996,34 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    pub fn set_frames(&mut self, frames: HashMap<u32, FrameInfo>, mut smooth: bool) {
-        let now = now_ms();
+    pub fn set_frames(
+        &mut self,
+        frames: HashMap<u32, FrameInfo>,
+        animated_indents: HashMap<usize, f64>,
+        line_count: usize,
+    ) {
+        let smooth = line_count == self.last_line_count;
+        self.last_line_count = line_count;
 
-        /* should we force a smooth transition? */
-        if frames.len() != self.blocks().len() - self.pending_delete.len() {
-            smooth = true;
-        }
-        for (id, info) in &frames {
-            let Some(old_block) = self.blocks().get(id) else {
-                smooth = true;
-                break;
-            };
-            if let Some(old_info) = &old_block.info
-                && (old_info.indent != info.indent
-                    || old_info.unclosed != info.unclosed
-                    || old_info.kind != info.kind)
-            {
-                smooth = true;
-            }
-        }
-
-        /* delete frames whose vanishing animations ought to have finished */
-        for (id, _ts) in self
-            .pending_delete
-            .extract_if(|id, ts| *ts > now || frames.contains_key(id))
-        {
-            get_mut!(self.contents, blocks).remove(id, FrameLine::new(&self.factory));
-        }
-
-        /* smoothly vanish frames that no longer exist */
+        /* vanish frames that no longer exist */
         get_mut!(self.contents, blocks).for_each_mut(|id, block| {
-            if !frames.contains_key(id) {
-                block.set_visibility(true, false, false);
-                self.pending_delete.insert(*id, now + 1000.0);
+            if !frames.contains_key(id) && block.hide(smooth).0 {
+                self.animations.frames.insert(*id);
             }
         });
+
+        /* delete frames whose vanishing animations have finished */
+        {
+            let mut to_delete = vec![];
+            for (id, bl) in self.blocks().iter() {
+                if bl.reveal.value() == Some(-1.0) {
+                    to_delete.push(*id);
+                }
+            }
+            for id in to_delete {
+                get_mut!(self.contents, blocks).remove(id, FrameLine::new(&self.factory));
+            }
+        }
 
         /* update existing frames and add new ones */
         for (id, info) in frames {
@@ -1118,10 +1035,33 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             }
 
             let bl = &mut get_mut!(self.contents, blocks)[id];
-            let unclosed = info.unclosed;
-            bl.update(info, smooth).unwrap();
-            bl.set_visibility(true, true, unclosed);
+            let animated_indent = animated_indents.get(&info.start).copied();
+            if bl.update(info, animated_indent, smooth).0 {
+                self.animations.frames.insert(id);
+            }
         }
+    }
+
+    pub fn animate_frames(&mut self, t: f64, animated_indents: HashMap<usize, f64>) {
+        get_mut!(self.contents, blocks).for_each_mut(|id, bl| {
+            let animation_pending = if let Some(info) = &bl.info
+                && let Some(animated_indent) = animated_indents.get(&info.start)
+            {
+                bl.animate(t, Some(*animated_indent))
+            } else {
+                bl.animate(t, None) // make sure to finish every animation
+            };
+
+            if animation_pending.0 {
+                self.animations.frames.insert(*id);
+            } else {
+                self.animations.frames.remove(id);
+            }
+        });
+    }
+
+    pub fn has_pending_animation(&self) -> bool {
+        self.animations.has_pending()
     }
 
     pub fn set_types(&mut self, types: HashMap<u32, FractionInfo>, _smooth: bool) {
@@ -1194,11 +1134,11 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         /* delete connections that no longer exist */
         {
             let mut to_vanish: Vec<(Coordinate, Coordinate)> = vec![];
-            get!(self.contents, connections).for_each(|src, cx| {
+            for (src, cx) in self.connections().iter() {
                 if !cx_sources.contains(src) {
                     to_vanish.push((src.clone(), cx.connection.read.clone().unwrap()))
                 }
-            });
+            }
             for (src, dst) in to_vanish {
                 get_mut!(self.contents, connections)
                     .remove(src, RenderedConnection::new(&self.factory));
@@ -1207,6 +1147,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
 
         /* add connections from given SlotConnections */
+        let mut dst_deletion_count: HashMap<Coordinate, i32> = HashMap::new();
         for new_conn in connections {
             let Some((src, dst)) = new_conn.is_connected() else {
                 continue;
@@ -1214,9 +1155,12 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             let (_, (conns, (fracs, _))) = self.contents.get_mut();
 
             if let Some(cur_conn) = conns.get_mut(src) {
-                self.connection_dst2src
-                    .remove(cur_conn.connection.read.as_ref().unwrap())
-                    .unwrap();
+                let (_cur_src, cur_dst) = cur_conn.connection.is_connected().unwrap();
+                debug_assert_eq!(_cur_src, src);
+                if cur_conn.connection != *new_conn {
+                    *dst_deletion_count.entry(cur_dst.clone()).or_insert(0) += 1;
+                    *dst_deletion_count.entry(dst.clone()).or_insert(0) -= 1;
+                }
                 self.connection_dst2src.insert(dst.clone(), src.clone());
                 cur_conn.update(new_conn.clone(), fracs);
             } else {
@@ -1224,6 +1168,15 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
                 cx.update(new_conn.clone(), self.fractions());
                 self.connection_dst2src.insert(dst.clone(), src.clone());
                 self.connections_mut().insert(src.clone(), cx);
+                *dst_deletion_count.entry(dst.clone()).or_insert(0) -= 1;
+            }
+        }
+
+        /* delete dst->src entries that no longer exist */
+        for (dst, delcount) in dst_deletion_count {
+            debug_assert!(delcount <= 1);
+            if delcount == 1 {
+                self.connection_dst2src.remove(&dst).unwrap();
             }
         }
     }
@@ -1255,27 +1208,20 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    pub fn set_arrow_location(&mut self, smooth: bool, loc: Option<(usize, bool, usize)>) {
-        let Some((line_idx, below_line, indent)) = loc else {
-            self.arrow_mut().get_mut().1.0.remove_attribute("href");
-            return;
-        };
+    pub fn set_arrow_location(
+        &mut self,
+        smooth: bool,
+        loc: Option<(usize, bool, usize)>,
+    ) -> AnimationRequest {
+        self.arrow_mut().goto(smooth, loc)
+    }
 
-        self.arrow_mut()
-            .get_mut()
-            .1
-            .0
-            .set_attribute("href", "#arrow");
-        let below_line_offset = if below_line { LINE_SPACING / 2 } else { 0 };
-        self.arrow_mut().goto(
-            smooth,
-            X_OFFSET_PX + indent * INDENT_PX - 4,
-            line_idx * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX + below_line_offset,
-        );
+    pub fn animate_arrow(&mut self, t: f64) -> AnimationRequest {
+        self.arrow_mut().animate(t)
     }
 
     pub fn scroll_to_arrow(&mut self) {
-        self.arrow_mut().get().0.scroll_into_view();
+        self.arrow_mut().scroll_to_target()
     }
 
     delegate! {
@@ -1508,12 +1454,16 @@ impl OperatorFraction {
         let left_edge_out = -SYM_HW * (out_len - 1) as f32;
 
         fn render(info: &SlotInfo, is_input: bool) -> String {
-            let name = info.slot.ty.map(|x| x.to_string());
+            let name = info.slot.ty().map(|x| x.to_string());
             format!(
                 "#{}_{}{}",
                 name.unwrap_or(String::from("mystery")),
                 if is_input { "in" } else { "out" },
-                if !info.used && is_input { "_empty" } else { "" }
+                if !info.used && is_input && info.slot != crate::utils::Slot::Polymorphic {
+                    "_empty"
+                } else {
+                    ""
+                }
             )
         }
 
@@ -1523,9 +1473,9 @@ impl OperatorFraction {
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &render(ty, true));
             self.input_locations_scales_and_types
-                .push((in_scale * x, in_scale, ty.slot.ty));
+                .push((in_scale * x, in_scale, ty.slot.ty()));
 
-            let height = icon_height(ty.slot.ty) - 1.25;
+            let height = icon_height(ty.slot.ty()) - 1.25;
             let text = &mut self.inputs()[i].get_mut().1.0;
 
             text.set_pos(x, -height / 2.0);
@@ -1556,10 +1506,10 @@ impl OperatorFraction {
             sym.set_attribute("href", &render(ty, false));
 
             self.output_locations_scales_and_types
-                .push((out_scale * x, out_scale, ty.slot.ty));
+                .push((out_scale * x, out_scale, ty.slot.ty()));
 
-            let height = icon_height(ty.slot.ty)
-                + match ty.slot.ty {
+            let height = icon_height(ty.slot.ty())
+                + match ty.slot.ty() {
                     Some(ValType::F32) => 6.5,
                     _ => 3.5,
                 };
@@ -1577,19 +1527,7 @@ impl OperatorFraction {
     }
 }
 
-impl WithElement for OperatorFraction {
-    type Element = SvggElement;
-    fn with_element<T, F: FnMut(&Self::Element) -> T>(&self, f: F, g: AccessToken) -> T {
-        self.symbols.with_element(f, g)
-    }
-}
-
-impl Component for OperatorFraction {
-    #[cfg(debug_assertions)]
-    fn audit(&self) {
-        self.symbols.audit();
-    }
-}
+delegate_element_component!(OperatorFraction, symbols, SvggElement);
 
 impl RenderedConnection {
     fn new(factory: &ElementFactory) -> Self {
