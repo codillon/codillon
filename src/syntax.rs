@@ -96,11 +96,28 @@ pub trait LineInfosMut: LineInfos {
 }
 
 #[derive(PartialEq, Clone, Debug)]
+pub enum Impairment {
+    Normal,
+    Impaired,
+    Unclosed,
+}
+
+impl Impairment {
+    pub fn is_unclosed(&self) -> bool {
+        *self == Impairment::Unclosed
+    }
+
+    pub fn is_bad(&self) -> bool {
+        *self != Impairment::Normal
+    }
+}
+
+#[derive(PartialEq, Clone, Debug)]
 pub struct FrameInfo {
     pub indent: u16,
     pub start: usize,
     pub end: usize,
-    pub unclosed: bool,
+    pub impairment: Impairment,
     pub kind: InstrKind,
     pub wide: bool,
 }
@@ -901,28 +918,31 @@ pub fn fix_syntax(lines: &mut impl LineInfosMut) {
     }
 }
 
-pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize)> {
+pub fn find_function_ranges(code: &impl LineInfos) -> Vec<(usize, usize, usize)> {
     use SyntaxState::*;
     let mut ranges = Vec::new();
     let mut state = Initial;
     let mut current_start: Option<usize> = None;
+    let mut current_first_op: Option<usize> = None;
 
     for line_no in 0..code.len() {
         let mut prev_state = state;
         let on_transition = |new_state: &SyntaxState| {
-            match (current_start, prev_state, new_state) {
-                (None, _, AfterFuncHeader(_)) => current_start = Some(line_no),
+            match (current_start, current_first_op, prev_state, new_state) {
+                (None, _, _, AfterFuncHeader(_)) => current_start = Some(line_no),
 
-                (
-                    Some(start_line),
-                    AfterInstruction | AfterFuncHeader(FuncHeader { .. }),
-                    Initial,
-                ) => {
-                    ranges.push((start_line, line_no));
+                (Some(_), None, _, AfterInstruction) => current_first_op = Some(line_no),
+
+                (Some(start_line), None, _, Initial) => {
+                    ranges.push((start_line, line_no, line_no));
                     current_start = None;
                 }
 
-                (Some(_), _, Initial) => current_start = None,
+                (Some(start_line), Some(first_op), _, Initial) => {
+                    ranges.push((start_line, first_op, line_no));
+                    current_start = None;
+                    current_first_op = None;
+                }
 
                 _ => (),
             }
