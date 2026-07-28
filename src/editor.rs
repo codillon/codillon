@@ -1410,7 +1410,7 @@ mod browser_tests {
 
         const EMPTY_FUNCTION: &str = "(func\n\n)\n";
         const BLOCK_INSERTED_FUNCTION: &str = "(func\nblock\nend\n)\n";
-        // Undo and redo preserves added block curtesy end
+        // Undo and redo preserves added block courtesy end
         {
             set_contents(editor, &EMPTY_FUNCTION.lines().collect::<Vec<_>>());
             assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
@@ -1429,7 +1429,7 @@ mod browser_tests {
             assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);
         }
 
-        // Undo and redo preserves deleted block curtesy end
+        // Undo and redo preserves deleted block courtesy end
         {
             set_contents(editor, &BLOCK_INSERTED_FUNCTION.lines().collect::<Vec<_>>());
             assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);

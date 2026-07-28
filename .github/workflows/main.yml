@@ -85,7 +85,6 @@ jobs:
           echo "GECKODRIVER=$GECKOWEBDRIVER/geckodriver" >> "$GITHUB_ENV"
         fi
     - run: RUSTFLAGS='--cfg getrandom_backend="wasm_js"' cargo test --target wasm32-unknown-unknown --locked
-    
 
   rustfmt:
     name: Rustfmt
