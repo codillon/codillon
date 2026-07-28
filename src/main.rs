@@ -1,9 +1,6 @@
 use anyhow::Result;
-use codillon::{dom_struct::DomStruct, editor::EditorHolder, jet::DocumentHandle};
+use codillon::editor::{Body, Document, EditorHolder};
 use std::cell::RefCell;
-
-type Body = DomStruct<(EditorHolder, ()), web_sys::HtmlBodyElement>;
-type Document = DocumentHandle<Body>;
 
 thread_local! {
     static DOCUMENT: RefCell<Document> = Document::default().into();

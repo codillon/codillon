@@ -9,8 +9,8 @@ use crate::{
     dom_vec::DomVec,
     graphics::{DomImage, FractionInfo},
     jet::{
-        AccessToken, Component, ControlHandlers, ElementFactory, InputEventHandle, NodeRef,
-        RangeLike, ReactiveComponent, StorageHandle, WebOffset, WindowHandle, WithElement,
+        AccessToken, Component, ControlHandlers, DocumentHandle, ElementFactory, InputEventHandle,
+        NodeRef, RangeLike, ReactiveComponent, StorageHandle, WebOffset, WindowHandle, WithElement,
         compare_document_position, get_selection, now_ms, set_selection_range,
     },
     line::{Activity, CodeLine, LineInfo, Position, PositionRange},
@@ -38,6 +38,8 @@ use std::{
 use wasm_bindgen::{closure::Closure, prelude::ScopedClosure};
 use web_sys::{BeforeUnloadEvent, HtmlDivElement, console::log_1};
 
+pub type Body = DomStruct<(EditorHolder, ()), web_sys::HtmlBodyElement>;
+pub type Document = DocumentHandle<Body>;
 type TextType = DomVec<CodeLine, HtmlDivElement>;
 type ComponentType = DomStruct<
     (
@@ -452,19 +454,29 @@ impl Editor {
     }
 
     // Replace a given range (currently within a single line) with new text
-    fn replace_range(&mut self, target_range: &impl RangeLike, new_str: &str) -> Result<()> {
+    fn handle_edit(&mut self, target_range: &impl RangeLike, new_str: &str) -> Result<()> {
         if new_str.chars().any(|x| x.is_control() && x != '\n') {
             bail!("unhandled control char in input");
         }
 
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
+        let target = self.get_lines_and_positions(target_range)?;
+        self.replace_range(&target, &saved_selection, new_str, true)
+    }
 
+    fn replace_range(
+        &mut self,
+        target: &PositionRange,
+        saved_selection: &PositionRange,
+        new_str: &str,
+        record_for_undo: bool,
+    ) -> Result<()> {
         let PositionRange {
             start_line,
             start_pos,
             end_line,
             end_pos,
-        } = self.get_lines_and_positions(target_range)?;
+        } = *target;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -612,17 +624,17 @@ impl Editor {
         match self.on_change() {
             Ok(()) => {
                 self.line(fixup_line).set_cursor_position(new_cursor_pos)?;
-                let mut new_lines = Vec::new();
-                for i in start_line..=fixup_line {
-                    new_lines.push(self.line(i).suffix(Position::begin())?);
-                }
                 // Store new edit
-                {
+                if record_for_undo {
+                    let mut new_lines = Vec::new();
+                    for i in start_line..=fixup_line {
+                        new_lines.push(self.line(i).suffix(Position::begin())?);
+                    }
                     self.action_history.store_edit(Edit {
                         start_line,
                         old_lines: backup,
                         new_lines,
-                        selection_before: saved_selection,
+                        selection_before: saved_selection.clone(),
                         selection_after: PositionRange {
                             start_line: fixup_line,
                             start_pos: new_cursor_pos,
@@ -668,8 +680,8 @@ impl Editor {
         let target_range = ev.get_first_target_range()?;
 
         match &ev.input_type() as &str {
-            "insertText" => self.replace_range(&target_range, &ev.data().context("no data")?),
-            "insertFromPaste" => self.replace_range(
+            "insertText" => self.handle_edit(&target_range, &ev.data().context("no data")?),
+            "insertFromPaste" => self.handle_edit(
                 &target_range,
                 &self.input_filter.replace_all(
                     &ev.data_transfer()
@@ -680,9 +692,9 @@ impl Editor {
                 ),
             ),
             "deleteContentBackward" | "deleteContentForward" | "deleteByCut" => {
-                self.replace_range(&target_range, "")
+                self.handle_edit(&target_range, "")
             }
-            "insertParagraph" | "insertLineBreak" => self.replace_range(&target_range, "\n"),
+            "insertParagraph" | "insertLineBreak" => self.handle_edit(&target_range, "\n"),
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
@@ -1139,27 +1151,20 @@ impl Editor {
         insert_lines: &[String],
         selection_after: &PositionRange,
     ) -> Result<()> {
-        let mut document_length = self.text().len();
-        if start_line > document_length {
+        let document_length = self.text().len();
+        if start_line >= document_length {
             bail!("start_line {start_line} out of range");
         }
-        // Removing ending
-        let end = min(
-            start_line
-                .checked_add(remove_len)
-                .unwrap_or(document_length),
-            self.text().len(),
-        );
-        if end > start_line {
-            self.text_mut().remove_range(start_line, end);
-        }
-        // Add new lines
-        for (index, value) in insert_lines.iter().enumerate() {
-            let newline = CodeLine::new(value, &self.factory);
-            self.text_mut().insert(start_line + index, newline);
-        }
-        self.on_change()?;
-        document_length = self.text().len().saturating_sub(1);
+        let end_line = min(start_line + remove_len, document_length) - 1;
+        let target = PositionRange {
+            start_line,
+            start_pos: Position::begin(),
+            end_line,
+            end_pos: self.line(end_line).end_position(),
+        };
+        let new_str = insert_lines.join("\n");
+        self.replace_range(&target, selection_after, &new_str, false)?;
+        let document_length = self.text().len().saturating_sub(1);
         let start_index = min(selection_after.start_line, document_length);
         let end_index = min(selection_after.end_line, document_length);
         // Restore caret position
@@ -1212,7 +1217,7 @@ impl Editor {
             )?;
 
             if pos.in_instr && pos.offset < accepted.len() {
-                self.replace_range(&selection, &accepted[pos.offset..])?;
+                self.handle_edit(&selection, &accepted[pos.offset..])?;
             }
         }
         self.autocomplete_mut().update("");
@@ -1373,5 +1378,81 @@ impl Editor {
         self.push_line("i32.add");
         self.push_line("drop");
         self.push_line(")");
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod browser_tests {
+    use super::*;
+    use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    fn set_contents(editor: &mut Editor, lines: &[&str]) {
+        let line_count = editor.text().len();
+        editor.text_mut().remove_range(0, line_count);
+        for line in lines {
+            editor.push_line(line);
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn action_history_courtesy_end() -> Result<()> {
+        // Need to save a copy of harness body to restore
+        let harness_document = web_sys::window().unwrap().document().unwrap();
+        let harness_body = harness_document.body().expect("harness body");
+
+        let mut document = Document::default();
+        let factory = document.element_factory();
+        let editor = EditorHolder::new(factory.clone())?;
+        let editor_holder = EditorHolder(Rc::clone(&editor.0));
+        document.set_body(Body::new((editor, ()), factory.body()));
+        let editor: &mut Editor = &mut editor_holder.borrow_mut();
+
+        const EMPTY_FUNCTION: &str = "(func\n\n)\n";
+        const BLOCK_INSERTED_FUNCTION: &str = "(func\nblock\nend\n)\n";
+        // Undo and redo preserves added block courtesy end
+        {
+            set_contents(editor, &EMPTY_FUNCTION.lines().collect::<Vec<_>>());
+            assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
+
+            let (node, offset) = editor
+                .line(1)
+                .position_to_node_and_weboffset(Position::begin())?;
+            set_selection_range(&node, offset, &node, offset);
+            editor.handle_edit(&get_selection(), "block")?;
+            assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);
+
+            editor.undo()?;
+            assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
+
+            editor.redo()?;
+            assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);
+        }
+
+        // Undo and redo preserves deleted block courtesy end
+        {
+            set_contents(editor, &BLOCK_INSERTED_FUNCTION.lines().collect::<Vec<_>>());
+            assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);
+
+            let (start_node, start_offset) = editor
+                .line(1)
+                .position_to_node_and_weboffset(Position::begin())?;
+            let (end_node, end_offset) = editor
+                .line(1)
+                .position_to_node_and_weboffset(editor.line(1).end_position())?;
+            set_selection_range(&start_node, start_offset, &end_node, end_offset);
+            editor.handle_edit(&get_selection(), "")?;
+            assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
+
+            editor.undo()?;
+            assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);
+
+            editor.redo()?;
+            assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
+        }
+
+        // restore test harness body
+        harness_document.set_body(Some(&harness_body));
+        Ok(())
     }
 }

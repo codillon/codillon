@@ -200,7 +200,7 @@ impl Position {
         }
     }
 }
-
+#[derive(Clone)]
 pub struct PositionRange {
     pub start_line: usize,
     pub start_pos: Position,
