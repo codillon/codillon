@@ -454,29 +454,29 @@ impl Editor {
     }
 
     // Replace a given range (currently within a single line) with new text
-    fn replace_range(&mut self, target_range: &impl RangeLike, new_str: &str) -> Result<()> {
+    fn handle_edit(&mut self, target_range: &impl RangeLike, new_str: &str) -> Result<()> {
         if new_str.chars().any(|x| x.is_control() && x != '\n') {
             bail!("unhandled control char in input");
         }
 
         let saved_selection = self.get_lines_and_positions(&get_selection())?; // in case we need to revert
         let target = self.get_lines_and_positions(target_range)?;
-        self.replace_position_range(target, saved_selection, new_str, true)
+        self.replace_range(&target, &saved_selection, new_str, true)
     }
 
-    fn replace_position_range(
+    fn replace_range(
         &mut self,
-        target: PositionRange,
-        saved_selection: PositionRange,
+        target: &PositionRange,
+        saved_selection: &PositionRange,
         new_str: &str,
-        record: bool,
+        record_for_undo: bool,
     ) -> Result<()> {
         let PositionRange {
             start_line,
             start_pos,
             end_line,
             end_pos,
-        } = target;
+        } = *target;
 
         let mut backup = Vec::new();
         for i in start_line..end_line + 1 {
@@ -625,7 +625,7 @@ impl Editor {
             Ok(()) => {
                 self.line(fixup_line).set_cursor_position(new_cursor_pos)?;
                 // Store new edit
-                if record {
+                if record_for_undo {
                     let mut new_lines = Vec::new();
                     for i in start_line..=fixup_line {
                         new_lines.push(self.line(i).suffix(Position::begin())?);
@@ -634,7 +634,7 @@ impl Editor {
                         start_line,
                         old_lines: backup,
                         new_lines,
-                        selection_before: saved_selection,
+                        selection_before: saved_selection.clone(),
                         selection_after: PositionRange {
                             start_line: fixup_line,
                             start_pos: new_cursor_pos,
@@ -680,8 +680,8 @@ impl Editor {
         let target_range = ev.get_first_target_range()?;
 
         match &ev.input_type() as &str {
-            "insertText" => self.replace_range(&target_range, &ev.data().context("no data")?),
-            "insertFromPaste" => self.replace_range(
+            "insertText" => self.handle_edit(&target_range, &ev.data().context("no data")?),
+            "insertFromPaste" => self.handle_edit(
                 &target_range,
                 &self.input_filter.replace_all(
                     &ev.data_transfer()
@@ -692,9 +692,9 @@ impl Editor {
                 ),
             ),
             "deleteContentBackward" | "deleteContentForward" | "deleteByCut" => {
-                self.replace_range(&target_range, "")
+                self.handle_edit(&target_range, "")
             }
-            "insertParagraph" | "insertLineBreak" => self.replace_range(&target_range, "\n"),
+            "insertParagraph" | "insertLineBreak" => self.handle_edit(&target_range, "\n"),
             _ => bail!(format!(
                 "unhandled input type {}, data {:?}",
                 ev.input_type(),
@@ -1163,7 +1163,7 @@ impl Editor {
             end_pos: self.line(end_line).end_position(),
         };
         let new_str = insert_lines.join("\n");
-        self.replace_position_range(target, selection_after.clone(), &new_str, false)?;
+        self.replace_range(&target, selection_after, &new_str, false)?;
         let document_length = self.text().len().saturating_sub(1);
         let start_index = min(selection_after.start_line, document_length);
         let end_index = min(selection_after.end_line, document_length);
@@ -1217,7 +1217,7 @@ impl Editor {
             )?;
 
             if pos.in_instr && pos.offset < accepted.len() {
-                self.replace_range(&selection, &accepted[pos.offset..])?;
+                self.handle_edit(&selection, &accepted[pos.offset..])?;
             }
         }
         self.autocomplete_mut().update("");
@@ -1419,7 +1419,7 @@ mod browser_tests {
                 .line(1)
                 .position_to_node_and_weboffset(Position::begin())?;
             set_selection_range(&node, offset, &node, offset);
-            editor.replace_range(&get_selection(), "block")?;
+            editor.handle_edit(&get_selection(), "block")?;
             assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);
 
             editor.undo()?;
@@ -1441,7 +1441,7 @@ mod browser_tests {
                 .line(1)
                 .position_to_node_and_weboffset(editor.line(1).end_position())?;
             set_selection_range(&start_node, start_offset, &end_node, end_offset);
-            editor.replace_range(&get_selection(), "")?;
+            editor.handle_edit(&get_selection(), "")?;
             assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
 
             editor.undo()?;
