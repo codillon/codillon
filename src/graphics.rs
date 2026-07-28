@@ -194,7 +194,11 @@ impl FrameLine {
 
         let height = y_bot - y_top;
         let hheight = if info.impairment.is_unclosed() {
-            0.5 * height - 0.29 * LINE_SPACING as f64
+            if info.indent > 0 {
+                0.5 * height - 0.29 * LINE_SPACING as f64
+            } else {
+                0.5 * height + 0.2 * LINE_SPACING as f64
+            }
         } else {
             0.5 * height
         };
