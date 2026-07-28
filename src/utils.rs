@@ -1,6 +1,6 @@
 use crate::syntax::{
-    FrameInfo, FrameInfosMut, FuncPart, InstrKind, LineInfos, LineInfosMut, LineKind, ModulePart,
-    find_function_ranges,
+    FrameInfo, FrameInfosMut, FuncPart, Impairment, InstrKind, LineInfos, LineInfosMut, LineKind,
+    ModulePart, find_function_ranges,
 };
 use EncoderInstruction::*;
 use anyhow::{Result, bail};
@@ -10,7 +10,7 @@ use std::{
     cmp::{max, min},
     collections::HashMap,
     fmt::Debug,
-    ops::Range,
+    ops::{BitOr, BitOrAssign, Range},
 };
 use wasm_encoder::{
     CodeSection, Instruction as EncoderInstruction, MemArg, ValType as EncoderValType,
@@ -195,8 +195,8 @@ pub struct Aligned<T> {
 
 pub struct RawFunction<'a> {
     pub type_idx: u32,
-    pub lines: (usize, usize),
-    pub positions: (u32, u32),
+    pub lines: (usize, usize, usize),
+    pub positions: (u32, u32, u32),
     pub params: Vec<Aligned<ValType>>,
     pub locals: Vec<Aligned<ValType>>,
     pub operators: Vec<Aligned<Operator<'a>>>,
@@ -205,8 +205,8 @@ pub struct RawFunction<'a> {
 #[derive(Debug)]
 pub struct ValidFunction<'a> {
     pub type_idx: u32,
-    pub lines: (usize, usize),
-    pub positions: (u32, u32),
+    pub lines: (usize, usize, usize),
+    pub positions: (u32, u32, u32),
     pub params: Vec<Aligned<ValType>>,
     pub locals: Vec<Aligned<ValType>>,
     pub operators: Vec<Aligned<GeneralOperator<'a>>>,
@@ -349,7 +349,7 @@ impl<'a> RawModule<'a> {
             "function count mismatch"
         );
 
-        for (func_idx, ((mut locals, mut operators), (start_line, end_line))) in
+        for (func_idx, ((mut locals, mut operators), (start_line, first_op_line, end_line))) in
             funcs.into_iter().zip(function_ranges).enumerate()
         {
             // align params
@@ -408,8 +408,12 @@ impl<'a> RawModule<'a> {
             }
             functions.push(RawFunction {
                 type_idx: func_type_indices[func_idx],
-                lines: (start_line, end_line),
-                positions: (editor.info(start_line).id, editor.info(end_line).id),
+                lines: (start_line, first_op_line, end_line),
+                positions: (
+                    editor.info(start_line).id,
+                    editor.info(first_op_line).id,
+                    editor.info(end_line).id,
+                ),
                 params,
                 locals,
                 operators,
@@ -971,7 +975,7 @@ impl<'a> ValidModule<'a> {
 
             let operator_ty = stack.op(&op.inner.op, func_validator, slots, op.inner.untyped)?;
 
-            if op.line_idx == valid_func.lines.1 && op.inner.info != OpInfo::FuncEnd {
+            if op.line_idx == valid_func.lines.2 && op.inner.info != OpInfo::FuncEnd {
                 // don't give type to synthetic else or end at end of function
                 debug_assert!(
                     (op.inner.op == Operator::End)
@@ -1471,7 +1475,7 @@ impl<'a> ValidModule<'a> {
                 new_function.instruction(&op);
             }
 
-            if codillon_operator.line_idx == orig_function.lines.1 {
+            if codillon_operator.line_idx == orig_function.lines.2 {
                 // synthetic else or end
 
                 debug_assert!(
@@ -1892,7 +1896,61 @@ pub fn find_comment(s1: &str, s2: &str) -> Option<usize> {
 pub const FRAME_MARGIN: u16 = 3;
 pub const BLOCK_BOUNDARY_INDENT: u16 = 3;
 
-pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, types: &TypedModule) {
+#[derive(Default)]
+pub struct FunctionIdCache {
+    by_start_line: HashMap<u32, u32>,
+    by_first_op_line: HashMap<u32, u32>,
+    by_end_line: HashMap<u32, u32>,
+    positions: HashMap<u32, (u32, u32, u32)>,
+    next_id_available: u32,
+}
+
+impl FunctionIdCache {
+    fn remove(&mut self, id: u32) {
+        let positions = self.positions[&id];
+        assert!(self.by_start_line.remove(&positions.0).is_some());
+        assert!(self.by_first_op_line.remove(&positions.1).is_some());
+        assert!(self.by_end_line.remove(&positions.2).is_some());
+    }
+
+    fn gen_func_id(&mut self, positions: &(u32, u32, u32)) -> u32 {
+        if let Some(id) = self.by_start_line.get(&positions.0).copied() {
+            self.remove(id);
+            return id;
+        }
+
+        if let Some(id) = self.by_first_op_line.get(&positions.1).copied() {
+            self.remove(id);
+            return id;
+        }
+
+        if let Some(id) = self.by_end_line.get(&positions.2).copied() {
+            self.remove(id);
+            return id;
+        }
+
+        let ret = self.next_id_available;
+        self.next_id_available += 1;
+        ret
+    }
+
+    fn insert(&mut self, positions: &(u32, u32, u32), id: u32) {
+        assert!(self.by_start_line.insert(positions.0, id).is_none());
+        assert!(self.by_first_op_line.insert(positions.1, id).is_none());
+        assert!(self.by_end_line.insert(positions.2, id).is_none());
+        assert!(self.positions.insert(id, *positions).is_none());
+        if id >= self.next_id_available {
+            self.next_id_available = id + 1;
+        }
+    }
+}
+
+pub fn indent_and_frame(
+    code: &mut impl FrameInfosMut,
+    module: &ValidModule,
+    types: &TypedModule,
+    mut id_cache: Option<FunctionIdCache>,
+) -> FunctionIdCache {
     assert!(code.len() > 0);
 
     struct OpenFrame {
@@ -1902,6 +1960,8 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
         slots: Vec<SlotUse>,
     }
 
+    let mut output_function_id_cache = FunctionIdCache::default();
+
     let mut frames: HashMap<u32, FrameInfo> = module
         .functions
         .iter()
@@ -1909,20 +1969,41 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
             |ValidFunction {
                  lines, positions, ..
              }| {
+                let start_line = lines.0;
+                let wide = !code
+                    .info(start_line)
+                    .synthetic_before
+                    .module_field_syntax
+                    .is_empty();
+                let persistent_id = if let Some(id_cache) = &mut id_cache {
+                    id_cache.gen_func_id(positions)
+                } else {
+                    positions.0
+                };
+                output_function_id_cache.insert(positions, persistent_id);
+                let impairment = if code.info(lines.2).synthetic_before.module_field_syntax
+                    == vec![FuncPart::RParen]
+                {
+                    Impairment::Unclosed
+                } else if !code
+                    .info(lines.0)
+                    .synthetic_before
+                    .module_field_syntax
+                    .is_empty()
+                {
+                    Impairment::Impaired
+                } else {
+                    Impairment::Normal
+                };
                 (
-                    2 * positions.0 + 1, // identify function frames with odd numbers
+                    2 * persistent_id + 1, // identify function frames with odd numbers
                     FrameInfo {
                         indent: 0,
                         start: lines.0,
-                        end: lines.1,
-                        unclosed: code.info(lines.1).synthetic_before.module_field_syntax
-                            == vec![FuncPart::RParen],
+                        end: lines.2,
+                        impairment,
                         kind: InstrKind::OtherStructured,
-                        wide: !code
-                            .info(lines.0)
-                            .synthetic_before
-                            .module_field_syntax
-                            .is_empty(),
+                        wide,
                     },
                 )
             },
@@ -2066,7 +2147,11 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                                 indent: f.indent,
                                 start: line_no,
                                 end: f.end,
-                                unclosed: f.synthetic,
+                                impairment: if f.synthetic {
+                                    Impairment::Unclosed
+                                } else {
+                                    Impairment::Normal
+                                },
                                 kind,
                                 wide: false,
                             },
@@ -2083,7 +2168,11 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
                                 indent: f.indent,
                                 start: line_no,
                                 end: f.end,
-                                unclosed: f.synthetic,
+                                impairment: if f.synthetic {
+                                    Impairment::Unclosed
+                                } else {
+                                    Impairment::Normal
+                                },
                                 kind,
                                 wide: false,
                             },
@@ -2202,6 +2291,7 @@ pub fn indent_and_frame(code: &mut impl FrameInfosMut, module: &ValidModule, typ
     debug_assert!(func_ops_rev.next().is_none());
 
     code.set_frames(frames);
+    output_function_id_cache
 }
 
 pub trait FmtError {
@@ -2219,9 +2309,16 @@ impl<T, Q: core::fmt::Debug> FmtError for Result<T, Q> {
 #[derive(Default, PartialEq, Debug)]
 pub struct AnimationRequest(pub bool);
 
-impl AnimationRequest {
-    pub fn or(&mut self, other: AnimationRequest) {
-        self.0 |= other.0;
+impl BitOrAssign for AnimationRequest {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
+}
+
+impl BitOr for AnimationRequest {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
     }
 }
 
@@ -2258,7 +2355,7 @@ impl Tween {
         } else {
             self.snap(new_target);
         }
-        AnimationRequest(true)
+        AnimationRequest(smooth)
     }
 
     pub fn approach(&mut self, new_target: f64) {
@@ -2464,8 +2561,8 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 7),
-                positions: (0, 0),
+                lines: (0, 0, 7),
+                positions: (0, 0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -2545,8 +2642,8 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 8),
-                positions: (0, 0),
+                lines: (0, 0, 8),
+                positions: (0, 0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -2632,8 +2729,8 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 9),
-                positions: (0, 0),
+                lines: (0, 0, 9),
+                positions: (0, 0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -2728,8 +2825,8 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 10),
-                positions: (0, 0),
+                lines: (0, 0, 10),
+                positions: (0, 0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -2817,8 +2914,8 @@ pub(crate) mod tests {
             globals: vec![],
             functions: vec![RawFunction {
                 type_idx: 0,
-                lines: (0, 2),
-                positions: (0, 0),
+                lines: (0, 0, 2),
+                positions: (0, 0, 0),
                 params: vec![],
                 locals: vec![],
                 operators: vec![
@@ -3021,7 +3118,7 @@ pub(crate) mod tests {
             .to_types_table(&wasm_bin)
             .context("to_types_table")?;
 
-        indent_and_frame(editor, &validized, &types);
+        indent_and_frame(editor, &validized, &types, None);
 
         let connections = find_connections(&validized, &types);
 

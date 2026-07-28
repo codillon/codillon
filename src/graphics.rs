@@ -27,8 +27,8 @@ use std::{
 use thousands::Separable;
 use wasmparser::ValType;
 use web_sys::{
-    SvgDefsElement, SvgElement, SvgLinearGradientElement, SvgMaskElement, SvgPathElement,
-    SvgStopElement, SvgTextElement, SvgUseElement, SvggElement, console::log_1,
+    SvgDefsElement, SvgElement, SvgLinearGradientElement, SvgPathElement, SvgStopElement,
+    SvgTextElement, SvgUseElement, SvggElement, console::log_1,
 };
 
 const SYM_HW: f32 = 15.0;
@@ -44,10 +44,7 @@ pub struct FractionInfo {
 type DomLine = DomStruct<
     (
         ElementHandle<SvgPathElement>,
-        (
-            DomStruct<(ElementHandle<SvgPathElement>, ()), SvgMaskElement>,
-            (SymbolUse, ()),
-        ), // an optional symbol for "unclosed" frames
+        (SymbolUse, ()), // an optional symbol for "unclosed" frames
     ),
     SvggElement,
 >;
@@ -73,14 +70,10 @@ impl SymbolUse {
     }
 
     fn set_visibility(&mut self, smooth: bool, visible: bool) -> AnimationRequest {
-        if smooth {
-            self.opacity.approach(visible as usize as f64);
-        } else {
-            self.opacity.snap(visible as usize as f64);
-            self.elem
-                .set_attr_num("opacity", self.opacity.value().unwrap());
-        }
-        self.has_pending_animation()
+        let ret = self.opacity.goto(smooth, visible as usize as f64);
+        self.elem
+            .set_attr_num("opacity", self.opacity.value().unwrap());
+        ret
     }
 
     fn has_pending_animation(&self) -> AnimationRequest {
@@ -102,7 +95,7 @@ struct FrameLine {
     info: Option<FrameInfo>,
     animated_indent: Option<f64>,
     elem: DomLine,
-    reveal: Tween,
+    opacity: Tween,
 
     x_left: Tween,
     y_top: Tween,
@@ -130,20 +123,12 @@ impl FrameLine {
         &mut self.elem.get_mut().0
     }
 
-    fn mask(&mut self) -> &mut DomStruct<(ElementHandle<SvgPathElement>, ()), SvgMaskElement> {
-        &mut self.elem.get_mut().1.0
-    }
-
-    fn mask_path(&mut self) -> &mut ElementHandle<SvgPathElement> {
-        &mut self.elem.get_mut().1.0.get_mut().0
-    }
-
     fn symbol(&self) -> &SymbolUse {
-        &self.elem.get().1.1.0
+        &self.elem.get().1.0
     }
 
     fn symbol_mut(&mut self) -> &mut SymbolUse {
-        &mut self.elem.get_mut().1.1.0
+        &mut self.elem.get_mut().1.0
     }
 
     fn new(factory: &ElementFactory) -> Self {
@@ -151,16 +136,10 @@ impl FrameLine {
             info: None,
             animated_indent: None,
             elem: DomStruct::new(
-                (
-                    factory.svg_path(),
-                    (
-                        DomStruct::new((factory.svg_path(), ()), factory.svg_mask()),
-                        (SymbolUse::new_symbol(factory), ()),
-                    ),
-                ),
+                (factory.svg_path(), (SymbolUse::new_symbol(factory), ())),
                 factory.svg_g(),
             ),
-            reveal: Tween::Pre,
+            opacity: Tween::Pre,
             x_left: Tween::Pre,
             y_top: Tween::Pre,
             bwidth_factor: Tween::Pre,
@@ -172,34 +151,26 @@ impl FrameLine {
         NEXT_FRAME_ID.replace(id + 1);
 
         ret.line()
-            .set_attribute("mask", &format!("url(#mask-{id})"));
-        ret.mask().set_attribute("id", &format!("mask-{id}"));
-
-        ret.line()
             .set_attribute("stroke-width", &format!("{WIDTH}px"));
         ret.line().set_attribute("fill", "none");
-        ret.mask_path()
-            .set_attribute("stroke-width", &format!("{WIDTH}px"));
-        ret.mask_path().set_attribute("stroke", "white");
-        ret.mask_path().set_attribute("fill", "none");
-        ret.mask_path().set_attr_num("pathLength", 1);
 
         ret
     }
 
-    fn hide(&mut self, mut smooth: bool) -> AnimationRequest {
-        if let Some(FrameInfo { indent: 0, .. }) = &self.info {
-            smooth = false;
+    fn hide(&mut self, smooth: bool) -> AnimationRequest {
+        // "else" should should move down to the bottom of an existing if block
+        let mut ret = AnimationRequest(false);
+        if let Some(info) = &self.info
+            && info.kind == InstrKind::Else
+        {
+            ret |= self.y_top.goto(
+                smooth,
+                (info.end * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX) as f64,
+            );
+            ret |= self.hheight.goto(smooth, 0.0);
         }
-        self.reveal.goto(smooth, -1.0)
-    }
 
-    fn natural_origin(info: &FrameInfo) -> f64 {
-        if info.kind == InstrKind::Else {
-            -1.0
-        } else {
-            1.0
-        }
+        ret | self.opacity.goto(smooth, 0.0) | self.symbol_mut().set_visibility(smooth, false)
     }
 
     const BACKUP: f64 = 30.0; // controls arm of frame vertical
@@ -209,25 +180,8 @@ impl FrameLine {
         &mut self,
         info: FrameInfo,
         animated_indent: Option<f64>,
-        mut smooth: bool,
+        smooth: bool,
     ) -> AnimationRequest {
-        // force snap transition on functions?
-        if info.indent == 0 {
-            smooth = false;
-        }
-
-        if self.reveal.value().is_none() {
-            self.reveal.snap(Self::natural_origin(&info));
-        }
-        let mut ret = self.reveal.goto(smooth, 0.0);
-
-        if let Some(current_info) = &self.info
-            && *current_info == info
-            && self.animated_indent == animated_indent
-        {
-            return self.reveal.is_pending();
-        }
-
         let x_offset = if info.indent > 0 {
             X_OFFSET_PX
         } else {
@@ -239,29 +193,42 @@ impl FrameLine {
         let y_bot = (info.end * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX) as f64;
 
         let height = y_bot - y_top;
-        let hheight = if info.unclosed {
+        let hheight = if info.impairment.is_unclosed() {
             0.5 * height - 0.29 * LINE_SPACING as f64
         } else {
             0.5 * height
         };
-        let bwidth_factor = if info.unclosed { 0.0 } else { 1.0 };
+        let bwidth_factor = if info.impairment.is_unclosed() {
+            0.0
+        } else {
+            1.0
+        };
 
-        ret.or(self.x_left.goto(smooth, x_left));
-        ret.or(self.y_top.goto(smooth, y_top));
-        ret.or(self.bwidth_factor.goto(smooth, bwidth_factor));
-        ret.or(self.hheight.goto(smooth, hheight));
-        ret.or(self.w3.goto(
+        // "else" should move up from the bottom of an existing if block
+        if self.info.is_none() && info.kind == InstrKind::Else {
+            self.y_top.snap(y_bot);
+            self.hheight.snap(0.0);
+        }
+
+        let mut ret = self.opacity.goto(smooth, 1.0);
+        ret |= self
+            .symbol_mut()
+            .set_visibility(smooth, info.impairment.is_unclosed());
+
+        ret |= self.y_top.goto(smooth, y_top);
+        ret |= self.hheight.goto(smooth, hheight);
+        ret |= self.x_left.goto(smooth, x_left);
+        ret |= self.bwidth_factor.goto(smooth, bwidth_factor);
+        ret |= self.w3.goto(
             smooth,
-            if info.unclosed {
+            if info.impairment.is_unclosed() {
                 0.5 * Self::BACKUP
             } else {
                 Self::BACKUP
             },
-        ));
+        );
 
-        ret.or(self.symbol_mut().set_visibility(smooth, info.unclosed));
-
-        if info.unclosed {
+        if info.impairment.is_bad() {
             self.line().set_attribute("stroke", "darkred");
         } else {
             match info.kind {
@@ -284,9 +251,7 @@ impl FrameLine {
         self.info = Some(info);
         self.animated_indent = animated_indent;
 
-        ret.or(self.draw());
-
-        ret
+        self.draw() | ret
     }
 
     fn draw(&mut self) -> AnimationRequest {
@@ -294,7 +259,7 @@ impl FrameLine {
             info: Some(info),
             animated_indent,
             elem,
-            reveal,
+            opacity,
             x_left,
             y_top,
             bwidth_factor,
@@ -305,8 +270,8 @@ impl FrameLine {
             panic!();
         };
 
-        let (reveal, x_left, y_top, bwidth_factor, hheight, w3) = (
-            reveal.value().unwrap(),
+        let (opacity, x_left, y_top, bwidth_factor, hheight, w3) = (
+            opacity.value().unwrap(),
             x_left.value().unwrap(),
             y_top.value().unwrap(),
             bwidth_factor.value().unwrap(),
@@ -347,23 +312,7 @@ impl FrameLine {
             "M {x_right},{y_top} h -{width} c -{backup},0 -{backup},{dist1} -{backup},{hheight} c 0,{dist2} 0,{hheight} {w3},{hheight} h {bwidth}"
         );
         elem.get_mut().0.set_attribute("d", d);
-
-        // progressive reveal
-        {
-            let mask_path = &mut elem.get_mut().1.0.get_mut().0;
-            mask_path.set_attribute("d", d);
-            if reveal >= 0.0 {
-                mask_path
-                    .set_attribute("stroke-dasharray", &format!("{} {}", 1.0 - reveal, reveal));
-                mask_path.set_attr_num("opacity", 1);
-            } else {
-                mask_path.set_attribute(
-                    "stroke-dasharray",
-                    &format!("0 {} {}", -reveal, 1.0 + reveal),
-                );
-                mask_path.set_attr_num("opacity", 1.0 + reveal);
-            }
-        }
+        elem.get_mut().0.set_attr_num("opacity", opacity);
 
         self.symbol_mut().snap_to(
             x_right - width - backup + w3 + bwidth,
@@ -374,11 +323,13 @@ impl FrameLine {
     }
 
     fn has_pending_animation(&self) -> AnimationRequest {
-        AnimationRequest(
-            self.reveal.is_pending().0
-                || self.x_left.is_pending().0
-                || self.symbol().has_pending_animation().0,
-        )
+        self.opacity.is_pending()
+            | self.x_left.is_pending()
+            | self.y_top.is_pending()
+            | self.bwidth_factor.is_pending()
+            | self.hheight.is_pending()
+            | self.w3.is_pending()
+            | self.symbol().has_pending_animation()
     }
 
     pub fn animate(&mut self, t: f64, animated_indent: Option<f64>) -> AnimationRequest {
@@ -386,7 +337,7 @@ impl FrameLine {
             self.animated_indent = animated_indent;
         }
         self.symbol_mut().animate(t);
-        self.reveal.animate(t);
+        self.opacity.animate(t);
         self.x_left.animate(t);
         self.y_top.animate(t);
         self.bwidth_factor.animate(t);
@@ -741,7 +692,7 @@ impl DomImage {
             let mut arrow_icon = Self::make_icon(
                 &factory,
                 "arrow",
-                "m -78.84,0.938 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.813,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -1.406,0 v -1.875 l -4.384,-6.563 h 12.656 l 4.383,5.563 H -6.344 V -5.453 L -0.001,0 -6.344,5.453 V 1.938 h -69.683 l -4.383,5.562 h -12.656 z  m 9.844,-1.875 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.813,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z",
+                "m -95.773,0.938 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.813,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -2.812,0 -3.75,5.625 h 1.406 l 3.75,-5.625 z  m -1.406,0 v -1.875 L -110,-7.5 h 12.656 l 4.383,5.563 H -6.344 V -5.453 L -0.001,0 -6.344,5.453 V 1.938 H -92.96 l -4.383,5.562 h -12.656 z  m 9.844,-1.875 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.813,0 h 1.406 l -3.75,-5.625 h -1.406 z  m -2.812,0 h 1.406 l -3.75,-5.625 h -1.406 z",
                 "#000080",
                 "#fffff0",
                 "1",
@@ -1016,7 +967,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         {
             let mut to_delete = vec![];
             for (id, bl) in self.blocks().iter() {
-                if bl.reveal.value() == Some(-1.0) {
+                if bl.opacity.value() == Some(0.0) {
                     to_delete.push(*id);
                 }
             }

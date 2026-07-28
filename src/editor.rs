@@ -21,9 +21,9 @@ use crate::{
         fix_syntax,
     },
     utils::{
-        AnimationRequest, AnnotatedOperatorType, ConnectionSource, FmtError, OperatorType,
-        RawModule, SlotConnections, SlotInfo, TypedModule, ValidModule, find_connections,
-        indent_and_frame, str_to_binary,
+        AnimationRequest, AnnotatedOperatorType, ConnectionSource, FmtError, FunctionIdCache,
+        OperatorType, RawModule, SlotConnections, SlotInfo, TypedModule, ValidModule,
+        find_connections, indent_and_frame, str_to_binary,
     },
 };
 use anyhow::{Context, Result, bail};
@@ -123,6 +123,7 @@ struct Editor {
     animation_handler: ScopedClosure<'static, dyn Fn(f64)>,
     animation_pending: bool,
     animations: PendingAnimations,
+    function_identity_cache: FunctionIdCache,
 }
 
 pub struct EditorHolder(Rc<RefCell<Editor>>);
@@ -811,7 +812,9 @@ impl Editor {
         let types = validized.to_types_table(&wasm_bin)?;
 
         // indent operators and find frames
-        indent_and_frame(self, &validized, &types);
+        let current_cache = std::mem::take(&mut self.function_identity_cache);
+        self.function_identity_cache =
+            indent_and_frame(self, &validized, &types, Some(current_cache));
 
         // update visual types of params, locals, and operators
         self.scroll_on_next_input = false; // edit to text buffer -> don't scroll to arrow
@@ -1272,6 +1275,7 @@ impl Editor {
             animation_handler: Closure::new(|_| {}),
             animation_pending: false,
             animations: Default::default(),
+            function_identity_cache: Default::default(),
         };
 
         let text = ret.textbox_mut();
