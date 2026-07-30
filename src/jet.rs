@@ -412,13 +412,11 @@ impl<T: AnyElement> ElementHandle<T> {
     }
 
     #[cfg(debug_assertions)]
-    pub fn assert_is_entire_body(&self) {
+    pub fn assert_is_only_child(&self) {
         self.with_node(
             |node| {
-                let doc = node.owner_document().unwrap();
-                let body = doc.body().unwrap();
-                assert_eq!(body.child_nodes().length(), 1);
-                assert!(body.first_child().unwrap().is_same_node(Some(node)));
+                let parent = node.parent_node().expect("parent node");
+                assert_eq!(parent.child_nodes().length(), 1);
             },
             TOKEN,
         );
@@ -494,6 +492,19 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> Default for Document
             body: None,
         }
     }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+pub fn append_to_body(child: &impl WithNode) {
+    let body = web_sys::window()
+        .expect("window")
+        .document()
+        .expect("document")
+        .body()
+        .expect("body");
+    child
+        .with_node(|node| body.append_with_node_1(node), TOKEN)
+        .expect("append node");
 }
 
 #[derive(Clone)]

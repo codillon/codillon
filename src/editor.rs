@@ -227,7 +227,7 @@ impl Editor {
         self.window.audit();
 
         if self.component.is_connected() {
-            self.component.elem().assert_is_entire_body();
+            self.component.elem().assert_is_only_child();
         }
     }
 
@@ -992,7 +992,7 @@ impl Editor {
                             // flush
                             let indent = self.line(line_idx).info().indent.unwrap_or(0);
                             tagged_types.insert(
-                                local.position_id,
+                                self.line(line_idx).id(),
                                 FractionInfo {
                                     line_no: line_idx,
                                     indent,
@@ -1387,32 +1387,53 @@ mod browser_tests {
     use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
     wasm_bindgen_test_configure!(run_in_browser);
 
-    fn set_contents(editor: &mut Editor, lines: &[&str]) {
-        let line_count = editor.text().len();
-        editor.text_mut().remove_range(0, line_count);
-        for line in lines {
-            editor.push_line(line);
+    struct TestEditor {
+        _container: DomStruct<(EditorHolder, ()), HtmlDivElement>,
+        editor: EditorHolder,
+    }
+
+    thread_local! {
+        static TEST_EDITOR: TestEditor = TestEditor::new().expect("test editor");
+    }
+
+    impl TestEditor {
+        fn new() -> Result<Self> {
+            let factory = Document::default().element_factory();
+            let editor = EditorHolder::new(factory.clone())?;
+            let handle = EditorHolder(Rc::clone(&editor.0));
+            let container = DomStruct::new((editor, ()), factory.div());
+            crate::jet::append_to_body(&container);
+            Ok(Self {
+                _container: container,
+                editor: handle,
+            })
         }
+    }
+
+    fn set_editor_content(content: &str) -> EditorHolder {
+        TEST_EDITOR.with(|test_editor| {
+            let holder = EditorHolder(Rc::clone(&test_editor.editor.0));
+            {
+                let editor: &mut Editor = &mut holder.borrow_mut();
+                let line_count = editor.text().len();
+                editor.text_mut().remove_range(0, line_count);
+                for line in content.lines() {
+                    editor.push_line(line);
+                }
+            }
+            holder
+        })
     }
 
     #[wasm_bindgen_test]
     fn action_history_courtesy_end() -> Result<()> {
-        // Need to save a copy of harness body to restore
-        let harness_document = web_sys::window().unwrap().document().unwrap();
-        let harness_body = harness_document.body().expect("harness body");
-
-        let mut document = Document::default();
-        let factory = document.element_factory();
-        let editor = EditorHolder::new(factory.clone())?;
-        let editor_holder = EditorHolder(Rc::clone(&editor.0));
-        document.set_body(Body::new((editor, ()), factory.body()));
-        let editor: &mut Editor = &mut editor_holder.borrow_mut();
-
         const EMPTY_FUNCTION: &str = "(func\n\n)\n";
         const BLOCK_INSERTED_FUNCTION: &str = "(func\nblock\nend\n)\n";
+
         // Undo and redo preserves added block courtesy end
         {
-            set_contents(editor, &EMPTY_FUNCTION.lines().collect::<Vec<_>>());
+            let holder = set_editor_content(EMPTY_FUNCTION);
+            let editor: &mut Editor = &mut holder.borrow_mut();
             assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
 
             let (node, offset) = editor
@@ -1431,7 +1452,8 @@ mod browser_tests {
 
         // Undo and redo preserves deleted block courtesy end
         {
-            set_contents(editor, &BLOCK_INSERTED_FUNCTION.lines().collect::<Vec<_>>());
+            let holder = set_editor_content(BLOCK_INSERTED_FUNCTION);
+            let editor: &mut Editor = &mut holder.borrow_mut();
             assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);
 
             let (start_node, start_offset) = editor
@@ -1450,9 +1472,17 @@ mod browser_tests {
             editor.redo()?;
             assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
         }
+        Ok(())
+    }
 
-        // restore test harness body
-        harness_document.set_body(Some(&harness_body));
+    #[wasm_bindgen_test]
+    fn local_fractions() -> Result<()> {
+        let holder = set_editor_content("(func\n(local f64)\n(local f64)\n)\n");
+        let editor: &mut Editor = &mut holder.borrow_mut();
+        editor.on_change()?;
+
+        assert!(editor.image().check_fraction(editor.line(1).id()));
+        assert!(editor.image().check_fraction(editor.line(2).id()));
         Ok(())
     }
 }

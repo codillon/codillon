@@ -599,6 +599,11 @@ impl DomImage {
         get_mut!(self.contents, fractions)
     }
 
+    #[cfg(all(test, target_arch = "wasm32"))]
+    pub fn check_fraction(&self, id: u32) -> bool {
+        self.fractions().get(&id).is_some()
+    }
+
     fn blocks(&self) -> &CodillonBlocks {
         get!(self.contents, blocks)
     }
@@ -1142,6 +1147,10 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         is_input: bool,
         value: &Option<SlotContents>,
     ) {
+        debug_assert!(
+            self.fractions().get(&location.position_id).is_some(),
+            "no fraction at expected position"
+        );
         let fraction = &mut self.fractions_mut()[location.position_id];
         let slot = if is_input {
             &mut fraction.inputs()[location.operand_num]
