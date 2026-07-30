@@ -1147,10 +1147,6 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         is_input: bool,
         value: &Option<SlotContents>,
     ) {
-        debug_assert!(
-            self.fractions().get(&location.position_id).is_some(),
-            "no fraction at expected position"
-        );
         let fraction = &mut self.fractions_mut()[location.position_id];
         let slot = if is_input {
             &mut fraction.inputs()[location.operand_num]
