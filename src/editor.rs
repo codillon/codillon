@@ -227,6 +227,8 @@ impl Editor {
         self.window.audit();
 
         if self.component.is_connected() {
+            // the wasm-bindgen in-browser tests don't attach the Editor to the entire body
+            #[cfg(not(all(test, target_arch = "wasm32")))]
             self.component.elem().assert_is_entire_body();
         }
     }
@@ -992,7 +994,7 @@ impl Editor {
                             // flush
                             let indent = self.line(line_idx).info().indent.unwrap_or(0);
                             tagged_types.insert(
-                                local.position_id,
+                                self.line(line_idx).id(),
                                 FractionInfo {
                                     line_no: line_idx,
                                     indent,
@@ -1384,36 +1386,48 @@ impl Editor {
 #[cfg(all(test, target_arch = "wasm32"))]
 mod browser_tests {
     use super::*;
+    use crate::jet::wasm_bindgen_test_harness_body;
     use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
     wasm_bindgen_test_configure!(run_in_browser);
 
-    fn set_contents(editor: &mut Editor, lines: &[&str]) {
+    thread_local! {
+        static TEST_EDITOR: EditorHolder = make_test_editor();
+    }
+
+    fn make_test_editor() -> EditorHolder {
+        let editor = EditorHolder::new(Document::default().element_factory()).expect("editor");
+        let test_harness_body = wasm_bindgen_test_harness_body().expect("body");
+        test_harness_body.append_node(&editor);
+        std::mem::forget(test_harness_body); // don't delete body from the document
+        editor
+    }
+
+    fn get_editor_holder() -> EditorHolder {
+        TEST_EDITOR.with(|test_editor| test_editor.borrow_mut().holder())
+    }
+
+    fn set_editor_content(editor: &mut Editor, content: &str) {
         let line_count = editor.text().len();
         editor.text_mut().remove_range(0, line_count);
-        for line in lines {
+        assert!(editor.buffer_as_text().is_empty());
+        for line in content.lines() {
             editor.push_line(line);
         }
+        assert_eq!(editor.buffer_as_text(), content);
+        editor.on_change().expect("usable contents");
     }
 
     #[wasm_bindgen_test]
     fn action_history_courtesy_end() -> Result<()> {
-        // Need to save a copy of harness body to restore
-        let harness_document = web_sys::window().unwrap().document().unwrap();
-        let harness_body = harness_document.body().expect("harness body");
-
-        let mut document = Document::default();
-        let factory = document.element_factory();
-        let editor = EditorHolder::new(factory.clone())?;
-        let editor_holder = EditorHolder(Rc::clone(&editor.0));
-        document.set_body(Body::new((editor, ()), factory.body()));
-        let editor: &mut Editor = &mut editor_holder.borrow_mut();
-
         const EMPTY_FUNCTION: &str = "(func\n\n)\n";
         const BLOCK_INSERTED_FUNCTION: &str = "(func\nblock\nend\n)\n";
+
+        let holder = get_editor_holder();
+        let mut editor = holder.borrow_mut();
+
         // Undo and redo preserves added block courtesy end
         {
-            set_contents(editor, &EMPTY_FUNCTION.lines().collect::<Vec<_>>());
-            assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
+            set_editor_content(&mut editor, EMPTY_FUNCTION);
 
             let (node, offset) = editor
                 .line(1)
@@ -1431,8 +1445,7 @@ mod browser_tests {
 
         // Undo and redo preserves deleted block courtesy end
         {
-            set_contents(editor, &BLOCK_INSERTED_FUNCTION.lines().collect::<Vec<_>>());
-            assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);
+            set_editor_content(&mut editor, BLOCK_INSERTED_FUNCTION);
 
             let (start_node, start_offset) = editor
                 .line(1)
@@ -1450,9 +1463,17 @@ mod browser_tests {
             editor.redo()?;
             assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
         }
+        Ok(())
+    }
 
-        // restore test harness body
-        harness_document.set_body(Some(&harness_body));
+    #[wasm_bindgen_test]
+    fn local_fractions() -> Result<()> {
+        let holder = get_editor_holder();
+        let mut editor = holder.borrow_mut();
+        set_editor_content(&mut editor, "(func\n(local f64)\n(local f64)\n)\n");
+
+        assert!(editor.image().is_fraction_at_pos(editor.line(1).id()));
+        assert!(editor.image().is_fraction_at_pos(editor.line(2).id()));
         Ok(())
     }
 }

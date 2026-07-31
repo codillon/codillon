@@ -496,6 +496,17 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> Default for Document
     }
 }
 
+#[cfg(all(test, target_arch = "wasm32"))]
+pub fn wasm_bindgen_test_harness_body() -> Option<ElementHandle<HtmlBodyElement>> {
+    Some(ElementHandle::new(
+        web_sys::window()?
+            .document()?
+            .body()?
+            .dyn_into::<HtmlBodyElement>()
+            .ok()?,
+    ))
+}
+
 #[derive(Clone)]
 pub struct ElementFactory(web_sys::Document);
 
