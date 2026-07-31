@@ -412,11 +412,13 @@ impl<T: AnyElement> ElementHandle<T> {
     }
 
     #[cfg(debug_assertions)]
-    pub fn assert_is_only_child(&self) {
+    pub fn assert_is_entire_body(&self) {
         self.with_node(
             |node| {
-                let parent = node.parent_node().expect("parent node");
-                assert_eq!(parent.child_nodes().length(), 1);
+                let doc = node.owner_document().unwrap();
+                let body = doc.body().unwrap();
+                assert_eq!(body.child_nodes().length(), 1);
+                assert!(body.first_child().unwrap().is_same_node(Some(node)));
             },
             TOKEN,
         );
@@ -495,16 +497,14 @@ impl<BodyType: ElementComponent<Element = HtmlBodyElement>> Default for Document
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]
-pub fn append_to_body(child: &impl WithNode) {
-    let body = web_sys::window()
-        .expect("window")
-        .document()
-        .expect("document")
-        .body()
-        .expect("body");
-    child
-        .with_node(|node| body.append_with_node_1(node), TOKEN)
-        .expect("append node");
+pub fn wasm_bindgen_test_harness_body() -> Option<ElementHandle<HtmlBodyElement>> {
+    Some(ElementHandle::new(
+        web_sys::window()?
+            .document()?
+            .body()?
+            .dyn_into::<HtmlBodyElement>()
+            .ok()?,
+    ))
 }
 
 #[derive(Clone)]

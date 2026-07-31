@@ -227,7 +227,9 @@ impl Editor {
         self.window.audit();
 
         if self.component.is_connected() {
-            self.component.elem().assert_is_only_child();
+            // the wasm-bindgen in-browser tests don't attach the Editor to the entire body
+            #[cfg(not(all(test, target_arch = "wasm32")))]
+            self.component.elem().assert_is_entire_body();
         }
     }
 
@@ -1384,42 +1386,34 @@ impl Editor {
 #[cfg(all(test, target_arch = "wasm32"))]
 mod browser_tests {
     use super::*;
+    use crate::jet::wasm_bindgen_test_harness_body;
     use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
     wasm_bindgen_test_configure!(run_in_browser);
 
-    struct TestEditor {
-        _container: DomStruct<(EditorHolder, ()), HtmlDivElement>,
-        editor: EditorHolder,
-    }
-
     thread_local! {
-        static TEST_EDITOR: TestEditor = TestEditor::new().expect("test editor");
+        static TEST_EDITOR: EditorHolder = make_test_editor();
     }
 
-    impl TestEditor {
-        fn new() -> Result<Self> {
-            let factory = Document::default().element_factory();
-            let editor = EditorHolder::new(factory.clone())?;
-            let handle = EditorHolder(Rc::clone(&editor.0));
-            let container = DomStruct::new((editor, ()), factory.div());
-            crate::jet::append_to_body(&container);
-            Ok(Self {
-                _container: container,
-                editor: handle,
-            })
-        }
+    fn make_test_editor() -> EditorHolder {
+        let editor = EditorHolder::new(Document::default().element_factory()).expect("editor");
+        let test_harness_body = wasm_bindgen_test_harness_body().expect("body");
+        test_harness_body.append_node(&editor);
+        std::mem::forget(test_harness_body); // don't delete body from the document
+        editor
     }
 
     fn set_editor_content(content: &str) -> EditorHolder {
         TEST_EDITOR.with(|test_editor| {
-            let holder = EditorHolder(Rc::clone(&test_editor.editor.0));
+            let holder = test_editor.0.borrow().holder();
             {
                 let editor: &mut Editor = &mut holder.borrow_mut();
                 let line_count = editor.text().len();
                 editor.text_mut().remove_range(0, line_count);
+                assert!(editor.buffer_as_text().is_empty());
                 for line in content.lines() {
                     editor.push_line(line);
                 }
+                editor.on_change().expect("well-formed contents");
             }
             holder
         })
