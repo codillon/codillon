@@ -1402,21 +1402,19 @@ mod browser_tests {
         editor
     }
 
-    fn set_editor_content(content: &str) -> EditorHolder {
-        TEST_EDITOR.with(|test_editor| {
-            let holder = test_editor.0.borrow().holder();
-            {
-                let editor: &mut Editor = &mut holder.borrow_mut();
-                let line_count = editor.text().len();
-                editor.text_mut().remove_range(0, line_count);
-                assert!(editor.buffer_as_text().is_empty());
-                for line in content.lines() {
-                    editor.push_line(line);
-                }
-                editor.on_change().expect("well-formed contents");
-            }
-            holder
-        })
+    fn get_editor_holder() -> EditorHolder {
+        TEST_EDITOR.with(|test_editor| test_editor.borrow_mut().holder())
+    }
+
+    fn set_editor_content(editor: &mut Editor, content: &str) {
+        let line_count = editor.text().len();
+        editor.text_mut().remove_range(0, line_count);
+        assert!(editor.buffer_as_text().is_empty());
+        for line in content.lines() {
+            editor.push_line(line);
+        }
+        assert_eq!(editor.buffer_as_text(), content);
+        editor.on_change().expect("usable contents");
     }
 
     #[wasm_bindgen_test]
@@ -1424,11 +1422,12 @@ mod browser_tests {
         const EMPTY_FUNCTION: &str = "(func\n\n)\n";
         const BLOCK_INSERTED_FUNCTION: &str = "(func\nblock\nend\n)\n";
 
+        let holder = get_editor_holder();
+        let mut editor = holder.borrow_mut();
+
         // Undo and redo preserves added block courtesy end
         {
-            let holder = set_editor_content(EMPTY_FUNCTION);
-            let editor: &mut Editor = &mut holder.borrow_mut();
-            assert_eq!(editor.buffer_as_text(), EMPTY_FUNCTION);
+            set_editor_content(&mut editor, EMPTY_FUNCTION);
 
             let (node, offset) = editor
                 .line(1)
@@ -1446,9 +1445,7 @@ mod browser_tests {
 
         // Undo and redo preserves deleted block courtesy end
         {
-            let holder = set_editor_content(BLOCK_INSERTED_FUNCTION);
-            let editor: &mut Editor = &mut holder.borrow_mut();
-            assert_eq!(editor.buffer_as_text(), BLOCK_INSERTED_FUNCTION);
+            set_editor_content(&mut editor, BLOCK_INSERTED_FUNCTION);
 
             let (start_node, start_offset) = editor
                 .line(1)
@@ -1471,12 +1468,12 @@ mod browser_tests {
 
     #[wasm_bindgen_test]
     fn local_fractions() -> Result<()> {
-        let holder = set_editor_content("(func\n(local f64)\n(local f64)\n)\n");
-        let editor: &mut Editor = &mut holder.borrow_mut();
-        editor.on_change()?;
+        let holder = get_editor_holder();
+        let mut editor = holder.borrow_mut();
+        set_editor_content(&mut editor, "(func\n(local f64)\n(local f64)\n)\n");
 
-        assert!(editor.image().check_fraction(editor.line(1).id()));
-        assert!(editor.image().check_fraction(editor.line(2).id()));
+        assert!(editor.image().is_fraction_at_pos(editor.line(1).id()));
+        assert!(editor.image().is_fraction_at_pos(editor.line(2).id()));
         Ok(())
     }
 }

@@ -599,11 +599,6 @@ impl DomImage {
         get_mut!(self.contents, fractions)
     }
 
-    #[cfg(all(test, target_arch = "wasm32"))]
-    pub fn check_fraction(&self, id: u32) -> bool {
-        self.fractions().get(&id).is_some()
-    }
-
     fn blocks(&self) -> &CodillonBlocks {
         get!(self.contents, blocks)
     }
@@ -1190,6 +1185,11 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
     pub fn remove_attribute(&mut self, name: &str);
     pub fn get_attribute(&self, name: &str) -> Option<&str>;
     }
+    }
+
+    #[cfg(all(test, target_arch = "wasm32"))]
+    pub fn is_fraction_at_pos(&self, id: u32) -> bool {
+        self.fractions().get(&id).is_some()
     }
 }
 
