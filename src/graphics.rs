@@ -1834,7 +1834,7 @@ impl RenderedConnection {
         let (line_mut, (mask, ())) = &mut self.path.get_mut();
         let mask_line_mut = &mut mask.get_mut().0;
 
-        if badness == 1.0 {
+        if badness > 0.95 {
             line_mut.set_attribute("stroke", ty_to_color(&src_ty.as_ref()));
             line_mut.set_attr_num("stroke-dasharray", "1");
         } else {
