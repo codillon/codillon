@@ -27,13 +27,13 @@ use std::{
 use thousands::Separable;
 use wasmparser::ValType;
 use web_sys::{
-    SvgDefsElement, SvgElement, SvgLinearGradientElement, SvgPathElement, SvgStopElement,
-    SvgTextElement, SvgUseElement, SvggElement, console::log_1,
+    SvgDefsElement, SvgElement, SvgLinearGradientElement, SvgMaskElement, SvgPathElement,
+    SvgStopElement, SvgTextElement, SvgUseElement, SvggElement, console::log_1,
 };
 
 const SYM_HW: f32 = 15.0;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct FractionInfo {
     pub line_no: usize,
     pub indent: u16,
@@ -114,10 +114,6 @@ pub fn indent_px(indent: u16) -> usize {
     (indent as usize) * INDENT_PX
 }
 
-thread_local! {
-    static NEXT_FRAME_ID: Cell<u32> = Default::default();
-}
-
 impl FrameLine {
     fn line(&mut self) -> &mut ElementHandle<SvgPathElement> {
         &mut self.elem.get_mut().0
@@ -146,9 +142,6 @@ impl FrameLine {
             hheight: Tween::Pre,
             w3: Tween::Pre,
         };
-
-        let id = NEXT_FRAME_ID.get();
-        NEXT_FRAME_ID.replace(id + 1);
 
         ret.line()
             .set_attribute("stroke-width", &format!("{WIDTH}px"));
@@ -337,9 +330,8 @@ impl FrameLine {
     }
 
     pub fn animate(&mut self, t: f64, animated_indent: Option<f64>) -> AnimationRequest {
-        if animated_indent != self.animated_indent {
-            self.animated_indent = animated_indent;
-        }
+        self.animated_indent = animated_indent;
+
         self.symbol_mut().animate(t);
         self.opacity.animate(t);
         self.x_left.animate(t);
@@ -365,6 +357,8 @@ struct Arrow {
     elem: ArrowElem,
     x: Tween,
     y: Tween,
+
+    line_idx: Option<usize>,
 }
 delegate_element_component!(Arrow, elem, SvggElement);
 
@@ -377,6 +371,7 @@ impl Arrow {
             ),
             x: Default::default(),
             y: Default::default(),
+            line_idx: None,
         };
         ret.target_elem().set_attribute("class", "arrow-target");
         ret
@@ -393,10 +388,12 @@ impl Arrow {
     fn goto(&mut self, smooth: bool, loc: Option<(usize, bool, usize)>) -> AnimationRequest {
         let Some((line_idx, below_line, indent)) = loc else {
             self.arrow_elem().remove_attribute("href");
+            self.line_idx = None;
             return AnimationRequest(false);
         };
 
         self.arrow_elem().set_attribute("href", "#arrow");
+        self.line_idx = Some(line_idx);
 
         let target_x = X_OFFSET_PX + indent * INDENT_PX - 4;
         let target_y = line_idx * LINE_SPACING
@@ -418,10 +415,21 @@ impl Arrow {
         AnimationRequest(false)
     }
 
-    fn animate(&mut self, t: f64) -> AnimationRequest {
-        self.x.animate(t);
-        self.y.animate(t);
-        let (x, y) = (self.x.value().unwrap(), self.y.value().unwrap());
+    fn animate(&mut self, t: f64, animated_indents: &HashMap<usize, f64>) -> AnimationRequest {
+        let animated_indent: Option<f64> = self
+            .line_idx
+            .and_then(|idx| animated_indents.get(&idx).copied());
+        if let Some(actual_indent) = animated_indent {
+            let target_x = BASE_X_OFFSET_PX as f64 + actual_indent - 4.0;
+            self.x.retarget(target_x);
+        }
+        if self.x.is_pending().0 {
+            self.x.animate(t);
+            self.y.animate(t);
+        }
+        let (Some(x), Some(y)) = (self.x.value(), self.y.value()) else {
+            return AnimationRequest(false);
+        };
         self.arrow_elem().set_attr_num("x", x);
         self.arrow_elem().set_attr_num("y", y);
         debug_assert_eq!(self.x.is_pending(), self.y.is_pending());
@@ -461,21 +469,30 @@ type CodillonSVG = DomStruct<
     SvgElement,
 >;
 
+type UnfurlMask = DomStruct<(ElementHandle<SvgPathElement>, ()), SvgMaskElement>;
+type PathUnfurl = DomStruct<(ElementHandle<SvgPathElement>, (UnfurlMask, ())), SvggElement>;
+
 struct RenderedConnection {
     connection: SlotConnection,
-    path: ElementHandle<SvgPathElement>,
+    path: PathUnfurl,
+    src_targets: FractionTargets,
+    dst_targets: FractionTargets,
+
+    reveal: Tween,
+    targeting_info: ConnectionTargetingInfo,
 }
 
-delegate_element_component!(RenderedConnection, path, SvgPathElement);
+delegate_element_component!(RenderedConnection, path, SvggElement);
 
 #[derive(Default)]
 struct PendingAnimations {
     frames: HashSet<u32>,
+    connections: HashSet<Coordinate>,
 }
 
 impl PendingAnimations {
     fn has_pending(&self) -> bool {
-        !self.frames.is_empty()
+        !self.frames.is_empty() || !self.connections.is_empty()
     }
 }
 
@@ -485,8 +502,10 @@ pub struct DomImage {
     width: u16,
     factory: ElementFactory,
     connection_dst2src: HashMap<Coordinate /* dst */, Coordinate /* src */>,
+    connection_interest: HashMap<u32 /* pos */, Vec<Coordinate> /* conn's attached */>,
     animations: PendingAnimations,
-    last_line_count: usize,
+    last_line_count_for_frames: usize,
+    last_line_count_for_connections: usize,
 }
 
 impl WithElement for DomImage {
@@ -503,11 +522,16 @@ impl Component for DomImage {
         let mut src_hit = HashSet::new();
         let mut dst_hit = HashSet::new();
         for (src, cx) in self.connections().iter() {
+            if cx.is_hiding() {
+                continue;
+            }
             let (the_src, the_dst) = cx.connection.is_connected().unwrap();
             assert_eq!(src, the_src);
             assert!(src_hit.insert(the_src.clone()));
             assert!(dst_hit.insert(the_dst.clone()));
             assert_eq!(self.connection_dst2src[the_dst], src.clone());
+            assert!(self.connection_interest[&the_src.position_id].contains(the_src));
+            assert!(self.connection_interest[&the_dst.position_id].contains(the_src));
         }
         for other_dst in self.connection_dst2src.keys() {
             assert!(dst_hit.contains(other_dst));
@@ -676,8 +700,10 @@ impl DomImage {
             width: 0,
             factory: factory.clone(),
             connection_dst2src: Default::default(),
+            connection_interest: Default::default(),
             animations: Default::default(),
-            last_line_count: Default::default(),
+            last_line_count_for_frames: Default::default(),
+            last_line_count_for_connections: Default::default(),
         };
 
         // The "unclosed" symbol looks like a ⊘ (Circled Division Slash)
@@ -957,8 +983,8 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         animated_indents: HashMap<usize, f64>,
         line_count: usize,
     ) {
-        let smooth = line_count == self.last_line_count;
-        self.last_line_count = line_count;
+        let smooth = line_count == self.last_line_count_for_frames;
+        self.last_line_count_for_frames = line_count;
 
         /* vanish frames that no longer exist */
         get_mut!(self.contents, blocks).for_each_mut(|id, block| {
@@ -976,7 +1002,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
                 }
             }
             for id in to_delete {
-                get_mut!(self.contents, blocks).remove(id, FrameLine::new(&self.factory));
+                get_mut!(self.contents, blocks).remove(&id, FrameLine::new(&self.factory));
             }
         }
 
@@ -989,7 +1015,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
                 get_mut!(self.contents, blocks).insert(id, FrameLine::new(&self.factory));
             }
 
-            let bl = &mut get_mut!(self.contents, blocks)[id];
+            let bl = &mut get_mut!(self.contents, blocks)[&id];
             let animated_indent = animated_indents.get(&info.start).copied();
             if bl.update(info, animated_indent, smooth).0 {
                 self.animations.frames.insert(id);
@@ -997,7 +1023,7 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         }
     }
 
-    pub fn animate_frames(&mut self, t: f64, animated_indents: HashMap<usize, f64>) {
+    pub fn animate_frames(&mut self, t: f64, animated_indents: &HashMap<usize, f64>) {
         get_mut!(self.contents, blocks).for_each_mut(|id, bl| {
             let animation_pending = if let Some(info) = &bl.info
                 && let Some(animated_indent) = animated_indents.get(&info.start)
@@ -1015,11 +1041,49 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         });
     }
 
+    pub fn animate_types(&mut self, t: f64, animated_indents: &HashMap<usize, f64>) {
+        let mut dirty_connection_ids: HashSet<Coordinate> = Default::default();
+        get_mut!(self.contents, fractions).for_each_mut(|id, fr| {
+            let info = fr.info.as_ref().unwrap();
+            if let Some(animated_indent) = animated_indents.get(&info.line_no) {
+                fr.animated_indent = Some(*animated_indent);
+            } else {
+                fr.animated_indent = None;
+            };
+
+            fr.draw();
+            if let Some(vec) = self.connection_interest.get(id) {
+                for src in vec {
+                    dirty_connection_ids.insert(src.clone());
+                }
+            }
+        });
+
+        let conns = get_mut!(self.contents, connections);
+        for src in dirty_connection_ids {
+            let _ = conns[&src].animate(t);
+            conns[&src].draw();
+        }
+    }
+
+    pub fn animate_connections(&mut self, t: f64) {
+        self.animations.connections.retain(|cx_src| {
+            let Some(cx) = get_mut!(self.contents, connections).get_mut(cx_src) else {
+                return false;
+            };
+            cx.animate(t).0
+        });
+    }
+
     pub fn has_pending_animation(&self) -> bool {
         self.animations.has_pending()
     }
 
-    pub fn set_types(&mut self, types: HashMap<u32, FractionInfo>, _smooth: bool) {
+    pub fn set_types(
+        &mut self,
+        types: HashMap<u32, FractionInfo>,
+        animated_indents: HashMap<usize, f64>,
+    ) {
         /* delete types that no longer exist */
         {
             let mut to_vanish: Vec<u32> = vec![];
@@ -1030,39 +1094,30 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
             }
             for id in to_vanish {
                 get_mut!(self.contents, fractions)
-                    .remove(id, OperatorFraction::new(&self.factory, 0, 0));
+                    .remove(&id, OperatorFraction::new(&self.factory));
             }
         }
 
         /* update existing types and add new ones */
-        for (
-            id,
-            FractionInfo {
-                line_no,
-                indent,
-                ty,
-            },
-        ) in types
-        {
-            self.make_height_at_least(line_no + 2);
-            self.make_width_at_least(indent);
+        for (id, info) in types {
+            self.make_height_at_least(info.line_no + 2);
+            self.make_width_at_least(info.indent);
 
             if self.fractions().get(&id).is_none() {
-                get_mut!(self.contents, fractions)
-                    .insert(id, OperatorFraction::new(&self.factory, line_no, indent));
+                get_mut!(self.contents, fractions).insert(id, OperatorFraction::new(&self.factory));
             }
 
-            get_mut!(self.contents, fractions)[id].draw(
-                &self.factory,
-                line_no,
-                indent,
-                ty.inputs,
-                ty.outputs,
-            );
+            let frac = &mut get_mut!(self.contents, fractions)[&id];
+            let animated_indent = animated_indents.get(&info.line_no).copied();
+
+            frac.update(&self.factory, info, animated_indent);
         }
     }
 
-    pub fn set_connections(&mut self, connections: &Vec<SlotConnection>) {
+    pub fn set_connections(&mut self, connections: &Vec<SlotConnection>, line_count: usize) {
+        let smooth = line_count == self.last_line_count_for_connections;
+        self.last_line_count_for_connections = line_count;
+
         /* rehome connections when possible */
         let cx_sources: HashSet<Coordinate> = connections
             .iter()
@@ -1080,59 +1135,74 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
                     .rehome(cur_src, src.clone())
                     .connection
                     .written = new_conn.written.clone();
-                self.connection_dst2src
-                    .insert(dst.clone(), src.clone())
-                    .unwrap();
+                self.connection_dst2src.remove(dst).unwrap();
             }
         }
 
-        /* delete connections that no longer exist */
+        /* vanish connections that no longer exist */
+        let (_, (conns, (fracs, _))) = self.contents.get_mut();
+        conns.for_each_mut(|src, cx| {
+            if !cx_sources.contains(src) && cx.hide(smooth, fracs).0 {
+                self.animations.connections.insert(src.clone());
+            }
+        });
+
+        /* delete connections whose vanishing animations have finished */
         {
-            let mut to_vanish: Vec<(Coordinate, Coordinate)> = vec![];
+            let mut to_delete = vec![];
             for (src, cx) in self.connections().iter() {
-                if !cx_sources.contains(src) {
-                    to_vanish.push((src.clone(), cx.connection.read.clone().unwrap()))
+                if cx.reveal.value() == Some(0.0) {
+                    to_delete.push(src.clone());
                 }
             }
-            for (src, dst) in to_vanish {
+
+            for src in to_delete {
                 get_mut!(self.contents, connections)
-                    .remove(src, RenderedConnection::new(&self.factory));
-                self.connection_dst2src.remove(&dst).unwrap();
+                    .remove(&src, RenderedConnection::new(&self.factory));
             }
         }
 
         /* add connections from given SlotConnections */
-        let mut dst_deletion_count: HashMap<Coordinate, i32> = HashMap::new();
         for new_conn in connections {
-            let Some((src, dst)) = new_conn.is_connected() else {
+            let Some((src, _dst)) = new_conn.is_connected() else {
                 continue;
             };
+
+            /* retarget current connections when possible (rehoming/re-sourcing happened above)*/
             let (_, (conns, (fracs, _))) = self.contents.get_mut();
 
             if let Some(cur_conn) = conns.get_mut(src) {
-                let (_cur_src, cur_dst) = cur_conn.connection.is_connected().unwrap();
-                debug_assert_eq!(_cur_src, src);
-                if cur_conn.connection != *new_conn {
-                    *dst_deletion_count.entry(cur_dst.clone()).or_insert(0) += 1;
-                    *dst_deletion_count.entry(dst.clone()).or_insert(0) -= 1;
+                if cur_conn.update(new_conn.clone(), smooth, fracs).0 {
+                    self.animations.connections.insert(src.clone());
                 }
-                self.connection_dst2src.insert(dst.clone(), src.clone());
-                cur_conn.update(new_conn.clone(), fracs);
             } else {
                 let mut cx = RenderedConnection::new(&self.factory);
-                cx.update(new_conn.clone(), self.fractions());
-                self.connection_dst2src.insert(dst.clone(), src.clone());
+                if cx.update(new_conn.clone(), smooth, self.fractions()).0 {
+                    self.animations.connections.insert(src.clone());
+                }
                 self.connections_mut().insert(src.clone(), cx);
-                *dst_deletion_count.entry(dst.clone()).or_insert(0) -= 1;
             }
         }
 
-        /* delete dst->src entries that no longer exist */
-        for (dst, delcount) in dst_deletion_count {
-            debug_assert!(delcount <= 1);
-            if delcount == 1 {
-                self.connection_dst2src.remove(&dst).unwrap();
+        /* recompute linkage */
+        self.connection_dst2src.clear();
+        self.connection_interest.clear();
+        for (_src, cx) in get!(self.contents, connections).iter() {
+            let Some((src, dst)) = cx.connection.is_connected() else {
+                continue;
+            };
+            debug_assert_eq!(_src, src);
+            if !cx.is_hiding() {
+                self.connection_dst2src.insert(dst.clone(), src.clone());
             }
+            self.connection_interest
+                .entry(src.position_id)
+                .or_default()
+                .push(src.clone());
+            self.connection_interest
+                .entry(dst.position_id)
+                .or_default()
+                .push(src.clone());
         }
     }
 
@@ -1142,11 +1212,11 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         is_input: bool,
         value: &Option<SlotContents>,
     ) {
-        let fraction = &mut self.fractions_mut()[location.position_id];
+        let fraction = &mut self.fractions_mut()[&location.position_id];
         let slot = if is_input {
             &mut fraction.inputs()[location.operand_num]
         } else {
-            let num_outputs = fraction.output_locations_scales_and_types.len();
+            let num_outputs = fraction.targets.output_locations_scales_and_types.len();
             let num_stranded = fraction.outputs().len() - num_outputs;
             &mut fraction.outputs()[num_stranded + location.operand_num]
         };
@@ -1171,8 +1241,12 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         self.arrow_mut().goto(smooth, loc)
     }
 
-    pub fn animate_arrow(&mut self, t: f64) -> AnimationRequest {
-        self.arrow_mut().animate(t)
+    pub fn animate_arrow(
+        &mut self,
+        t: f64,
+        animated_indents: &HashMap<usize, f64>,
+    ) -> AnimationRequest {
+        self.arrow_mut().animate(t, animated_indents)
     }
 
     pub fn scroll_to_arrow(&mut self) {
@@ -1202,18 +1276,20 @@ type Slot = DomStruct<(ElementHandle<SvgUseElement>, (AutoSizedNumber, ())), Svg
 type FractionVec = DomVec<Slot, SvggElement>;
 type SymbolsType = DomStruct<(FractionVec, (FractionVec, ())), SvggElement>;
 
-struct FractionCache {
-    input_types: Vec<SlotInfo>,
-    output_types: Vec<SlotInfo>,
+#[derive(Default, Clone)]
+struct FractionTargets {
+    target: Option<(f32, f32)>,
+    final_target: Option<(f32, f32)>,
+    input_locations_scales_and_types: Vec<(f32, f32, Option<ValType>)>,
+    output_locations_scales_and_types: Vec<(f32, f32, Option<ValType>)>,
 }
 
 struct OperatorFraction {
+    info: Option<FractionInfo>,
+    animated_indent: Option<f64>,
     symbols: SymbolsType,
-    cache: Option<FractionCache>,
-    line_no: usize,
-    target: (f32, f32),
-    input_locations_scales_and_types: Vec<(f32, f32, Option<ValType>)>,
-    output_locations_scales_and_types: Vec<(f32, f32, Option<ValType>)>,
+
+    targets: FractionTargets,
 }
 
 impl AutoSizedNumber {
@@ -1306,7 +1382,7 @@ impl Slot {
 }
 
 impl OperatorFraction {
-    fn new(factory: &ElementFactory, line_no: usize, indent: u16) -> Self {
+    fn new(factory: &ElementFactory) -> Self {
         let mut ret = Self {
             symbols: DomStruct::new(
                 (
@@ -1315,11 +1391,9 @@ impl OperatorFraction {
                 ),
                 factory.svg_g(),
             ),
-            cache: None,
-            line_no,
-            target: Self::compute_target(line_no, indent),
-            input_locations_scales_and_types: vec![],
-            output_locations_scales_and_types: vec![],
+            info: None,
+            animated_indent: None,
+            targets: Default::default(),
         };
         ret.symbols.set_attribute("class", "fraction");
 
@@ -1334,56 +1408,72 @@ impl OperatorFraction {
         &mut self.symbols.get_mut().1.0
     }
 
-    fn compute_target(line_no: usize, indent: u16) -> (f32, f32) {
-        let target_x =
-            X_OFFSET_PX + indent_px(indent) - indent_px(BLOCK_BOUNDARY_INDENT) / 2 - MARGIN / 2;
-        let target_y = line_no * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX;
-        (target_x as f32, target_y as f32)
-    }
-
-    fn goto(&mut self, line_no: usize, indent: u16) {
-        self.line_no = line_no;
-        self.target = Self::compute_target(line_no, indent);
+    fn draw(&mut self) {
+        let Self {
+            info: Some(info),
+            animated_indent,
+            targets,
+            ..
+        } = self
+        else {
+            panic!();
+        };
+        let target_x_final = (X_OFFSET_PX + indent_px(info.indent)
+            - indent_px(BLOCK_BOUNDARY_INDENT) / 2
+            - MARGIN / 2) as f64;
+        let target_x = if let Some(actual_indent) = animated_indent {
+            BASE_X_OFFSET_PX as f64 + *actual_indent
+                - (indent_px(BLOCK_BOUNDARY_INDENT) / 2 + MARGIN / 2) as f64
+        } else {
+            target_x_final
+        };
+        let target_y = info.line_no * LINE_SPACING + LINE_SPACING / 2 + LINE_OFFSET_PX;
+        targets.target = Some((target_x as f32, target_y as f32));
+        targets.final_target = Some((target_x_final as f32, target_y as f32));
 
         self.symbols.set_attribute(
             "transform",
-            &format!("translate({} {})", self.target.0, self.target.1),
+            &format!("translate({} {})", target_x, target_y),
         );
     }
 
-    fn draw(
+    fn update(
         &mut self,
         factory: &ElementFactory,
-        line_no: usize,
-        indent: u16,
-        input_types: Vec<SlotInfo>,
-        output_types: Vec<SlotInfo>,
+        info: FractionInfo,
+        animated_indent: Option<f64>,
     ) {
-        self.goto(line_no, indent);
+        self.create_symbols(factory, &info);
+        self.info = Some(info);
+        self.animated_indent = animated_indent;
+        self.draw();
+    }
 
-        if let Some(cache) = &self.cache
-            && cache.input_types == input_types
-            && cache.output_types == output_types
+    fn create_symbols(&mut self, factory: &ElementFactory, info: &FractionInfo) {
+        if let Some(current_info) = &self.info
+            && current_info.ty == info.ty
         {
             return;
         }
 
-        let in_len = input_types.len() as i32;
-        let out_len = output_types.len() as i32;
-        self.inputs().truncate(input_types.len());
-        while self.inputs().len() < input_types.len() {
+        let AnnotatedOperatorType { inputs, outputs } = &info.ty;
+
+        let in_len = inputs.len() as i32;
+        let out_len = outputs.len() as i32;
+        self.inputs().truncate(inputs.len());
+        while self.inputs().len() < inputs.len() {
             self.inputs().push(Slot::new_empty(factory));
         }
 
-        let num_stranded: usize = output_types.iter().map(|ty| !ty.used as usize).sum();
+        let num_stranded: usize = outputs.iter().map(|ty| !ty.used as usize).sum();
 
-        self.outputs().truncate(output_types.len() + num_stranded);
-        while self.outputs().len() < output_types.len() + num_stranded {
+        self.outputs().truncate(outputs.len() + num_stranded);
+        while self.outputs().len() < outputs.len() + num_stranded {
             self.outputs().push(Slot::new_empty(factory));
         }
 
-        self.input_locations_scales_and_types.clear();
-        self.output_locations_scales_and_types.clear();
+        self.targets.input_locations_scales_and_types.clear();
+        self.targets.output_locations_scales_and_types.clear();
 
         fn scale(len: i32) -> f32 {
             let max_width = (indent_px(BLOCK_BOUNDARY_INDENT) - 2 * MARGIN + 1) as f32;
@@ -1427,13 +1517,16 @@ impl OperatorFraction {
             )
         }
 
-        for (i, ty) in input_types.iter().enumerate() {
+        for (i, ty) in inputs.iter().enumerate() {
             let sym = &mut self.inputs()[i].get_mut().0;
             let x = left_edge_in + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &render(ty, true));
-            self.input_locations_scales_and_types
-                .push((in_scale * x, in_scale, ty.slot.ty()));
+            self.targets.input_locations_scales_and_types.push((
+                in_scale * x,
+                in_scale,
+                ty.slot.ty(),
+            ));
 
             let height = icon_height(ty.slot.ty()) - 1.25;
             let text = &mut self.inputs()[i].get_mut().1.0;
@@ -1443,12 +1536,9 @@ impl OperatorFraction {
             text.clear();
         }
 
-        let num_stranded = output_types
-            .iter()
-            .map(|ty| if ty.used { 0 } else { 1 })
-            .sum();
+        let num_stranded = outputs.iter().map(|ty| if ty.used { 0 } else { 1 }).sum();
 
-        for (i, ty) in output_types.iter().enumerate().take(num_stranded) {
+        for (i, ty) in outputs.iter().enumerate().take(num_stranded) {
             let sym = &mut self.outputs()[i].get_mut().0;
             let x = left_edge_out + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
@@ -1458,15 +1548,18 @@ impl OperatorFraction {
             text.clear();
         }
 
-        for (i, ty) in output_types.iter().enumerate() {
+        for (i, ty) in outputs.iter().enumerate() {
             let idx = num_stranded + i;
             let sym = &mut self.outputs()[idx].get_mut().0;
             let x = left_edge_out + 2.0 * SYM_HW * i as f32;
             sym.set_attr_num("x", x);
             sym.set_attribute("href", &render(ty, false));
 
-            self.output_locations_scales_and_types
-                .push((out_scale * x, out_scale, ty.slot.ty()));
+            self.targets.output_locations_scales_and_types.push((
+                out_scale * x,
+                out_scale,
+                ty.slot.ty(),
+            ));
 
             let height = icon_height(ty.slot.ty())
                 + match ty.slot.ty() {
@@ -1479,37 +1572,200 @@ impl OperatorFraction {
             text.set_fill("white");
             text.clear();
         }
-
-        self.cache = Some(FractionCache {
-            input_types,
-            output_types,
-        });
     }
 }
 
 delegate_element_component!(OperatorFraction, symbols, SvggElement);
 
-impl RenderedConnection {
-    fn new(factory: &ElementFactory) -> Self {
-        Self {
-            connection: SlotConnection::default(),
-            path: factory.svg_path(),
-        }
+thread_local! {
+    static NEXT_DOM_KEY: Cell<u32> = Default::default();
+}
+
+#[derive(Default)]
+struct ConnectionTargetingInfo {
+    write_x: Tween,
+    write_y: Tween,
+    read_x: Tween,
+    read_y: Tween,
+
+    read_scale: Tween,
+    first_control_height: Tween,
+    second_control_height: Tween,
+    second_control_x: Tween,
+
+    badness: Tween,
+}
+
+impl ConnectionTargetingInfo {
+    fn is_pending(&self) -> AnimationRequest {
+        self.write_x.is_pending()
     }
 
-    fn update(&mut self, connection: SlotConnection, locations: &Fractions) {
-        self.connection = connection;
-        let (src, dst) = self.connection.is_connected().unwrap();
-        let is_bad = self.connection.written.is_mismatch();
+    fn animate(&mut self, t: f64) {
+        self.write_x.animate(t);
+        self.write_y.animate(t);
+        self.read_x.animate(t);
+        self.read_y.animate(t);
 
-        let src_frac = &locations[src.position_id];
-        let dst_frac = &locations[dst.position_id];
-        let (write_base, read_base) = (src_frac.target, dst_frac.target);
-        let (x, write_scale, src_ty) = src_frac.output_locations_scales_and_types[src.operand_num];
+        self.read_scale.animate(t);
+        self.first_control_height.animate(t);
+        self.second_control_height.animate(t);
+        self.second_control_x.animate(t);
+
+        self.badness.animate(t);
+    }
+
+    fn goto(&mut self, smooth: bool, rhs: &Self) -> AnimationRequest {
+        // always move smoothly in x
+        self.write_x.goto(true, rhs.write_x.value().unwrap())
+            | self.write_y.goto(smooth, rhs.write_y.value().unwrap())
+            | self.read_x.goto(true, rhs.read_x.value().unwrap())
+            | self.read_y.goto(smooth, rhs.read_y.value().unwrap())
+            | self
+                .read_scale
+                .goto(smooth, rhs.read_scale.value().unwrap())
+            | self
+                .first_control_height
+                .goto(smooth, rhs.first_control_height.value().unwrap())
+            | self
+                .second_control_height
+                .goto(smooth, rhs.second_control_height.value().unwrap())
+            | self
+                .second_control_x
+                .goto(true, rhs.second_control_x.value().unwrap())
+            | self.badness.goto(smooth, rhs.badness.value().unwrap())
+    }
+}
+
+impl RenderedConnection {
+    fn new(factory: &ElementFactory) -> Self {
+        let mut ret = Self {
+            connection: SlotConnection::default(),
+            path: PathUnfurl::new(
+                (
+                    factory.svg_path(),
+                    (
+                        UnfurlMask::new((factory.svg_path(), ()), factory.svg_mask()),
+                        (),
+                    ),
+                ),
+                factory.svg_g(),
+            ),
+            reveal: Tween::Post(0.0),
+            src_targets: Default::default(),
+            dst_targets: Default::default(),
+            targeting_info: Default::default(),
+        };
+
+        ret.line_mut().set_attribute("fill", "none");
+        ret.mask_line_mut().set_attribute("stroke", "white");
+        ret.mask_line_mut().set_attribute("fill", "none");
+        ret.mask_line_mut().set_attr_num("pathLength", 1);
+
+        // link the mask to the primary path
+        let dom_key = NEXT_DOM_KEY.get();
+        NEXT_DOM_KEY.replace(dom_key + 1);
+
+        ret.line_mut()
+            .set_attribute("mask", &format!("url(#mask-{dom_key})"));
+        ret.mask_mut()
+            .set_attribute("id", &format!("mask-{dom_key}"));
+        ret.mask_mut().set_attribute("maskUnits", "userSpaceOnUse");
+        ret.mask_mut().set_attribute("width", "300%");
+        ret.mask_mut().set_attribute("height", "300%");
+        ret.mask_mut().set_attribute("x", "-100%");
+        ret.mask_mut().set_attribute("y", "-100%");
+
+        ret
+    }
+
+    fn update(
+        &mut self,
+        connection: SlotConnection,
+        smooth: bool,
+        locations: &Fractions,
+    ) -> AnimationRequest {
+        self.connection = connection;
+
+        let targeting_info_current = self.refresh_targets(locations, true);
+        let targeting_info_future = self.refresh_targets(locations, false);
+        let _ = self.targeting_info.goto(smooth, &targeting_info_current);
+        let _ = self.targeting_info.goto(smooth, &targeting_info_future);
+
+        self.reveal.approach(1.0);
+        self.draw();
+        self.has_pending_animation()
+    }
+
+    fn hide(&mut self, smooth: bool, locations: &Fractions) -> AnimationRequest {
+        let targeting_info = self.refresh_targets(locations, false);
+        self.targeting_info.goto(smooth, &targeting_info) | self.reveal.goto(smooth, 0.0)
+    }
+
+    fn line_mut(&mut self) -> &mut ElementHandle<SvgPathElement> {
+        &mut self.path.get_mut().0
+    }
+
+    fn mask_mut(&mut self) -> &mut UnfurlMask {
+        &mut self.path.get_mut().1.0
+    }
+
+    fn mask_line_mut(&mut self) -> &mut ElementHandle<SvgPathElement> {
+        &mut self.mask_mut().get_mut().0
+    }
+
+    fn animate(&mut self, t: f64) -> AnimationRequest {
+        self.targeting_info.animate(t);
+        self.reveal.animate(t);
+        self.draw();
+        self.has_pending_animation()
+    }
+
+    fn has_pending_animation(&self) -> AnimationRequest {
+        self.reveal.is_pending() | self.targeting_info.is_pending()
+    }
+
+    fn is_hiding(&self) -> bool {
+        self.reveal.target().unwrap() == 0.0
+    }
+
+    fn refresh_targets(&mut self, locations: &Fractions, current: bool) -> ConnectionTargetingInfo {
+        let (src, dst) = self.connection.is_connected().unwrap();
+
+        if let Some(src_frac) = locations.get(&src.position_id)
+            && src_frac.targets.target.is_some()
+            && src_frac.targets.output_locations_scales_and_types.len() > src.operand_num
+        {
+            self.src_targets = src_frac.targets.clone();
+        }
+
+        if let Some(dst_frac) = locations.get(&dst.position_id)
+            && dst_frac.targets.target.is_some()
+            && dst_frac.targets.input_locations_scales_and_types.len() > dst.operand_num
+        {
+            self.dst_targets = dst_frac.targets.clone();
+        }
+
+        let (write_base, read_base) = if current {
+            (
+                self.src_targets.target.unwrap(),
+                self.dst_targets.target.unwrap(),
+            )
+        } else {
+            (
+                self.src_targets.final_target.unwrap(),
+                self.dst_targets.final_target.unwrap(),
+            )
+        };
+
+        let (x, write_scale, _src_ty) =
+            self.src_targets.output_locations_scales_and_types[src.operand_num];
 
         let write_x = write_base.0 + x;
         let (relative_x, read_scale, dst_ty) =
-            dst_frac.input_locations_scales_and_types[dst.operand_num];
+            self.dst_targets.input_locations_scales_and_types[dst.operand_num];
+
+        let is_bad = self.connection.written.is_mismatch();
 
         let reader_offset = if is_bad {
             0.6 * icon_height(dst_ty)
@@ -1520,6 +1776,7 @@ impl RenderedConnection {
         let read_x = read_base.0 + relative_x;
         let write_y = write_base.1 + 10.0 * write_scale;
         let read_y = read_base.1 - reader_offset * read_scale;
+
         let first_control_height = write_y + 1.0;
         let slope = (write_x - read_x) / (write_y - read_y);
         let second_control_x = if is_bad { read_x + 1.5 * slope } else { read_x };
@@ -1529,24 +1786,77 @@ impl RenderedConnection {
             write_y
         };
 
-        if is_bad {
-            self.path
-                .set_attribute("stroke", ty_to_color(&src_ty.as_ref()));
-            self.path.set_attr_num("stroke-dasharray", "1");
-            self.path.set_attr_num("stroke-width", 1.0);
-        } else {
-            self.path
-                .set_attribute("stroke", &ty_to_muted(&src_ty.as_ref()));
-            self.path.remove_attribute("stroke-dasharray");
-            self.path.set_attr_num("stroke-width", 10.0 * read_scale);
+        ConnectionTargetingInfo {
+            write_x: Tween::Post(write_x as f64),
+            write_y: Tween::Post(write_y as f64),
+            read_x: Tween::Post(read_x as f64),
+            read_y: Tween::Post(read_y as f64),
+
+            read_scale: Tween::Post(read_scale as f64),
+            first_control_height: Tween::Post(first_control_height as f64),
+            second_control_height: Tween::Post(second_control_height as f64),
+            second_control_x: Tween::Post(second_control_x as f64),
+
+            badness: Tween::Post(is_bad as usize as f64),
         }
-        self.path.set_attribute("fill", "none");
-        self.path.set_attribute(
-            "d",
-            &format!(
-                "M {write_x} {write_y}
-C {write_x},{first_control_height} {second_control_x},{second_control_height}, {read_x},{read_y}"
-            ),
+    }
+
+    fn draw(&mut self) {
+        let ConnectionTargetingInfo {
+            write_x,
+            write_y,
+            read_x,
+            read_y,
+
+            read_scale,
+            first_control_height,
+            second_control_height,
+            second_control_x,
+
+            badness,
+        } = &self.targeting_info;
+
+        let reveal = self.reveal.value().unwrap();
+        let badness = badness.value().unwrap();
+        let read_scale = read_scale.value().unwrap();
+
+        let width = read_scale
+            * if self.is_hiding() {
+                10.0 * reveal
+            } else {
+                10.0
+            };
+        let width = badness * 1.0 + (1.0 - badness) * width;
+
+        let (src, _) = self.connection.is_connected().unwrap();
+        let (_, _, src_ty) = self.src_targets.output_locations_scales_and_types[src.operand_num];
+
+        let (line_mut, (mask, ())) = &mut self.path.get_mut();
+        let mask_line_mut = &mut mask.get_mut().0;
+
+        if badness > 0.95 {
+            line_mut.set_attribute("stroke", ty_to_color(&src_ty.as_ref()));
+            line_mut.set_attr_num("stroke-dasharray", "1");
+        } else {
+            line_mut.set_attribute("stroke", &ty_to_muted(&src_ty.as_ref()));
+            line_mut.remove_attribute("stroke-dasharray");
+        }
+
+        line_mut.set_attr_num("stroke-width", width);
+        mask_line_mut.set_attr_num("stroke-width", width);
+
+        let opacity = if self.reveal.target().unwrap() == 0.0 {
+            reveal
+        } else {
+            1.0
+        };
+        line_mut.set_attr_num("opacity", opacity);
+
+        let d = &format!(
+            "M {write_x} {write_y} C {write_x},{first_control_height} {second_control_x},{second_control_height}, {read_x},{read_y}"
         );
+        line_mut.set_attribute("d", d);
+        mask_line_mut.set_attribute("d", d);
+        mask_line_mut.set_attribute("stroke-dasharray", &format!("{} {}", reveal, 1.0 - reveal));
     }
 }

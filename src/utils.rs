@@ -2324,6 +2324,7 @@ impl BitOr for AnimationRequest {
 
 const ANIMATION_DURATION: f64 = 200.0; // milliseconds
 
+#[derive(Debug)]
 pub struct OngoingTween {
     origin: f64,
     target: f64,
@@ -2339,13 +2340,19 @@ impl OngoingTween {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub enum Tween {
     #[default]
     Pre,
     Armed(f64, f64), // origin, target
     Ongoing(OngoingTween),
     Post(f64), // target
+}
+
+impl std::fmt::Display for Tween {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.value().unwrap())
+    }
 }
 
 impl Tween {
@@ -2371,6 +2378,20 @@ impl Tween {
                 last_time: tween.last_time,
             }),
             Post(current) => Armed(*current, new_target),
+        }
+    }
+
+    pub fn retarget(&mut self, new_target: f64) {
+        use Tween::*;
+
+        *self = match self {
+            Pre => Post(new_target),
+            Armed(origin, _old_target) => Armed(*origin, new_target),
+            Ongoing(tween) => Ongoing(OngoingTween {
+                target: new_target,
+                ..*tween
+            }),
+            Post(_current) => Post(new_target),
         }
     }
 

@@ -192,12 +192,7 @@ impl FrameInfosMut for Editor {
     }
 
     fn set_frames(&mut self, frames: HashMap<u32, FrameInfo>) {
-        let animated_indents = self
-            .animations
-            .lines
-            .iter()
-            .map(|idx| (*idx, self.line(*idx).animated_indent().unwrap()))
-            .collect();
+        let animated_indents = self.animated_indents();
         let line_count = self.len();
         self.image_mut()
             .set_frames(frames, animated_indents, line_count);
@@ -875,28 +870,16 @@ impl Editor {
             self.update_live_info(RUN_LOG.with(|r| r.step_count()), None, false);
             debug_assert!(!self.animations.live_info.0);
         }
-        if self.animations.arrow.0 {
-            self.animations.arrow = self.image_mut().animate_arrow(t);
-        }
         self.animations.lines.retain(|idx| {
             get_mut!(self.component, textbox).inner_mut()[*idx]
                 .animate(t)
                 .0
         });
-        let animated_indents: HashMap<usize, f64> = self
-            .animations
-            .lines
-            .iter()
-            .map(|idx| {
-                (
-                    *idx,
-                    get!(self.component, textbox).inner()[*idx]
-                        .animated_indent()
-                        .unwrap(),
-                )
-            })
-            .collect();
-        self.image_mut().animate_frames(t, animated_indents);
+        let animated_indents = self.animated_indents();
+        self.image_mut().animate_frames(t, &animated_indents);
+        self.image_mut().animate_types(t, &animated_indents);
+        self.image_mut().animate_connections(t);
+        self.animations.arrow = self.image_mut().animate_arrow(t, &animated_indents);
         self.schedule_animation_if_needed();
     }
 
@@ -1092,8 +1075,11 @@ impl Editor {
             }
         }
 
-        self.image_mut().set_types(tagged_types, true);
-        get_mut!(self.component, image).set_connections(&self.slot_connections.connections);
+        let animated_indents = self.animated_indents();
+        let line_count = self.len();
+        get_mut!(self.component, image).set_types(tagged_types, animated_indents);
+        get_mut!(self.component, image)
+            .set_connections(&self.slot_connections.connections, line_count);
         Ok(())
     }
 
@@ -1245,6 +1231,14 @@ impl Editor {
         let prefix = self.line(line_idx).instr().get()[..pos.offset].to_string();
         self.autocomplete_mut().update(&prefix);
         Ok(())
+    }
+
+    fn animated_indents(&self) -> HashMap<usize, f64> {
+        self.animations
+            .lines
+            .iter()
+            .map(|idx| (*idx, self.line(*idx).animated_indent().unwrap()))
+            .collect()
     }
 
     fn new(factory: ElementFactory) -> Result<Self> {

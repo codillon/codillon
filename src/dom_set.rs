@@ -37,8 +37,8 @@ impl<Child: Component, Element: AnyElement, Key: Eq + Hash> DomSet<Child, Elemen
         }
     }
 
-    pub fn remove(&mut self, id: Key, default: Child) {
-        let idx = self.mapping.remove(&id).unwrap();
+    pub fn remove(&mut self, id: &Key, default: Child) {
+        let idx = self.mapping.remove(id).unwrap();
         self.contents[idx].assign(default);
         self.free_list.push_back(idx);
     }
@@ -86,21 +86,21 @@ impl<Child: Component, Element: AnyElement, Key: Eq + Hash> DomSet<Child, Elemen
     }
 }
 
-impl<Child: Component, Element: AnyElement, Key: Eq + Hash> Index<Key>
+impl<Child: Component, Element: AnyElement, Key: Eq + Hash> Index<&Key>
     for DomSet<Child, Element, Key>
 {
     type Output = Child;
 
-    fn index(&self, id: Key) -> &Child {
-        &self.contents[self.mapping[&id]]
+    fn index(&self, id: &Key) -> &Child {
+        &self.contents[self.mapping[id]]
     }
 }
 
-impl<Child: Component, Element: AnyElement, Key: Eq + Hash> IndexMut<Key>
+impl<Child: Component, Element: AnyElement, Key: Eq + Hash> IndexMut<&Key>
     for DomSet<Child, Element, Key>
 {
-    fn index_mut(&mut self, id: Key) -> &mut Child {
-        &mut self.contents[self.mapping[&id]]
+    fn index_mut(&mut self, id: &Key) -> &mut Child {
+        &mut self.contents[self.mapping[id]]
     }
 }
 
