@@ -1616,9 +1616,10 @@ impl ConnectionTargetingInfo {
     }
 
     fn goto(&mut self, smooth: bool, rhs: &Self) -> AnimationRequest {
-        self.write_x.goto(smooth, rhs.write_x.value().unwrap())
+        // always move smoothly in x
+        self.write_x.goto(true, rhs.write_x.value().unwrap())
             | self.write_y.goto(smooth, rhs.write_y.value().unwrap())
-            | self.read_x.goto(smooth, rhs.read_x.value().unwrap())
+            | self.read_x.goto(true, rhs.read_x.value().unwrap())
             | self.read_y.goto(smooth, rhs.read_y.value().unwrap())
             | self
                 .read_scale
@@ -1631,7 +1632,7 @@ impl ConnectionTargetingInfo {
                 .goto(smooth, rhs.second_control_height.value().unwrap())
             | self
                 .second_control_x
-                .goto(smooth, rhs.second_control_x.value().unwrap())
+                .goto(true, rhs.second_control_x.value().unwrap())
             | self.badness.goto(smooth, rhs.badness.value().unwrap())
     }
 }
