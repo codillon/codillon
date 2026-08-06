@@ -2553,7 +2553,7 @@ pub(crate) mod tests {
         //block instruction with params and results
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
-            blocks: vec![(SlotUse::new(2), SlotUse::new(6))],
+            blocks: vec![(2, SlotUse::new(2), SlotUse::new(6))],
             globals: vec![],
             funcs: vec![TypedFunction {
                 first_slot: SlotUse::new(0),
@@ -2634,7 +2634,7 @@ pub(crate) mod tests {
         //if else with params and results
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32)],
-            blocks: vec![(SlotUse::new(1), SlotUse::new(4))],
+            blocks: vec![(1, SlotUse::new(1), SlotUse::new(4))],
             globals: vec![],
             funcs: vec![TypedFunction {
                 first_slot: SlotUse::new(0),
@@ -2720,7 +2720,7 @@ pub(crate) mod tests {
         //loop with param and return
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
-            blocks: vec![(SlotUse::new(1), SlotUse::new(6))],
+            blocks: vec![(1, SlotUse::new(1), SlotUse::new(6))],
             globals: vec![],
             funcs: vec![TypedFunction {
                 first_slot: SlotUse::new(0),
@@ -2813,8 +2813,8 @@ pub(crate) mod tests {
         let output = TypedModule {
             slots: vec![os(I32), os(I32), os(I32), os(I32), os(I32), os(I32)],
             blocks: vec![
-                (SlotUse::new(2), SlotUse::new(5)),
-                (SlotUse::new(1), SlotUse::new(6)),
+                (1, SlotUse::new(1), SlotUse::new(6)),
+                (2, SlotUse::new(2), SlotUse::new(5)),
             ],
             globals: vec![],
             funcs: vec![TypedFunction {
@@ -2915,7 +2915,7 @@ pub(crate) mod tests {
         //empty block
         let output = TypedModule {
             slots: vec![],
-            blocks: vec![(SlotUse::new(0), SlotUse::new(0))],
+            blocks: vec![(0, SlotUse::new(0), SlotUse::new(0))],
             globals: vec![],
             funcs: vec![TypedFunction {
                 first_slot: SlotUse::new(0),
