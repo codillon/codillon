@@ -938,7 +938,7 @@ impl<'a> ValidModule<'a> {
         func_validator: &mut wasmparser::FuncValidator<wasmparser::ValidatorResources>,
         valid_func: &ValidFunction<'_>,
         slots: &mut Vec<Slot>,
-        blocks: &mut Vec<(SlotUse, SlotUse)>,
+        blocks: &mut Vec<(u32, SlotUse, SlotUse)>,
     ) -> Result<TypedFunction> {
         let mut ret = TypedFunction {
             first_slot: SlotUse::new(slots.len()),
@@ -960,6 +960,7 @@ impl<'a> ValidModule<'a> {
 
         let mut stack = SimulatedStack::default();
         let mut frame_stack = Vec::new();
+        let mut block_num = blocks.len();
 
         for op in &valid_func.operators {
             for pre in &op.inner.prepended {
@@ -970,7 +971,9 @@ impl<'a> ValidModule<'a> {
                 &op.inner.op,
                 Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. }
             ) {
-                frame_stack.push(slots.len());
+                blocks.push((op.position_id, SlotUse::new(slots.len()), SlotUse::new(0)));
+                frame_stack.push(block_num);
+                block_num += 1;
             }
 
             let operator_ty = stack.op(&op.inner.op, func_validator, slots, op.inner.untyped)?;
@@ -998,10 +1001,8 @@ impl<'a> ValidModule<'a> {
             }
 
             if op.inner.op == Operator::End && op.inner.info != OpInfo::FuncEnd {
-                blocks.push((
-                    SlotUse::new(frame_stack.pop().unwrap()),
-                    SlotUse::new(slots.len()),
-                ));
+                let block_num = frame_stack.pop().unwrap();
+                blocks[block_num].2 = SlotUse::new(slots.len());
             }
         }
 
@@ -1367,8 +1368,6 @@ impl<'a> ValidModule<'a> {
             f.instruction(&Call(step_function_idx));
         };
 
-        // XXX on function entry, should "enter frame" of the params and locals
-
         // Record values of globals (XXX not really necessary at start of every function, but, we don't have
         // our own "_start" function to do this in)
         for (global_idx, global) in types.globals.iter().enumerate() {
@@ -1680,7 +1679,7 @@ pub struct TypedFunction {
 #[derive(Debug, PartialEq, Eq)]
 pub struct TypedModule {
     pub slots: Vec<Slot>,
-    pub blocks: Vec<(SlotUse, SlotUse)>,
+    pub blocks: Vec<(u32, SlotUse, SlotUse)>,
     pub globals: Vec<SlotUse>,
     pub funcs: Vec<TypedFunction>,
 }
@@ -1734,7 +1733,7 @@ impl SlotConnection {
 pub struct SlotConnections {
     pub connections: Vec<SlotConnection>, // same index space as Slot #
     pub first_slot_of_func: Vec<SlotUse>, // indexed by "local" function idx (not including func imports)
-    pub blocks: Vec<(SlotUse, SlotUse)>,
+    pub blocks: Vec<(u32, SlotUse, SlotUse)>,
 }
 
 impl SlotConnections {

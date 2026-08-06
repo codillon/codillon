@@ -15,6 +15,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use arrayvec::ArrayVec;
+use bitvec::vec::BitVec;
 use js_sys::{Object, Reflect, WebAssembly::RuntimeError};
 use regex::Regex;
 use smallvec::SmallVec;
@@ -351,7 +352,8 @@ pub struct ExecutionState {
     pub slots: Vec<SmallVec<[Option<SlotContents>; 1]>>,
     pub status: ExecutionStatus,
     cur_func: Option<u32>,
-    call_stack: Vec<(u32, usize)>, // func_idx, height
+    call_stack: Vec<(u32, usize)>,    // func_idx, height
+    backwards_branches_taken: BitVec, // line_num of target
 }
 
 impl ExecutionState {
@@ -373,10 +375,16 @@ impl ExecutionState {
                 slot.clear();
             }
         }
+        self.backwards_branches_taken.resize(cx.blocks.len(), false);
+        self.backwards_branches_taken.fill(false);
     }
 
     pub fn slot_contents(&self, slot_idx: usize) -> Option<SlotContents> {
         *self.slots[slot_idx].last().unwrap()
+    }
+
+    pub fn backwards_branches_taken(&self) -> &BitVec {
+        &self.backwards_branches_taken
     }
 
     pub fn goto_step(
@@ -398,9 +406,11 @@ impl ExecutionState {
         }
         assert!(target < log.step_count());
         while self.next_step <= target {
+            let last_line_num =
+                log.with_completed_step(self.next_step.saturating_sub(1), |s| s.line_num);
             log.with_completed_step(self.next_step, |s| {
                 for op in &s.call_frame_ops {
-                    self.handle_call_frame_op(op, connections);
+                    self.handle_call_frame_op(op, connections, s.line_num <= last_line_num);
                 }
 
                 for (slot_idx, value) in &s.slot_assignments {
@@ -435,7 +445,12 @@ impl ExecutionState {
     // materializing a general call stack; we want to show the most useful "slot" values
     // at any given time.
 
-    fn handle_call_frame_op(&mut self, op: &CallFrameOp, connections: &SlotConnections) {
+    fn handle_call_frame_op(
+        &mut self,
+        op: &CallFrameOp,
+        connections: &SlotConnections,
+        backwards: bool,
+    ) {
         match op {
             // When re-entering a function: preserve the old slot values, but mark them "old" (grayed out).
             CallFrameOp::EnterFunc(func_idx) => {
@@ -493,11 +508,17 @@ impl ExecutionState {
             // on any kind of block, but wouldn't do anything useful): mark the previous
             // contents of the slots as "old".
             CallFrameOp::EnterBlock(block_idx) => {
-                let (lower, upper) = connections.blocks[*block_idx as usize];
+                let (_pos_id, lower, upper) = connections.blocks[*block_idx as usize];
                 for slot_idx in lower.usize()..upper.usize() {
                     self.slots[slot_idx]
                         .last_mut()
                         .map(|x| x.as_mut().map(|y| y.old = true));
+                }
+
+                let block_idx = *block_idx as usize;
+
+                if backwards {
+                    self.backwards_branches_taken.set(block_idx, true);
                 }
             }
         }

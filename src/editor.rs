@@ -344,6 +344,19 @@ impl Editor {
             }
         }
 
+        let mut loops_taken = HashSet::new();
+        for (block_idx, block) in self.slot_connections.blocks.iter().enumerate() {
+            if let Some(taken) = self
+                .execution_state
+                .backwards_branches_taken()
+                .get(block_idx)
+                && *taken
+            {
+                loops_taken.insert(2 * block.0);
+            }
+        }
+        get_mut!(self.component, image).set_loops_taken(&loops_taken);
+
         if step_count > 1
             && let ExecutionStatus {
                 line_num: Some(line_num),
