@@ -145,8 +145,7 @@ impl FrameLine {
             w3: Tween::Pre,
         };
 
-        ret.line()
-            .set_attribute("stroke-width", &format!("{WIDTH}px"));
+        ret.line().set_attr_num("stroke-width", WIDTH);
         ret.line().set_attribute("fill", "none");
 
         ret
@@ -307,17 +306,50 @@ impl FrameLine {
 
         let backup = Self::BACKUP;
 
-        let l1 = 12.0;
-        let l2 = l1 * 1.5;
+        let l1 = LINE_SPACING as f64 * 0.5;
+        let la = 10.0;
+        let l2 = 15.0;
+        let xfac = 0.6f64;
+        let yfac = (1.0 - xfac * xfac).sqrt();
+
+        let slope = (l1 * xfac) / (hheight - l1 * yfac);
+        let slope2 = (1.0 - slope * slope).sqrt();
+
+        // this shape is... way too complicated. But it looks nice!
         let d = if *loop_was_taken {
             &format!(
-                "M {x_right},{y_top} h -{width} c -{backup},0 -{backup},{dist1} -{backup},{hheight} 0,{l1} -{l2},{l1} -{l2},0 c 0,-{l1} {l2},-{l1} {l2},0 0,{dist2} 0,{hheight} {w3},{hheight} h {bwidth}"
+                "M {x_right},{y_top} h -{width} c {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} h {bwidth}",
+                -backup,
+                0,
+                -backup,
+                l1 * yfac,
+                -backup - l1 * xfac,
+                hheight, /* x */
+                -la * slope,
+                la * slope2,
+                -l2,
+                la,
+                -l2,
+                0, /* y */
+                0,
+                -la,
+                l2 - la * slope,
+                -la * slope2,
+                l2,
+                0, /* z */
+                l1 * xfac,
+                hheight - l1 * yfac,
+                l1 * xfac,
+                hheight,
+                backup + l1 * xfac,
+                hheight, /* omega */
             )
         } else {
             &format!(
                 "M {x_right},{y_top} h -{width} c -{backup},0 -{backup},{dist1} -{backup},{hheight} 0,{dist2} 0,{hheight} {w3},{hheight} h {bwidth}"
             )
         };
+
         elem.get_mut().0.set_attribute("d", d);
         elem.get_mut().0.set_attr_num("opacity", opacity);
 
