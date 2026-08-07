@@ -93,6 +93,7 @@ impl SymbolUse {
 }
 struct FrameLine {
     info: Option<FrameInfo>,
+    loop_was_taken: bool,
     animated_indent: Option<f64>,
     elem: DomLine,
     opacity: Tween,
@@ -130,6 +131,7 @@ impl FrameLine {
     fn new(factory: &ElementFactory) -> Self {
         let mut ret = Self {
             info: None,
+            loop_was_taken: false,
             animated_indent: None,
             elem: DomStruct::new(
                 (factory.svg_path(), (SymbolUse::new_symbol(factory), ())),
@@ -143,8 +145,7 @@ impl FrameLine {
             w3: Tween::Pre,
         };
 
-        ret.line()
-            .set_attribute("stroke-width", &format!("{WIDTH}px"));
+        ret.line().set_attr_num("stroke-width", WIDTH);
         ret.line().set_attribute("fill", "none");
 
         ret
@@ -254,6 +255,7 @@ impl FrameLine {
     fn draw(&mut self) -> AnimationRequest {
         let Self {
             info: Some(info),
+            loop_was_taken,
             animated_indent,
             elem,
             opacity,
@@ -304,9 +306,50 @@ impl FrameLine {
 
         let backup = Self::BACKUP;
 
-        let d = &format!(
-            "M {x_right},{y_top} h -{width} c -{backup},0 -{backup},{dist1} -{backup},{hheight} c 0,{dist2} 0,{hheight} {w3},{hheight} h {bwidth}"
-        );
+        let l1 = LINE_SPACING as f64 * 0.5;
+        let la = 10.0;
+        let l2 = 15.0;
+        let xfac = 0.6f64;
+        let yfac = (1.0 - xfac * xfac).sqrt();
+
+        let slope = (l1 * xfac) / (hheight - l1 * yfac);
+        let slope2 = (1.0 - slope * slope).sqrt();
+
+        // this shape is... way too complicated. But it looks nice!
+        let d = if *loop_was_taken {
+            &format!(
+                "M {x_right},{y_top} h -{width} c {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} {},{} h {bwidth}",
+                -backup,
+                0,
+                -backup,
+                l1 * yfac,
+                -backup - l1 * xfac,
+                hheight, /* x */
+                -la * slope,
+                la * slope2,
+                -l2,
+                la,
+                -l2,
+                0, /* y */
+                0,
+                -la,
+                l2 - la * slope,
+                -la * slope2,
+                l2,
+                0, /* z */
+                l1 * xfac,
+                hheight - l1 * yfac,
+                l1 * xfac,
+                hheight,
+                backup + l1 * xfac,
+                hheight, /* omega */
+            )
+        } else {
+            &format!(
+                "M {x_right},{y_top} h -{width} c -{backup},0 -{backup},{dist1} -{backup},{hheight} 0,{dist2} 0,{hheight} {w3},{hheight} h {bwidth}"
+            )
+        };
+
         elem.get_mut().0.set_attribute("d", d);
         elem.get_mut().0.set_attr_num("opacity", opacity);
 
@@ -974,6 +1017,16 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
                 ),
             );
         }
+    }
+
+    pub fn set_loops_taken(&mut self, loops_taken: &HashSet<u32>) {
+        get_mut!(self.contents, blocks).for_each_mut(|id, block| {
+            let taken = loops_taken.contains(id);
+            if taken != block.loop_was_taken {
+                block.loop_was_taken = taken;
+                let _ = block.draw();
+            }
+        });
     }
 
     pub fn set_frames(
