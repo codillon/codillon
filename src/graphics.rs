@@ -306,7 +306,7 @@ impl FrameLine {
 
         let backup = Self::BACKUP;
 
-        let l1 = LINE_SPACING as f64 * 0.5;
+        let l1 = (hheight * 0.5).min(LINE_SPACING as f64 * 0.5);
         let la = 10.0;
         let l2 = 15.0;
         let xfac = 0.6f64;
@@ -341,7 +341,7 @@ impl FrameLine {
                 hheight - l1 * yfac,
                 l1 * xfac,
                 hheight,
-                backup + l1 * xfac,
+                backup + (l1 * xfac) * bwidth_factor,
                 hheight, /* omega */
             )
         } else {
