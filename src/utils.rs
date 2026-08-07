@@ -809,7 +809,16 @@ impl SimulatedStack {
         #[cfg(debug_assertions)]
         let expect_unreachable = is_unreachable_op(op)
             || (validator.get_control_frame(0).unwrap().unreachable
-                && !matches!(op, Operator::End | Operator::Else));
+                && !matches!(
+                    op,
+                    Operator::End
+                        | Operator::Else
+                        | Operator::Block { .. }
+                        | Operator::Loop { .. }
+                        | Operator::If { .. }
+                ))
+            || (validator.get_control_frame(1).map(|f| f.unreachable) == Some(true)
+                && matches!(op, Operator::End));
 
         let pop_count = if is_unreachable_op(op) {
             accessible_operands
@@ -4294,6 +4303,17 @@ pub(crate) mod tests {
             editor.push_line("if");
             editor.push_line("unreachable");
             editor.push_line("else");
+            editor.push_line("end");
+            editor.push_line(")");
+            test_editor_flow(&mut editor)?;
+        }
+
+        {
+            // unreachable cleared by new frame
+            let mut editor = FakeTextBuffer::default();
+            editor.push_line("(func");
+            editor.push_line("return");
+            editor.push_line("block");
             editor.push_line("end");
             editor.push_line(")");
             test_editor_flow(&mut editor)?;
