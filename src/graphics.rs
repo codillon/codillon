@@ -1170,6 +1170,21 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
         let smooth = line_count == self.last_line_count_for_connections;
         self.last_line_count_for_connections = line_count;
 
+        /* delete connections whose vanishing animations have finished */
+        {
+            let mut to_delete = vec![];
+            for (src, cx) in self.connections().iter() {
+                if cx.reveal.value() == Some(0.0) {
+                    to_delete.push(src.clone());
+                }
+            }
+
+            for src in to_delete {
+                get_mut!(self.contents, connections)
+                    .remove(&src, RenderedConnection::new(&self.factory));
+            }
+        }
+
         /* rehome connections when possible */
         let cx_sources: HashSet<Coordinate> = connections
             .iter()
@@ -1198,21 +1213,6 @@ A 15,10 0 0 1 14.827,-8.484 15,10 0 0 1 0.003,-0 15,10 0 0 1 -14.826,-8.481 15,1
                 self.animations.connections.insert(src.clone());
             }
         });
-
-        /* delete connections whose vanishing animations have finished */
-        {
-            let mut to_delete = vec![];
-            for (src, cx) in self.connections().iter() {
-                if cx.reveal.value() == Some(0.0) {
-                    to_delete.push(src.clone());
-                }
-            }
-
-            for src in to_delete {
-                get_mut!(self.contents, connections)
-                    .remove(&src, RenderedConnection::new(&self.factory));
-            }
-        }
 
         /* add connections from given SlotConnections */
         for new_conn in connections {
